@@ -22,12 +22,47 @@ pub const ESCAPES: &[(u8, u8)] = &[
     (b'$', b'$'),
 ];
 
+/// The quote a string opens with, and so closes with. Only the double one is
+/// the language's. The single one is an error, but it scans as a whole string
+/// so that nothing after it goes wrong and the formatter can rewrite it.
+#[derive(Clone, Copy)]
+enum Quote {
+    Double,
+    Single,
+}
+
+impl Quote {
+    fn opened_by(ch: u8) -> Option<Quote> {
+        match ch {
+            b'"' => Some(Quote::Double),
+            b'\'' => Some(Quote::Single),
+            _ => None,
+        }
+    }
+
+    fn byte(self) -> u8 {
+        match self {
+            Quote::Double => b'"',
+            Quote::Single => b'\'',
+        }
+    }
+
+    /// The error for a string that doesn't end, where `in_double` is the one
+    /// a double-quoted string gets.
+    fn unclosed(self, in_double: ScanError) -> ScanError {
+        match self {
+            Quote::Double => in_double,
+            Quote::Single => ScanError::UnclosedSingleQuote,
+        }
+    }
+}
+
 /// One level of string-interpolation nesting. `brace_depth == 0` means the
 /// scanner is in the string body; `> 0` means it is inside `${ ... }` and
 /// counts unmatched `{` so a nested brace does not close the interpolation.
 #[derive(Clone, Copy)]
 struct InterpFrame {
-    quote: u8,
+    quote: Quote,
     brace_depth: u32,
     // Where the opening quote is, so a string left open at EOF is reported
     // there.
@@ -95,7 +130,7 @@ impl Scanner {
         !self.interp_stack.is_empty()
     }
 
-    fn enter_interp_string(&mut self, quote: u8, start_line: i32, start_column: i32) {
+    fn enter_interp_string(&mut self, quote: Quote, start_line: i32, start_column: i32) {
         self.interp_stack.push(InterpFrame {
             quote,
             brace_depth: 0,
@@ -104,8 +139,36 @@ impl Scanner {
         });
     }
 
-    fn exit_interp_string(&mut self) {
-        self.interp_stack.pop();
+    /// Leaves the interpolated string whose closing quote was just read.
+    fn close_interp_string(&mut self) {
+        if let Some(frame) = self.interp_stack.pop() {
+            self.string_closed(
+                frame.quote,
+                Span::point(frame.start_line, frame.start_column),
+            );
+        }
+    }
+
+    /// Reports a whole string that is in single quotes. This waits for the
+    /// closing quote, because a string that never closes has its own error,
+    /// and then puts the report ahead of those from inside the string.
+    fn string_closed(&mut self, quote: Quote, opened_at: Span) {
+        match quote {
+            Quote::Double => {}
+            Quote::Single => {
+                let opened = (opened_at.start_line, opened_at.start_column);
+                let inside = self
+                    .diagnostics
+                    .iter()
+                    .rev()
+                    .take_while(|d| (d.span.start_line, d.span.start_column) > opened)
+                    .count();
+                self.diagnostics.insert(
+                    self.diagnostics.len().saturating_sub(inside),
+                    Diagnostic::new(opened_at, ScanError::SingleQuotedString),
+                );
+            }
+        }
     }
 
     fn input_len(&self) -> i32 {
@@ -256,7 +319,7 @@ impl Scanner {
             while let Some(frame) = self.interp_stack.pop() {
                 self.error_at(
                     Span::point(frame.start_line, frame.start_column),
-                    ScanError::UnclosedInterpolation,
+                    frame.quote.unclosed(ScanError::UnclosedInterpolation),
                 );
             }
             return self.new_token(Kind::Eof);
@@ -311,13 +374,15 @@ impl Scanner {
             return self.scan_number();
         }
 
-        if is_quote(ch) {
+        if let Some(quote) = Quote::opened_by(ch) {
             // Build the literal body while watching for `$`. On `${` or
             // `$ident`, rewind to the opening quote and hand off to the interp
             // scanner, so a plain string is scanned once instead of twice.
             let start_pos = self.pos;
             let start_col = self.column;
             let start_line = self.line;
+            // The opening quote is one byte before the body.
+            let opened_at = Span::point(start_line, start_col.saturating_sub(1));
             let diag_len = self.diagnostics.len();
 
             let mut result: Vec<u8> = Vec::new();
@@ -325,12 +390,8 @@ impl Scanner {
                 let next = self.peek_char();
 
                 if next == 0 || next == b'\n' || next == b'\r' {
-                    // Anchor at the opening quote, one byte before the body:
-                    // the cursor sits at the line end or EOF.
-                    self.error_at(
-                        Span::point(start_line, start_col.saturating_sub(1)),
-                        ScanError::UnclosedString,
-                    );
+                    // Not the cursor, which sits at the line end or EOF.
+                    self.error_at(opened_at, quote.unclosed(ScanError::UnclosedString));
                     return self.new_token(Kind::Error(utf8(result).into()));
                 }
 
@@ -341,7 +402,7 @@ impl Scanner {
                         self.column = start_col;
                         self.line = start_line;
                         self.diagnostics.truncate(diag_len);
-                        self.enter_interp_string(ch, start_line, start_col.saturating_sub(1));
+                        self.enter_interp_string(quote, start_line, start_col.saturating_sub(1));
                         return self.new_token(Kind::InterpStringStart);
                     }
                 }
@@ -360,6 +421,7 @@ impl Scanner {
                     result.push(next);
                 }
             }
+            self.string_closed(quote, opened_at);
             return self.new_token(Kind::LiteralString(utf8(result).into()));
         }
 
@@ -712,7 +774,7 @@ impl Scanner {
         }
     }
 
-    fn scan_interp_string_content(&mut self, quote: u8) -> Token {
+    fn scan_interp_string_content(&mut self, quote: Quote) -> Token {
         self.token_start_column = self.column;
         self.token_start_line = self.line;
 
@@ -729,17 +791,17 @@ impl Scanner {
                     .last()
                     .map(|f| Span::point(f.start_line, f.start_column))
                     .unwrap_or_else(|| Span::point(self.line, self.column));
-                self.error_at(anchor, ScanError::UnclosedString);
-                self.exit_interp_string();
+                self.error_at(anchor, quote.unclosed(ScanError::UnclosedString));
+                self.interp_stack.pop();
                 return self.new_token(Kind::Error(utf8(result).into()));
             }
 
-            if ch == quote {
+            if ch == quote.byte() {
                 if !result.is_empty() {
                     return self.new_token(Kind::InterpStringPart(utf8(result).into()));
                 }
                 self.incr_pos();
-                self.exit_interp_string();
+                self.close_interp_string();
                 return self.new_token(Kind::InterpStringEnd);
             }
 
@@ -777,11 +839,6 @@ impl Scanner {
             }
         }
     }
-}
-
-#[inline]
-fn is_quote(c: u8) -> bool {
-    c == b'\'' || c == b'"'
 }
 
 fn is_radix_digit(ch: u8, radix: u32) -> bool {

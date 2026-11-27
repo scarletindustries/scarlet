@@ -7,13 +7,13 @@ fn require_positive(n Int, k fn(Int) String) String {
 	if n > 0 {
 		k(n)
 	} else {
-		'no'
+		"no"
 	}
 }
 
 fn describe(n Int) String {
 	n <- require_positive(n)
-	'got ${n}'
+	"got ${n}"
 }
 
 fn feed(n Int, k fn(Int) Int) Int {
@@ -41,14 +41,14 @@ fn discard_example() Int {
 }
 
 fn with_resource(name String, k fn(String) Nil) Nil {
-	println('acquire ${name}')
+	println("acquire ${name}")
 	k(name)
-	println('release ${name}')
+	println("release ${name}")
 }
 
 fn use_resource() Nil {
-	r <- with_resource('db')
-	println('use ${r}')
+	r <- with_resource("db")
+	println("use ${r}")
 }
 
 pub fn main() {
@@ -58,5 +58,5 @@ pub fn main() {
 	println(digits())
 	println(discard_example())
 	use_resource()
-	println('done')
+	println("done")
 }

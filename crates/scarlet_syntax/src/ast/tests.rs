@@ -18,7 +18,7 @@ fn statement_span_covers_all_kinds() {
                    pub fn g() { 1 }\n\
                    (a, b) = (1, 2)\n\
                    Some(x) = Some(1)\n\
-                   Nil = println('hi')\n";
+                   Nil = println(\"hi\")\n";
     let mut sc = scanner::new_scanner(src.to_string());
     let p = parser::new_parser(&mut sc);
     let r = p.parse_program();

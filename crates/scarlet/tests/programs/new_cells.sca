@@ -110,7 +110,7 @@ type List {
 // every field, and some fields taken, some shared and some the program's own.
 
 fn taken1(s String) R1 {
-	R1('${s}0')
+	R1("${s}0")
 }
 
 fn shared1(s String, t String) (R1, Int) {
@@ -123,21 +123,21 @@ fn same1(s String) R1 {
 }
 
 fn mixed1(s String) (R1, Int) {
-	r = R1('own')
+	r = R1("own")
 	(r, string::length(s))
 }
 
 fn over1(s String) fn(String) String {
-	c0 = '${s}0'
+	c0 = "${s}0"
 	fn(x) x + c0
 }
 
 fn changed1(r R1) R1 {
-	R1(..r, f0: 'changed')
+	R1(..r, f0: "changed")
 }
 
 fn taken2(s String) R2 {
-	R2('${s}0', '${s}1')
+	R2("${s}0", "${s}1")
 }
 
 fn shared2(s String, t String) (R2, Int) {
@@ -150,7 +150,7 @@ fn same2(s String) R2 {
 }
 
 fn mixed2(s String) (R2, Int) {
-	r = R2('own', s)
+	r = R2("own", s)
 	(r, string::length(s))
 }
 
@@ -161,7 +161,7 @@ fn turned2(r R2) R2 {
 }
 
 fn tuple2(s String) (String, Int) {
-	('${s}0', 1)
+	("${s}0", 1)
 }
 
 fn twice2(s String) (String, String) {
@@ -169,17 +169,17 @@ fn twice2(s String) (String, String) {
 }
 
 fn over2(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
+	c0 = "${s}0"
+	c1 = "${s}1"
 	fn(x) x + c0 + c1
 }
 
 fn changed2(r R2) R2 {
-	R2(..r, f1: 'changed')
+	R2(..r, f1: "changed")
 }
 
 fn taken3(s String) R3 {
-	R3('${s}0', '${s}1', '${s}2')
+	R3("${s}0", "${s}1", "${s}2")
 }
 
 fn shared3(s String, t String) (R3, Int) {
@@ -192,7 +192,7 @@ fn same3(s String) R3 {
 }
 
 fn mixed3(s String) (R3, Int) {
-	r = R3('own', s, 'new ${s}')
+	r = R3("own", s, "new ${s}")
 	(r, string::length(s))
 }
 
@@ -203,7 +203,7 @@ fn turned3(r R3) R3 {
 }
 
 fn tuple3(s String) (String, Int, String) {
-	('${s}0', 1, '${s}2')
+	("${s}0", 1, "${s}2")
 }
 
 fn twice3(s String) (String, String, String) {
@@ -211,18 +211,18 @@ fn twice3(s String) (String, String, String) {
 }
 
 fn over3(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
-	c2 = '${s}2'
+	c0 = "${s}0"
+	c1 = "${s}1"
+	c2 = "${s}2"
 	fn(x) x + c0 + c1 + c2
 }
 
 fn changed3(r R3) R3 {
-	R3(..r, f2: 'changed')
+	R3(..r, f2: "changed")
 }
 
 fn taken4(s String) R4 {
-	R4('${s}0', '${s}1', '${s}2', '${s}3')
+	R4("${s}0", "${s}1", "${s}2", "${s}3")
 }
 
 fn shared4(s String, t String) (R4, Int) {
@@ -235,7 +235,7 @@ fn same4(s String) R4 {
 }
 
 fn mixed4(s String) (R4, Int) {
-	r = R4('own', s, 'new ${s}', 'own')
+	r = R4("own", s, "new ${s}", "own")
 	(r, string::length(s))
 }
 
@@ -246,7 +246,7 @@ fn turned4(r R4) R4 {
 }
 
 fn tuple4(s String) (String, Int, String, Int) {
-	('${s}0', 1, '${s}2', 3)
+	("${s}0", 1, "${s}2", 3)
 }
 
 fn twice4(s String) (String, String, String, String) {
@@ -254,19 +254,19 @@ fn twice4(s String) (String, String, String, String) {
 }
 
 fn over4(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
-	c2 = '${s}2'
-	c3 = '${s}3'
+	c0 = "${s}0"
+	c1 = "${s}1"
+	c2 = "${s}2"
+	c3 = "${s}3"
 	fn(x) x + c0 + c1 + c2 + c3
 }
 
 fn changed4(r R4) R4 {
-	R4(..r, f3: 'changed')
+	R4(..r, f3: "changed")
 }
 
 fn taken5(s String) R5 {
-	R5('${s}0', '${s}1', '${s}2', '${s}3', '${s}4')
+	R5("${s}0", "${s}1", "${s}2", "${s}3", "${s}4")
 }
 
 fn shared5(s String, t String) (R5, Int) {
@@ -279,7 +279,7 @@ fn same5(s String) R5 {
 }
 
 fn mixed5(s String) (R5, Int) {
-	r = R5('own', s, 'new ${s}', 'own', s)
+	r = R5("own", s, "new ${s}", "own", s)
 	(r, string::length(s))
 }
 
@@ -290,7 +290,7 @@ fn turned5(r R5) R5 {
 }
 
 fn tuple5(s String) (String, Int, String, Int, String) {
-	('${s}0', 1, '${s}2', 3, '${s}4')
+	("${s}0", 1, "${s}2", 3, "${s}4")
 }
 
 fn twice5(s String) (String, String, String, String, String) {
@@ -298,20 +298,20 @@ fn twice5(s String) (String, String, String, String, String) {
 }
 
 fn over5(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
-	c2 = '${s}2'
-	c3 = '${s}3'
-	c4 = '${s}4'
+	c0 = "${s}0"
+	c1 = "${s}1"
+	c2 = "${s}2"
+	c3 = "${s}3"
+	c4 = "${s}4"
 	fn(x) x + c0 + c1 + c2 + c3 + c4
 }
 
 fn changed5(r R5) R5 {
-	R5(..r, f4: 'changed')
+	R5(..r, f4: "changed")
 }
 
 fn taken6(s String) R6 {
-	R6('${s}0', '${s}1', '${s}2', '${s}3', '${s}4', '${s}5')
+	R6("${s}0", "${s}1", "${s}2", "${s}3", "${s}4", "${s}5")
 }
 
 fn shared6(s String, t String) (R6, Int) {
@@ -324,7 +324,7 @@ fn same6(s String) R6 {
 }
 
 fn mixed6(s String) (R6, Int) {
-	r = R6('own', s, 'new ${s}', 'own', s, 'new ${s}')
+	r = R6("own", s, "new ${s}", "own", s, "new ${s}")
 	(r, string::length(s))
 }
 
@@ -335,7 +335,7 @@ fn turned6(r R6) R6 {
 }
 
 fn tuple6(s String) (String, Int, String, Int, String, Int) {
-	('${s}0', 1, '${s}2', 3, '${s}4', 5)
+	("${s}0", 1, "${s}2", 3, "${s}4", 5)
 }
 
 fn twice6(s String) (String, String, String, String, String, String) {
@@ -343,21 +343,21 @@ fn twice6(s String) (String, String, String, String, String, String) {
 }
 
 fn over6(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
-	c2 = '${s}2'
-	c3 = '${s}3'
-	c4 = '${s}4'
-	c5 = '${s}5'
+	c0 = "${s}0"
+	c1 = "${s}1"
+	c2 = "${s}2"
+	c3 = "${s}3"
+	c4 = "${s}4"
+	c5 = "${s}5"
 	fn(x) x + c0 + c1 + c2 + c3 + c4 + c5
 }
 
 fn changed6(r R6) R6 {
-	R6(..r, f5: 'changed')
+	R6(..r, f5: "changed")
 }
 
 fn taken7(s String) R7 {
-	R7('${s}0', '${s}1', '${s}2', '${s}3', '${s}4', '${s}5', '${s}6')
+	R7("${s}0", "${s}1", "${s}2", "${s}3", "${s}4", "${s}5", "${s}6")
 }
 
 fn shared7(s String, t String) (R7, Int) {
@@ -370,7 +370,7 @@ fn same7(s String) R7 {
 }
 
 fn mixed7(s String) (R7, Int) {
-	r = R7('own', s, 'new ${s}', 'own', s, 'new ${s}', 'own')
+	r = R7("own", s, "new ${s}", "own", s, "new ${s}", "own")
 	(r, string::length(s))
 }
 
@@ -381,7 +381,7 @@ fn turned7(r R7) R7 {
 }
 
 fn tuple7(s String) (String, Int, String, Int, String, Int, String) {
-	('${s}0', 1, '${s}2', 3, '${s}4', 5, '${s}6')
+	("${s}0", 1, "${s}2", 3, "${s}4", 5, "${s}6")
 }
 
 fn twice7(s String) (String, String, String, String, String, String, String) {
@@ -389,22 +389,22 @@ fn twice7(s String) (String, String, String, String, String, String, String) {
 }
 
 fn over7(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
-	c2 = '${s}2'
-	c3 = '${s}3'
-	c4 = '${s}4'
-	c5 = '${s}5'
-	c6 = '${s}6'
+	c0 = "${s}0"
+	c1 = "${s}1"
+	c2 = "${s}2"
+	c3 = "${s}3"
+	c4 = "${s}4"
+	c5 = "${s}5"
+	c6 = "${s}6"
 	fn(x) x + c0 + c1 + c2 + c3 + c4 + c5 + c6
 }
 
 fn changed7(r R7) R7 {
-	R7(..r, f6: 'changed')
+	R7(..r, f6: "changed")
 }
 
 fn taken8(s String) R8 {
-	R8('${s}0', '${s}1', '${s}2', '${s}3', '${s}4', '${s}5', '${s}6', '${s}7')
+	R8("${s}0", "${s}1", "${s}2", "${s}3", "${s}4", "${s}5", "${s}6", "${s}7")
 }
 
 fn shared8(s String, t String) (R8, Int) {
@@ -417,7 +417,7 @@ fn same8(s String) R8 {
 }
 
 fn mixed8(s String) (R8, Int) {
-	r = R8('own', s, 'new ${s}', 'own', s, 'new ${s}', 'own', s)
+	r = R8("own", s, "new ${s}", "own", s, "new ${s}", "own", s)
 	(r, string::length(s))
 }
 
@@ -428,7 +428,7 @@ fn turned8(r R8) R8 {
 }
 
 fn tuple8(s String) (String, Int, String, Int, String, Int, String, Int) {
-	('${s}0', 1, '${s}2', 3, '${s}4', 5, '${s}6', 7)
+	("${s}0", 1, "${s}2", 3, "${s}4", 5, "${s}6", 7)
 }
 
 fn twice8(s String) (String, String, String, String, String, String, String, String) {
@@ -436,23 +436,23 @@ fn twice8(s String) (String, String, String, String, String, String, String, Str
 }
 
 fn over8(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
-	c2 = '${s}2'
-	c3 = '${s}3'
-	c4 = '${s}4'
-	c5 = '${s}5'
-	c6 = '${s}6'
-	c7 = '${s}7'
+	c0 = "${s}0"
+	c1 = "${s}1"
+	c2 = "${s}2"
+	c3 = "${s}3"
+	c4 = "${s}4"
+	c5 = "${s}5"
+	c6 = "${s}6"
+	c7 = "${s}7"
 	fn(x) x + c0 + c1 + c2 + c3 + c4 + c5 + c6 + c7
 }
 
 fn changed8(r R8) R8 {
-	R8(..r, f7: 'changed')
+	R8(..r, f7: "changed")
 }
 
 fn taken9(s String) R9 {
-	R9('${s}0', '${s}1', '${s}2', '${s}3', '${s}4', '${s}5', '${s}6', '${s}7', '${s}8')
+	R9("${s}0", "${s}1", "${s}2", "${s}3", "${s}4", "${s}5", "${s}6", "${s}7", "${s}8")
 }
 
 fn shared9(s String, t String) (R9, Int) {
@@ -465,7 +465,7 @@ fn same9(s String) R9 {
 }
 
 fn mixed9(s String) (R9, Int) {
-	r = R9('own', s, 'new ${s}', 'own', s, 'new ${s}', 'own', s, 'new ${s}')
+	r = R9("own", s, "new ${s}", "own", s, "new ${s}", "own", s, "new ${s}")
 	(r, string::length(s))
 }
 
@@ -476,7 +476,7 @@ fn turned9(r R9) R9 {
 }
 
 fn tuple9(s String) (String, Int, String, Int, String, Int, String, Int, String) {
-	('${s}0', 1, '${s}2', 3, '${s}4', 5, '${s}6', 7, '${s}8')
+	("${s}0", 1, "${s}2", 3, "${s}4", 5, "${s}6", 7, "${s}8")
 }
 
 fn twice9(s String) (String, String, String, String, String, String, String, String, String) {
@@ -484,44 +484,44 @@ fn twice9(s String) (String, String, String, String, String, String, String, Str
 }
 
 fn over9(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
-	c2 = '${s}2'
-	c3 = '${s}3'
-	c4 = '${s}4'
-	c5 = '${s}5'
-	c6 = '${s}6'
-	c7 = '${s}7'
-	c8 = '${s}8'
+	c0 = "${s}0"
+	c1 = "${s}1"
+	c2 = "${s}2"
+	c3 = "${s}3"
+	c4 = "${s}4"
+	c5 = "${s}5"
+	c6 = "${s}6"
+	c7 = "${s}7"
+	c8 = "${s}8"
 	fn(x) x + c0 + c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8
 }
 
 fn changed9(r R9) R9 {
-	R9(..r, f8: 'changed')
+	R9(..r, f8: "changed")
 }
 
 fn taken20(s String) R20 {
 	R20(
-		'${s}0',
-		'${s}1',
-		'${s}2',
-		'${s}3',
-		'${s}4',
-		'${s}5',
-		'${s}6',
-		'${s}7',
-		'${s}8',
-		'${s}9',
-		'${s}10',
-		'${s}11',
-		'${s}12',
-		'${s}13',
-		'${s}14',
-		'${s}15',
-		'${s}16',
-		'${s}17',
-		'${s}18',
-		'${s}19',
+		"${s}0",
+		"${s}1",
+		"${s}2",
+		"${s}3",
+		"${s}4",
+		"${s}5",
+		"${s}6",
+		"${s}7",
+		"${s}8",
+		"${s}9",
+		"${s}10",
+		"${s}11",
+		"${s}12",
+		"${s}13",
+		"${s}14",
+		"${s}15",
+		"${s}16",
+		"${s}17",
+		"${s}18",
+		"${s}19",
 	)
 }
 
@@ -536,25 +536,25 @@ fn same20(s String) R20 {
 
 fn mixed20(s String) (R20, Int) {
 	r = R20(
-		'own',
+		"own",
 		s,
-		'new ${s}',
-		'own',
+		"new ${s}",
+		"own",
 		s,
-		'new ${s}',
-		'own',
+		"new ${s}",
+		"own",
 		s,
-		'new ${s}',
-		'own',
+		"new ${s}",
+		"own",
 		s,
-		'new ${s}',
-		'own',
+		"new ${s}",
+		"own",
 		s,
-		'new ${s}',
-		'own',
+		"new ${s}",
+		"own",
 		s,
-		'new ${s}',
-		'own',
+		"new ${s}",
+		"own",
 		s,
 	)
 	(r, string::length(s))
@@ -634,25 +634,25 @@ fn tuple20(
 	Int,
 ) {
 	(
-		'${s}0',
+		"${s}0",
 		1,
-		'${s}2',
+		"${s}2",
 		3,
-		'${s}4',
+		"${s}4",
 		5,
-		'${s}6',
+		"${s}6",
 		7,
-		'${s}8',
+		"${s}8",
 		9,
-		'${s}10',
+		"${s}10",
 		11,
-		'${s}12',
+		"${s}12",
 		13,
-		'${s}14',
+		"${s}14",
 		15,
-		'${s}16',
+		"${s}16",
 		17,
-		'${s}18',
+		"${s}18",
 		19,
 	)
 }
@@ -685,26 +685,26 @@ fn twice20(
 }
 
 fn over20(s String) fn(String) String {
-	c0 = '${s}0'
-	c1 = '${s}1'
-	c2 = '${s}2'
-	c3 = '${s}3'
-	c4 = '${s}4'
-	c5 = '${s}5'
-	c6 = '${s}6'
-	c7 = '${s}7'
-	c8 = '${s}8'
-	c9 = '${s}9'
-	c10 = '${s}10'
-	c11 = '${s}11'
-	c12 = '${s}12'
-	c13 = '${s}13'
-	c14 = '${s}14'
-	c15 = '${s}15'
-	c16 = '${s}16'
-	c17 = '${s}17'
-	c18 = '${s}18'
-	c19 = '${s}19'
+	c0 = "${s}0"
+	c1 = "${s}1"
+	c2 = "${s}2"
+	c3 = "${s}3"
+	c4 = "${s}4"
+	c5 = "${s}5"
+	c6 = "${s}6"
+	c7 = "${s}7"
+	c8 = "${s}8"
+	c9 = "${s}9"
+	c10 = "${s}10"
+	c11 = "${s}11"
+	c12 = "${s}12"
+	c13 = "${s}13"
+	c14 = "${s}14"
+	c15 = "${s}15"
+	c16 = "${s}16"
+	c17 = "${s}17"
+	c18 = "${s}18"
+	c19 = "${s}19"
 	fn(x) x +
 		c0 +
 		c1 +
@@ -729,7 +729,7 @@ fn over20(s String) fn(String) String {
 }
 
 fn changed20(r R20) R20 {
-	R20(..r, f19: 'changed')
+	R20(..r, f19: "changed")
 }
 
 fn tree(n Int) Tree {
@@ -751,7 +751,7 @@ fn grown(n Int, acc List) List {
 	if n == 0 {
 		acc
 	} else {
-		grown(n - 1, Cons('${n}', acc))
+		grown(n - 1, Cons("${n}", acc))
 	}
 }
 
@@ -767,7 +767,7 @@ fn spin(n Int, acc Int) Int {
 	if n == 0 {
 		acc
 	} else {
-		r = R3('${n}', 'b', 'c')
+		r = R3("${n}", "b", "c")
 		spin(n - 1, acc + string::length(r.f0))
 	}
 }
@@ -782,135 +782,135 @@ fn chain(n Int, f fn(Int) Int) fn(Int) Int {
 }
 
 pub fn main() {
-	println(taken1('t'))
-	println(shared1('a', 'bb'))
-	println(same1('s'))
-	println(mixed1('m'))
-	println(changed1(taken1('u')))
-	kept1 = taken1('k')
+	println(taken1("t"))
+	println(shared1("a", "bb"))
+	println(same1("s"))
+	println(mixed1("m"))
+	println(changed1(taken1("u")))
+	kept1 = taken1("k")
 	println(changed1(kept1))
 	println(kept1)
-	println(over1('c')('x'))
-	println(taken2('t'))
-	println(shared2('a', 'bb'))
-	println(same2('s'))
-	println(mixed2('m'))
-	println(changed2(taken2('u')))
-	kept2 = taken2('k')
+	println(over1("c")("x"))
+	println(taken2("t"))
+	println(shared2("a", "bb"))
+	println(same2("s"))
+	println(mixed2("m"))
+	println(changed2(taken2("u")))
+	kept2 = taken2("k")
 	println(changed2(kept2))
 	println(kept2)
-	println(turned2(taken2('v')))
+	println(turned2(taken2("v")))
 	println(turned2(kept2))
-	println(tuple2('t'))
-	println(twice2('w') == twice2('w'))
-	println(over2('c')('x'))
-	println(taken3('t'))
-	println(shared3('a', 'bb'))
-	println(same3('s'))
-	println(mixed3('m'))
-	println(changed3(taken3('u')))
-	kept3 = taken3('k')
+	println(tuple2("t"))
+	println(twice2("w") == twice2("w"))
+	println(over2("c")("x"))
+	println(taken3("t"))
+	println(shared3("a", "bb"))
+	println(same3("s"))
+	println(mixed3("m"))
+	println(changed3(taken3("u")))
+	kept3 = taken3("k")
 	println(changed3(kept3))
 	println(kept3)
-	println(turned3(taken3('v')))
+	println(turned3(taken3("v")))
 	println(turned3(kept3))
-	println(tuple3('t'))
-	println(twice3('w') == twice3('w'))
-	println(over3('c')('x'))
-	println(taken4('t'))
-	println(shared4('a', 'bb'))
-	println(same4('s'))
-	println(mixed4('m'))
-	println(changed4(taken4('u')))
-	kept4 = taken4('k')
+	println(tuple3("t"))
+	println(twice3("w") == twice3("w"))
+	println(over3("c")("x"))
+	println(taken4("t"))
+	println(shared4("a", "bb"))
+	println(same4("s"))
+	println(mixed4("m"))
+	println(changed4(taken4("u")))
+	kept4 = taken4("k")
 	println(changed4(kept4))
 	println(kept4)
-	println(turned4(taken4('v')))
+	println(turned4(taken4("v")))
 	println(turned4(kept4))
-	println(tuple4('t'))
-	println(twice4('w') == twice4('w'))
-	println(over4('c')('x'))
-	println(taken5('t'))
-	println(shared5('a', 'bb'))
-	println(same5('s'))
-	println(mixed5('m'))
-	println(changed5(taken5('u')))
-	kept5 = taken5('k')
+	println(tuple4("t"))
+	println(twice4("w") == twice4("w"))
+	println(over4("c")("x"))
+	println(taken5("t"))
+	println(shared5("a", "bb"))
+	println(same5("s"))
+	println(mixed5("m"))
+	println(changed5(taken5("u")))
+	kept5 = taken5("k")
 	println(changed5(kept5))
 	println(kept5)
-	println(turned5(taken5('v')))
+	println(turned5(taken5("v")))
 	println(turned5(kept5))
-	println(tuple5('t'))
-	println(twice5('w') == twice5('w'))
-	println(over5('c')('x'))
-	println(taken6('t'))
-	println(shared6('a', 'bb'))
-	println(same6('s'))
-	println(mixed6('m'))
-	println(changed6(taken6('u')))
-	kept6 = taken6('k')
+	println(tuple5("t"))
+	println(twice5("w") == twice5("w"))
+	println(over5("c")("x"))
+	println(taken6("t"))
+	println(shared6("a", "bb"))
+	println(same6("s"))
+	println(mixed6("m"))
+	println(changed6(taken6("u")))
+	kept6 = taken6("k")
 	println(changed6(kept6))
 	println(kept6)
-	println(turned6(taken6('v')))
+	println(turned6(taken6("v")))
 	println(turned6(kept6))
-	println(tuple6('t'))
-	println(twice6('w') == twice6('w'))
-	println(over6('c')('x'))
-	println(taken7('t'))
-	println(shared7('a', 'bb'))
-	println(same7('s'))
-	println(mixed7('m'))
-	println(changed7(taken7('u')))
-	kept7 = taken7('k')
+	println(tuple6("t"))
+	println(twice6("w") == twice6("w"))
+	println(over6("c")("x"))
+	println(taken7("t"))
+	println(shared7("a", "bb"))
+	println(same7("s"))
+	println(mixed7("m"))
+	println(changed7(taken7("u")))
+	kept7 = taken7("k")
 	println(changed7(kept7))
 	println(kept7)
-	println(turned7(taken7('v')))
+	println(turned7(taken7("v")))
 	println(turned7(kept7))
-	println(tuple7('t'))
-	println(twice7('w') == twice7('w'))
-	println(over7('c')('x'))
-	println(taken8('t'))
-	println(shared8('a', 'bb'))
-	println(same8('s'))
-	println(mixed8('m'))
-	println(changed8(taken8('u')))
-	kept8 = taken8('k')
+	println(tuple7("t"))
+	println(twice7("w") == twice7("w"))
+	println(over7("c")("x"))
+	println(taken8("t"))
+	println(shared8("a", "bb"))
+	println(same8("s"))
+	println(mixed8("m"))
+	println(changed8(taken8("u")))
+	kept8 = taken8("k")
 	println(changed8(kept8))
 	println(kept8)
-	println(turned8(taken8('v')))
+	println(turned8(taken8("v")))
 	println(turned8(kept8))
-	println(tuple8('t'))
-	println(twice8('w') == twice8('w'))
-	println(over8('c')('x'))
-	println(taken9('t'))
-	println(shared9('a', 'bb'))
-	println(same9('s'))
-	println(mixed9('m'))
-	println(changed9(taken9('u')))
-	kept9 = taken9('k')
+	println(tuple8("t"))
+	println(twice8("w") == twice8("w"))
+	println(over8("c")("x"))
+	println(taken9("t"))
+	println(shared9("a", "bb"))
+	println(same9("s"))
+	println(mixed9("m"))
+	println(changed9(taken9("u")))
+	kept9 = taken9("k")
 	println(changed9(kept9))
 	println(kept9)
-	println(turned9(taken9('v')))
+	println(turned9(taken9("v")))
 	println(turned9(kept9))
-	println(tuple9('t'))
-	println(twice9('w') == twice9('w'))
-	println(over9('c')('x'))
-	println(taken20('t'))
-	println(shared20('a', 'bb'))
-	println(same20('s'))
-	println(mixed20('m'))
-	println(changed20(taken20('u')))
-	kept20 = taken20('k')
+	println(tuple9("t"))
+	println(twice9("w") == twice9("w"))
+	println(over9("c")("x"))
+	println(taken20("t"))
+	println(shared20("a", "bb"))
+	println(same20("s"))
+	println(mixed20("m"))
+	println(changed20(taken20("u")))
+	kept20 = taken20("k")
 	println(changed20(kept20))
 	println(kept20)
-	println(turned20(taken20('v')))
+	println(turned20(taken20("v")))
 	println(turned20(kept20))
-	println(tuple20('t'))
-	println(twice20('w') == twice20('w'))
-	println(over20('c')('x'))
+	println(tuple20("t"))
+	println(twice20("w") == twice20("w"))
+	println(over20("c")("x"))
 	println(sum(tree(5)))
 	println(length(grown(60, End), 0))
 	println(spin(60, 0))
 	println(chain(12, fn(x) x)(1))
-	println(array::map([1, 2, 3], fn(n) (n, R2('${n}', 'z'))))
+	println(array::map([1, 2, 3], fn(n) (n, R2("${n}", "z"))))
 }

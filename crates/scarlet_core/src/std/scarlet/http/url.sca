@@ -45,17 +45,17 @@ pub type UrlError {
 	UnclosedIpv6
 }
 
-const SCHEME_SEP = <<'://'>>
-const SLASH = <<'/'>>
-const QUESTION = <<'?'>>
-const HASH = <<'#'>>
-const COLON = <<':'>>
-const AT = <<'@'>>
-const LBRACKET = <<'['>>
-const RBRACKET = <<']'>>
-const HTTP = <<'http'>>
-const HTTPS = <<'https'>>
-const ROOT = <<'/'>>
+const SCHEME_SEP = <<"://">>
+const SLASH = <<"/">>
+const QUESTION = <<"?">>
+const HASH = <<"#">>
+const COLON = <<":">>
+const AT = <<"@">>
+const LBRACKET = <<"[">>
+const RBRACKET = <<"]">>
+const HTTP = <<"http">>
+const HTTPS = <<"https">>
+const ROOT = <<"/">>
 const EMPTY = <<>>
 
 // The port a scheme uses when the URL doesn't say.

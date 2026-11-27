@@ -19,7 +19,7 @@ The typechecker already knows every one of these facts. It can't typecheck `u.id
 
 **The stopgap fix (`8e5d5c7`) proved the point by bringing the same kind of bug back.** It passed types along in a `HashMap<Span, Ty>`. A `Span` is `{start_line, start_column, end_line, end_column}`, with no file, no offset and no identity. That had two confirmed effects:
 
-1. The REPL scanned each entry separately and replayed the parsed nodes, so every retained entry's spans restarted at line 1. `const a = 'x' + 'y'` then `const b = 100 + 200` collide on `(1,11)-(1,20)`; last write wins; `specialize_binop` picks `AddInt`; the VM runs an integer add over two heap strings. Release printed `0`, debug tripped `as_int_typed`'s `debug_assert`. `d9a1add` fixed it by replaying the *source* instead. That removed the only thing making duplicate spans at the time, but not the chance of them.
+1. The REPL scanned each entry separately and replayed the parsed nodes, so every retained entry's spans restarted at line 1. `const a = "x" + "y"` then `const b = 100 + 200` collide on `(1,11)-(1,20)`; last write wins; `specialize_binop` picks `AddInt`; the VM runs an integer add over two heap strings. Release printed `0`, debug tripped `as_int_typed`'s `debug_assert`. `d9a1add` fixed it by replaying the *source* instead. That removed the only thing making duplicate spans at the time, but not the chance of them.
 2. The justification comment claims "a body's walk writes every span in it immediately before that body is lowered." That's true for `fn` bodies and **false for the module toplevel**. `analyse_module` walks the whole toplevel, and then `lower_body("__main__")` reads every span back, so all the writes come before all the reads. Nothing made duplicate toplevel spans then, but an `--eval` prelude, an LSP scratch buffer or a harness that joins programs together would have, silently.
 
 The bug is a side table keyed on something that isn't an identity. If `TypedExpr` carries `ty` as a **field**, the table and its key both go.
@@ -191,7 +191,7 @@ println(pick([1, 2, 3]))  // 111
 ```scarlet
 // field access on an inferred match binding — was a lower panic
 type User { User(id Int name String) }
-fn f() Int { match Some(User(7, 'Scarlet')) { None -> 0  Some(u) -> u.id } }
+fn f() Int { match Some(User(7, "Scarlet")) { None -> 0  Some(u) -> u.id } }
 println(f())              // 7
 ```
 

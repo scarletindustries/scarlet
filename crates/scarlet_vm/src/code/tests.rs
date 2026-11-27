@@ -24,9 +24,9 @@ pub(super) const SHAPES: &str = "import scarlet/map\n\
         }\n\
         fn name(n Int) String {\n\
         \tmatch n {\n\
-        \t\t0 -> 'none'\n\
-        \t\t1 -> 'one'\n\
-        \t\t_ -> if n < 0 { 'fewer' } else { 'more' }\n\
+        \t\t0 -> \"none\"\n\
+        \t\t1 -> \"one\"\n\
+        \t\t_ -> if n < 0 { \"fewer\" } else { \"more\" }\n\
         \t}\n\
         }\n\
         type S {\n\tA\n\tB(n Int)\n\tC\n\tD(n Int, m Int)\n}\n\
@@ -40,11 +40,11 @@ pub(super) const SHAPES: &str = "import scarlet/map\n\
         }\n\
         fn digit(n Int) String {\n\
         \tmatch n {\n\
-        \t\t0 | 2 -> 'even'\n\
-        \t\t1 -> 'one'\n\
-        \t\t3 -> 'three'\n\
-        \t\t1000000 -> 'many'\n\
-        \t\t_ -> 'other'\n\
+        \t\t0 | 2 -> \"even\"\n\
+        \t\t1 -> \"one\"\n\
+        \t\t3 -> \"three\"\n\
+        \t\t1000000 -> \"many\"\n\
+        \t\t_ -> \"other\"\n\
         \t}\n\
         }\n\
         fn none(xs Array(Int), n Int) Array(Int) {\n\
@@ -390,7 +390,7 @@ fn a_function_that_does_not_load_is_one_instruction() {
 /// try in the tables.
 #[test]
 fn a_string_is_in_the_table_once() {
-    let texts: Vec<String> = (0..300).map(|i| format!("'s{i}'")).collect();
+    let texts: Vec<String> = (0..300).map(|i| format!(r#""s{i}""#)).collect();
     let src = format!(
         "fn f() Array(String) {{ [{}] }}\npub fn main() {{ println(f()) }}\n",
         texts.join(", ")

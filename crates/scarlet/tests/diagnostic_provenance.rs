@@ -117,10 +117,10 @@ fn a_diagnostic_renders_the_text_its_check_read() {
 /// The entry's own errors show its code, like every other module's.
 #[test]
 fn the_entrys_errors_show_its_code() {
-    let src = "pub fn main() {\n\tx Int = 'not an int'\n\tprintln(x)\n}\n";
+    let src = "pub fn main() {\n\tx Int = \"not an int\"\n\tprintln(x)\n}\n";
     let out = common::run_source("check", src).combined();
     assert!(
-        out.contains("x Int = 'not an int'"),
+        out.contains(r#"x Int = "not an int""#),
         "no snippet under the entry's error:\n{out}"
     );
 }

@@ -25,7 +25,7 @@ import scarlet/int
 import scarlet/result
 
 fn ok(b Bool) String {
-	if b { 'PASS' } else { 'FAIL' }
+	if b { "PASS" } else { "FAIL" }
 }
 
 fn nibble(v Int) Int {
@@ -64,7 +64,7 @@ fn hex(b Binary) String {
 fn digest(r Result(Binary, Nil)) String {
 	match r {
 		Ok(b) -> hex(b)
-		Err(Nil) -> 'no digest'
+		Err(Nil) -> "no digest"
 	}
 }
 
@@ -78,14 +78,14 @@ fn digest_size(r Result(Binary, Nil)) Int {
 fn text(b Binary) String {
 	match binary::to_string(b) {
 		Ok(s) -> s
-		Err(Nil) -> 'NOT-UTF8'
+		Err(Nil) -> "NOT-UTF8"
 	}
 }
 
 fn head(b Binary, n Int) String {
 	match binary::slice_bytes(b, 0, n) {
 		Ok(h) -> text(h)
-		Err(Nil) -> 'SHORT'
+		Err(Nil) -> "SHORT"
 	}
 }
 
@@ -98,7 +98,7 @@ fn repeat(n Int, unit Binary, acc Binary) Binary {
 }
 
 fn a_times(n Int) Binary {
-	repeat(n, <<'a'>>, <<>>)
+	repeat(n, <<"a">>, <<>>)
 }
 
 // Every byte 0..255, which is the only input that exercises all 64 base64
@@ -135,32 +135,32 @@ pub fn main() {
 	// The whole point of these seven is the padding: they walk every input
 	// length mod 3, so a `=` miscounted by one shows up immediately.
 
-	println('b64 empty: "${text(base64::encode(<<>>))}"')
-	println('b64 f: ${text(base64::encode(<<'f'>>))}')
-	println('b64 fo: ${text(base64::encode(<<'fo'>>))}')
-	println('b64 foo: ${text(base64::encode(<<'foo'>>))}')
-	println('b64 foob: ${text(base64::encode(<<'foob'>>))}')
-	println('b64 fooba: ${text(base64::encode(<<'fooba'>>))}')
-	println('b64 foobar: ${text(base64::encode(<<'foobar'>>))}')
+	println("b64 empty: \"${text(base64::encode(<<>>))}\"")
+	println("b64 f: ${text(base64::encode(<<"f">>))}")
+	println("b64 fo: ${text(base64::encode(<<"fo">>))}")
+	println("b64 foo: ${text(base64::encode(<<"foo">>))}")
+	println("b64 foob: ${text(base64::encode(<<"foob">>))}")
+	println("b64 fooba: ${text(base64::encode(<<"fooba">>))}")
+	println("b64 foobar: ${text(base64::encode(<<"foobar">>))}")
 
 	// --- base64: decode is encode's inverse -----------------------------------
 
 	println(
-		'b64 roundtrip: ${ok(
+		"b64 roundtrip: ${ok(
 			round_trips(<<>>),
 		)} ${ok(
-			round_trips(<<'f'>>),
+			round_trips(<<"f">>),
 		)} ${ok(
-			round_trips(<<'fo'>>),
-		)} ${ok(round_trips(<<'foo'>>))} ${ok(round_trips(<<'foobar'>>))}',
+			round_trips(<<"fo">>),
+		)} ${ok(round_trips(<<"foo">>))} ${ok(round_trips(<<"foobar">>))}",
 	)
 
 	// All 256 byte values, so every digit of the alphabet is produced and read
 	// back. `+` and `/` (digits 62 and 63) appear nowhere in the ASCII vectors
 	// above — this is the only case that covers them.
 	every = all_bytes(0, <<>>)
-	println('b64 all256 roundtrip: ${ok(round_trips(every))}')
-	println('b64 all256 head: ${head(base64::encode(every), 44)}')
+	println("b64 all256 roundtrip: ${ok(round_trips(every))}")
+	println("b64 all256 head: ${head(base64::encode(every), 44)}")
 
 	// --- base64: decode is strict ---------------------------------------------
 	//
@@ -170,38 +170,38 @@ pub fn main() {
 
 	// Each vector is a multiple of four EXCEPT the length one, so every other
 	// line here fails on the rule it names rather than on the length check.
-	println('b64 reject bad length: ${ok(rejects(<<'Zm9vYmE'>>))}')
-	println('b64 reject non-alphabet: ${ok(rejects(<<'Zm9v*mFy'>>))}')
-	// Both interior-pad groups are individually well-formed — 'Zg==' is 'f' and
-	// 'Zm8=' is 'fo' — so position is the ONLY thing wrong with them. A vector
+	println("b64 reject bad length: ${ok(rejects(<<"Zm9vYmE">>))}")
+	println("b64 reject non-alphabet: ${ok(rejects(<<"Zm9v*mFy">>))}")
+	// Both interior-pad groups are individually well-formed — "Zg==" is "f" and
+	// "Zm8=" is "fo" — so position is the ONLY thing wrong with them. A vector
 	// whose fill bits were also wrong would be rejected by the fill rule and
 	// would witness nothing about position; that mistake was made here first
 	// and caught by planting the missing check.
-	println('b64 reject interior pad 2: ${ok(rejects(<<'Zg==YmFy'>>))}')
-	println('b64 reject interior pad 1: ${ok(rejects(<<'Zm8=YmFy'>>))}')
+	println("b64 reject interior pad 2: ${ok(rejects(<<"Zg==YmFy">>))}")
+	println("b64 reject interior pad 1: ${ok(rejects(<<"Zm8=YmFy">>))}")
 	// Whitespace is not skipped: MIME base64 arrives wrapped at 76 columns and
 	// the caller, not this decoder, decides to strip it.
-	println('b64 reject whitespace: ${ok(rejects(<<'Zm9v YmF'>>))}')
-	// 'Zg==' is the SOLE encoding of 'f'. 'Zh==' differs only in the four fill
+	println("b64 reject whitespace: ${ok(rejects(<<"Zm9v YmF">>))}")
+	// "Zg==" is the SOLE encoding of "f". "Zh==" differs only in the four fill
 	// bits, so a decoder that ignores them maps two inputs to one output.
 	println(
-		'b64 reject nonzero fill 2: ${ok(
-			rejects(<<'Zh=='>>),
-		)} ${ok(decodes_to(<<'Zg=='>>, <<'f'>>))}',
+		"b64 reject nonzero fill 2: ${ok(
+			rejects(<<"Zh==">>),
+		)} ${ok(decodes_to(<<"Zg==">>, <<"f">>))}",
 	)
-	// Same for the two fill bits of a one-pad group: 'Zm8=' is 'fo', 'Zm9=' is
+	// Same for the two fill bits of a one-pad group: "Zm8=" is "fo", "Zm9=" is
 	// the same two bytes with a bit set that nothing reads.
 	println(
-		'b64 reject nonzero fill 1: ${ok(
-			rejects(<<'Zm9='>>),
-		)} ${ok(decodes_to(<<'Zm8='>>, <<'fo'>>))}',
+		"b64 reject nonzero fill 1: ${ok(
+			rejects(<<"Zm9=">>),
+		)} ${ok(decodes_to(<<"Zm8=">>, <<"fo">>))}",
 	)
 
 	// --- sha1: published vectors ----------------------------------------------
 
-	println('sha1 empty: ${digest(crypto::sha1(<<>>))}')
-	println('sha1 abc: ${digest(crypto::sha1(<<'abc'>>))}')
-	println('sha1 fox: ${digest(crypto::sha1(<<'The quick brown fox jumps over the lazy dog'>>))}')
+	println("sha1 empty: ${digest(crypto::sha1(<<>>))}")
+	println("sha1 abc: ${digest(crypto::sha1(<<"abc">>))}")
+	println("sha1 fox: ${digest(crypto::sha1(<<"The quick brown fox jumps over the lazy dog">>))}")
 
 	// --- sha1: the padding boundary -------------------------------------------
 	//
@@ -211,24 +211,24 @@ pub fn main() {
 	// straddle it one block further out, where an off-by-one in the block walk
 	// rather than in the padding would show.
 
-	println('sha1 55a: ${digest(crypto::sha1(a_times(55)))}')
-	println('sha1 56a: ${digest(crypto::sha1(a_times(56)))}')
-	println('sha1 57a: ${digest(crypto::sha1(a_times(57)))}')
-	println('sha1 63a: ${digest(crypto::sha1(a_times(63)))}')
-	println('sha1 64a: ${digest(crypto::sha1(a_times(64)))}')
-	println('sha1 65a: ${digest(crypto::sha1(a_times(65)))}')
-	println('sha1 119a: ${digest(crypto::sha1(a_times(119)))}')
-	println('sha1 120a: ${digest(crypto::sha1(a_times(120)))}')
+	println("sha1 55a: ${digest(crypto::sha1(a_times(55)))}")
+	println("sha1 56a: ${digest(crypto::sha1(a_times(56)))}")
+	println("sha1 57a: ${digest(crypto::sha1(a_times(57)))}")
+	println("sha1 63a: ${digest(crypto::sha1(a_times(63)))}")
+	println("sha1 64a: ${digest(crypto::sha1(a_times(64)))}")
+	println("sha1 65a: ${digest(crypto::sha1(a_times(65)))}")
+	println("sha1 119a: ${digest(crypto::sha1(a_times(119)))}")
+	println("sha1 120a: ${digest(crypto::sha1(a_times(120)))}")
 
 	// A non-ASCII input checks that the digest is over bytes and not over
 	// anything text-shaped.
-	println('sha1 all256: ${digest(crypto::sha1(every))}')
+	println("sha1 all256: ${digest(crypto::sha1(every))}")
 
 	// Digest length is fixed at 20 bytes regardless of input size.
 	println(
-		'sha1 length: ${ok(
+		"sha1 length: ${ok(
 			digest_size(crypto::sha1(<<>>)) == 20,
-		)} ${ok(digest_size(crypto::sha1(every)) == 20)}',
+		)} ${ok(digest_size(crypto::sha1(every)) == 20)}",
 	)
 
 	// --- RFC 6455 §1.3: the worked example ------------------------------------
@@ -237,32 +237,32 @@ pub fn main() {
 	// vector that ties both modules together, and the reason SHA-1 is here at
 	// all.
 
-	accept = crypto::websocket_accept(<<'dGhlIHNhbXBsZSBub25jZQ=='>>)
+	accept = crypto::websocket_accept(<<"dGhlIHNhbXBsZSBub25jZQ==">>)
 	println(
-		'ws accept: ${match accept {
+		"ws accept: ${match accept {
 			Ok(a) -> text(a)
-			Err(Nil) -> 'no accept'
-		}}',
+			Err(Nil) -> "no accept"
+		}}",
 	)
-	println('ws accept matches: ${ok(accept == Ok(<<'s3pPLMBiTxaQ9kYGzzhZRbK+xOo='>>))}')
+	println("ws accept matches: ${ok(accept == Ok(<<"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=">>))}")
 
 	// The GUID is spelled once, in the module. A caller that appends its own
 	// copy must get the same answer.
 	manual = result::map(
 		crypto::sha1(
 			binary::append(
-				<<'dGhlIHNhbXBsZSBub25jZQ=='>>,
-				<<'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'>>,
+				<<"dGhlIHNhbXBsZSBub25jZQ==">>,
+				<<"258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>,
 			),
 		),
 		base64::encode,
 	)
-	println('ws accept manual: ${ok(manual == accept)}')
+	println("ws accept manual: ${ok(manual == accept)}")
 
 	// A binary that is not whole bytes has no digest, rather than the digest
 	// of the whole bytes in it.
-	println('sha1 of 4 bits: ${digest(crypto::sha1(<<1:4>>))}')
-	println('sha1 of a byte and 4 bits: ${digest(crypto::sha1(<<97, 1:4>>))}')
+	println("sha1 of 4 bits: ${digest(crypto::sha1(<<1:4>>))}")
+	println("sha1 of a byte and 4 bits: ${digest(crypto::sha1(<<97, 1:4>>))}")
 
 	// --- CSPRNG: what a single run can honestly assert -----------------------
 	//
@@ -271,12 +271,12 @@ pub fn main() {
 	// fill would return). A fixed-seed userspace PRNG would still pass every
 	// line here; the two-process check in native_backend is what refuses that.
 
-	println('csprng empty: ${ok(random_len(0))}')
-	println('csprng 16: ${ok(random_len(16))}')
-	println('csprng 64: ${ok(random_len(64))}')
-	println('csprng reject negative: ${ok(random_rejects(0 - 1))}')
-	println('csprng two 16 differ: ${ok(two_differ())}')
-	println('csprng 16 not uniform byte: ${ok(not_uniform_byte())}')
+	println("csprng empty: ${ok(random_len(0))}")
+	println("csprng 16: ${ok(random_len(16))}")
+	println("csprng 64: ${ok(random_len(64))}")
+	println("csprng reject negative: ${ok(random_rejects(0 - 1))}")
+	println("csprng two 16 differ: ${ok(two_differ())}")
+	println("csprng 16 not uniform byte: ${ok(not_uniform_byte())}")
 }
 
 fn random_len(n Int) Bool {

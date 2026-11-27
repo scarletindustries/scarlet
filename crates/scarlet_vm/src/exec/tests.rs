@@ -63,10 +63,10 @@ fn cells_left_after_in(
 #[test]
 fn strings_made_and_joined_are_all_freed() {
     let (out, left) = cells_left_after(
-        "fn greet(name String) String { 'hello, ${name}' }\n\
+        "fn greet(name String) String { \"hello, ${name}\" }\n\
              pub fn main() {\n\
-             \tprintln(greet('world'))\n\
-             \tprintln('${1 + 1} and ${greet('you')}')\n\
+             \tprintln(greet(\"world\"))\n\
+             \tprintln(\"${1 + 1} and ${greet(\"you\")}\")\n\
              }\n",
     );
     assert_eq!(out, "hello, world\n2 and hello, you\n");
@@ -79,10 +79,10 @@ fn strings_made_and_joined_are_all_freed() {
 fn a_loop_that_makes_strings_does_not_keep_them() {
     let (out, left) = cells_left_after(
         "fn spin(n Int, s String) String {\n\
-             \tif n == 0 { s } else { spin(n - 1, '${n}') }\n\
+             \tif n == 0 { s } else { spin(n - 1, \"${n}\") }\n\
              }\n\
              pub fn main() {\n\
-             \tprintln(spin(10000, 'start'))\n\
+             \tprintln(spin(10000, \"start\"))\n\
              }\n",
     );
     assert_eq!(out, "1\n");
@@ -100,7 +100,7 @@ fn big_ints_made_in_a_loop_are_all_freed() {
              pub fn main() {\n\
              \tbig = grow(200, 1)\n\
              \tprintln(big > 1)\n\
-             \tprintln('${big / big}')\n\
+             \tprintln(\"${big / big}\")\n\
              }\n",
     );
     assert_eq!(out, "True\n1\n");
@@ -121,7 +121,7 @@ fn constructors_and_what_they_hold_are_all_freed() {
              }\n\
              const origin = Point(x: 0, y: 0)\n\
              fn build(n Int, acc L) L {\n\
-             \tif n == 0 { acc } else { build(n - 1, Cons('${n}', acc)) }\n\
+             \tif n == 0 { acc } else { build(n - 1, Cons(\"${n}\", acc)) }\n\
              }\n\
              pub fn main() {\n\
              \tprintln(build(2, End))\n\
@@ -148,7 +148,7 @@ fn what_a_match_reads_out_is_all_freed() {
              \tEnd\n\
              }\n\
              fn build(n Int, acc L) L {\n\
-             \tif n == 0 { acc } else { build(n - 1, Cons('${n}', acc)) }\n\
+             \tif n == 0 { acc } else { build(n - 1, Cons(\"${n}\", acc)) }\n\
              }\n\
              fn rev(l L, acc L) L {\n\
              \tmatch l {\n\
@@ -159,7 +159,7 @@ fn what_a_match_reads_out_is_all_freed() {
              fn first(l L) String {\n\
              \tmatch l {\n\
              \t\tCons(h, _) -> h\n\
-             \t\tEnd -> 'empty'\n\
+             \t\tEnd -> \"empty\"\n\
              \t}\n\
              }\n\
              pub fn main() {\n\
@@ -185,17 +185,17 @@ fn closures_and_their_captures_are_all_freed() {
              \tb = Box(name)\n\
              \tfn(greeting) {\n\
              \t\tmatch b {\n\
-             \t\t\tBox(n) -> '${greeting}, ${n}'\n\
+             \t\t\tBox(n) -> \"${greeting}, ${n}\"\n\
              \t\t}\n\
              \t}\n\
              }\n\
              fn spin(n Int, f fn(String) String) String {\n\
-             \tif n == 0 { f('bye') } else { spin(n - 1, greeter('${n}')) }\n\
+             \tif n == 0 { f(\"bye\") } else { spin(n - 1, greeter(\"${n}\")) }\n\
              }\n\
              pub fn main() {\n\
-             \tprintln(greeter('you')('hi'))\n\
-             \tprintln(spin(1000, greeter('start')))\n\
-             \tk = 'kept'\n\
+             \tprintln(greeter(\"you\")(\"hi\"))\n\
+             \tprintln(spin(1000, greeter(\"start\")))\n\
+             \tk = \"kept\"\n\
              \tgo = fn(n) { if n == 0 { k } else { go(n - 1) } }\n\
              \tprintln(go(100))\n\
              }\n",
@@ -210,13 +210,13 @@ fn closures_and_their_captures_are_all_freed() {
 fn tuples_and_what_they_hold_are_all_freed() {
     let (out, left) = cells_left_after(
         "fn pairs(n Int, acc (String, Int)) (String, Int) {\n\
-             \tif n == 0 { acc } else { pairs(n - 1, ('${n}', acc.1 + n)) }\n\
+             \tif n == 0 { acc } else { pairs(n - 1, (\"${n}\", acc.1 + n)) }\n\
              }\n\
              pub fn main() {\n\
-             \tp = pairs(1000, ('start', 0))\n\
+             \tp = pairs(1000, (\"start\", 0))\n\
              \tprintln(p.0)\n\
              \tprintln(p)\n\
-             \tprintln(Some((p, 'x')))\n\
+             \tprintln(Some((p, \"x\")))\n\
              }\n",
     );
     assert_eq!(
@@ -233,10 +233,10 @@ fn tuples_and_what_they_hold_are_all_freed() {
 fn arrays_and_what_they_share_are_all_freed() {
     let (out, left) = cells_left_after(
         "fn build(n Int, acc Array(String)) Array(String) {\n\
-             \tif n == 0 { acc } else { build(n - 1, [..acc, '${n}']) }\n\
+             \tif n == 0 { acc } else { build(n - 1, [..acc, \"${n}\"]) }\n\
              }\n\
              fn front(n Int, acc Array(String)) Array(String) {\n\
-             \tif n == 0 { acc } else { front(n - 1, ['${n}', ..acc]) }\n\
+             \tif n == 0 { acc } else { front(n - 1, [\"${n}\", ..acc]) }\n\
              }\n\
              fn count(xs Array(String), n Int) Int {\n\
              \tmatch xs {\n\
@@ -249,8 +249,8 @@ fn arrays_and_what_they_share_are_all_freed() {
              \tb = front(2000, a)\n\
              \tc = [..b, ..a]\n\
              \tprintln(count(c, 0))\n\
-             \tprintln(c[0] or '?')\n\
-             \tprintln(a[0] or '?')\n\
+             \tprintln(c[0] or \"?\")\n\
+             \tprintln(a[0] or \"?\")\n\
              \tprintln(count([..a, ..[]], 0))\n\
              }\n",
     );
@@ -312,7 +312,7 @@ fn binaries_and_their_slices_are_all_freed() {
 #[test]
 fn a_string_in_a_global_is_freed_with_the_globals() {
     let (out, left) = cells_left_after(
-        "const greeting = 'hi'\n\
+        "const greeting = \"hi\"\n\
              pub fn main() {\n\
              \tprintln(greeting)\n\
              \tprintln(greeting)\n\
@@ -337,16 +337,16 @@ fn what_the_host_built_ins_make_is_all_freed() {
              import scarlet/crypto\n\
              import scarlet/map\n\
              pub fn main() {\n\
-             \tprintln(os::get_env('A'))\n\
+             \tprintln(os::get_env(\"A\"))\n\
              \tprintln(map::size(os::env()))\n\
              \tprintln(os::argv())\n\
-             \tprintln(match io::read_file('/no/such/file') {\n\
-             \t\tOk(_) -> 'read'\n\
-             \t\tErr(_) -> 'failed'\n\
+             \tprintln(match io::read_file(\"/no/such/file\") {\n\
+             \t\tOk(_) -> \"read\"\n\
+             \t\tErr(_) -> \"failed\"\n\
              \t})\n\
              \tprintln(match crypto::random_bytes(40) {\n\
-             \t\tOk(_) -> 'random'\n\
-             \t\tErr(Nil) -> 'none'\n\
+             \t\tOk(_) -> \"random\"\n\
+             \t\tErr(Nil) -> \"none\"\n\
              \t})\n\
              }\n",
     );
@@ -362,20 +362,20 @@ fn what_json_makes_is_all_freed() {
     let (out, left) = cells_left_after(
         "import scarlet/json\n\
              pub fn main() {\n\
-             \tmatch json::parse('{\"a\": [1, {\"b\": \"deep\"}], \"c\": \"x\"}') {\n\
+             \tmatch json::parse(\"{\\\"a\\\": [1, {\\\"b\\\": \\\"deep\\\"}], \\\"c\\\": \\\"x\\\"}\") {\n\
              \t\tOk(d) -> {\n\
-             \t\t\tprintln(json::size(json::field(d, 'a') or d))\n\
+             \t\t\tprintln(json::size(json::field(d, \"a\") or d))\n\
              \t\t\t_entries = json::entries(d)\n\
-             \t\t\t_elements = json::elements(json::field(d, 'a') or d)\n\
+             \t\t\t_elements = json::elements(json::field(d, \"a\") or d)\n\
              \t\t\tprintln(json::reencode(d))\n\
              \t\t}\n\
-             \t\tErr(_) -> println('no')\n\
+             \t\tErr(_) -> println(\"no\")\n\
              \t}\n\
-             \tprintln(match json::parse('[') {\n\
-             \t\tOk(_) -> 'parsed'\n\
-             \t\tErr(_) -> 'refused'\n\
+             \tprintln(match json::parse(\"[\") {\n\
+             \t\tOk(_) -> \"parsed\"\n\
+             \t\tErr(_) -> \"refused\"\n\
              \t})\n\
-             \tprintln(json::encode(json::Object([('k', json::List([json::Integer(1), json::Str('v')]))])))\n\
+             \tprintln(json::encode(json::Object([(\"k\", json::List([json::Integer(1), json::Str(\"v\")]))])))\n\
              }\n",
     );
     assert_eq!(
@@ -395,19 +395,19 @@ fn what_http_parsing_makes_is_all_freed() {
              import scarlet/http/headers\n\
              import scarlet/binary\n\
              pub fn main() {\n\
-             \treq = <<'POST /x HTTP/1.1\\r\\nHost: a\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n3\\r\\nabc\\r\\n0\\r\\n\\r\\n'>>\n\
+             \treq = <<\"POST /x HTTP/1.1\\r\\nHost: a\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n3\\r\\nabc\\r\\n0\\r\\n\\r\\n\">>\n\
              \tmatch h1::parse_request(req, 0) {\n\
              \t\th1::Done(method, _, _, hs, _, consumed) -> {\n\
              \t\t\tprintln(binary::to_string(method))\n\
-             \t\t\tprintln(headers::get(hs, <<'host'>>))\n\
+             \t\t\tprintln(headers::get(hs, <<\"host\">>))\n\
              \t\t\tprintln(h1::framing(hs))\n\
              \t\t\tprintln(binary::byte_size(h1::serialize_head(200, hs)))\n\
              \t\t\tmatch h1::chunk_decode(req, consumed, 100) {\n\
              \t\t\t\th1::ChunkedDone(body, _, _) -> println(body)\n\
-             \t\t\t\th1::ChunkedNeedMore | h1::ChunkedBad(_) -> println('no body')\n\
+             \t\t\t\th1::ChunkedNeedMore | h1::ChunkedBad(_) -> println(\"no body\")\n\
              \t\t\t}\n\
              \t\t}\n\
-             \t\th1::NeedMore | h1::Bad(_) -> println('no head')\n\
+             \t\th1::NeedMore | h1::Bad(_) -> println(\"no head\")\n\
              \t}\n\
              }\n",
     );
@@ -423,19 +423,19 @@ fn maps_and_what_they_hold_are_all_freed() {
     let (out, left) = cells_left_after(
         "import scarlet/map\n\
              fn fill(m map::Map(String, String), n Int) map::Map(String, String) {\n\
-             \tif n == 0 { m } else { fill(map::set(m, 'k${n}', 'v${n}'), n - 1) }\n\
+             \tif n == 0 { m } else { fill(map::set(m, \"k${n}\", \"v${n}\"), n - 1) }\n\
              }\n\
              fn drain(m map::Map(String, String), n Int) map::Map(String, String) {\n\
-             \tif n == 0 { m } else { drain(map::delete(m, 'k${n}'), n - 2) }\n\
+             \tif n == 0 { m } else { drain(map::delete(m, \"k${n}\"), n - 2) }\n\
              }\n\
              pub fn main() {\n\
              \tfull = fill(map::new(), 400)\n\
              \thalf = drain(full, 400)\n\
-             \tprintln('${map::size(full)} ${map::size(half)}')\n\
-             \tprintln(map::get(half, 'k7'))\n\
-             \tprintln(map::get(half, 'k8'))\n\
+             \tprintln(\"${map::size(full)} ${map::size(half)}\")\n\
+             \tprintln(map::get(half, \"k7\"))\n\
+             \tprintln(map::get(half, \"k8\"))\n\
              \t_keys = map::keys(half)\n\
-             \t_pairs = map::to_list(map::set(half, 'k7', 'again'))\n\
+             \t_pairs = map::to_list(map::set(half, \"k7\", \"again\"))\n\
              \tprintln(full == half)\n\
              \tnested = map::set(map::new(), half, [full])\n\
              \tprintln(map::has(nested, drain(full, 400)))\n\
@@ -452,13 +452,13 @@ fn maps_and_what_they_hold_are_all_freed() {
 fn fields_read_by_name_are_all_freed() {
     let (out, left) = cells_left_after(
         "type S {\n\tA(name String, n Int, tag String)\n\tB(tag String, name String)\n}\n\
-             fn both(s S) String { '${s.name}/${s.tag}' }\n\
+             fn both(s S) String { \"${s.name}/${s.tag}\" }\n\
              pub fn main() {\n\
-             \tb = B(tag: 'x', name: 'bee')\n\
+             \tb = B(tag: \"x\", name: \"bee\")\n\
              \ta = A(..b, n: 1)\n\
              \tprintln(both(b))\n\
              \tprintln(both(a))\n\
-             \tprintln(both(A(..a, name: 'aye', n: 2)))\n\
+             \tprintln(both(A(..a, name: \"aye\", n: 2)))\n\
              }\n",
     );
     assert_eq!(out, "bee/x\nbee/x\naye/x\n");
@@ -479,7 +479,7 @@ fn after_running(src: &str, check: impl FnOnce(&mut Machine<'_, '_>, Ended)) {
 }
 
 /// A program whose one global holds a cell when it ends.
-const HOLDS_A_CELL: &str = "const kept = ['a', 'b']\npub fn main() {\n\tprintln(kept)\n}\n";
+const HOLDS_A_CELL: &str = "const kept = [\"a\", \"b\"]\npub fn main() {\n\tprintln(kept)\n}\n";
 
 fn held_by_a_global(m: &Machine<'_, '_>) -> Cell {
     m.rest
@@ -1184,7 +1184,7 @@ fn a_value_with_no_name_stops_the_run() {
 /// fields or without, whatever its number.
 #[test]
 fn a_json_built_in_on_another_constructor_stops_the_run() {
-    let src = "import scarlet/json\npub fn main() {\n\tprintln(json::parse('1'))\n}\n";
+    let src = "import scarlet/json\npub fn main() {\n\tprintln(json::parse(\"1\"))\n}\n";
     let result = scarlet_core::compile::compile_text(src, None);
     let program = result.into_runnable().expect("a clean compile is runnable");
     let code = crate::code::load(&program, Audit::Never).expect("it loads");
@@ -3165,8 +3165,8 @@ const DEEP_STACK: usize = 1 << 16;
 const DEEP: [(&[&str], &str, &str); 12] = [
     (
         &["Call1", "Call0"],
-        "fn leaf() String { '${N}' }\n\
-         fn down(n Int) String { if n == 0 { '${leaf()}' } else { '${down(n - 1)}.' } }\n\
+        "fn leaf() String { \"${N}\" }\n\
+         fn down(n Int) String { if n == 0 { \"${leaf()}\" } else { \"${down(n - 1)}.\" } }\n\
          pub fn main() { println(string::length(down(N))) }\n",
         "32\n",
     ),
@@ -3181,15 +3181,15 @@ const DEEP: [(&[&str], &str, &str); 12] = [
     (
         &["Call2"],
         "fn down(s String, n Int) Int {\n\
-         \tif n == 0 { string::length(s) } else { down('${s}x', n - 1) + 1 }\n}\n\
-         pub fn main() { println(down('', N)) }\n",
+         \tif n == 0 { string::length(s) } else { down(\"${s}x\", n - 1) + 1 }\n}\n\
+         pub fn main() { println(down(\"\", N)) }\n",
         "60\n",
     ),
     (
         &["Call2Share"],
         "fn down(s String, n Int) Int {\n\
          \tif n == 0 { 0 } else { down(s, n - 1) + string::length(s) }\n}\n\
-         pub fn main() { println(down('ab', N)) }\n",
+         pub fn main() { println(down(\"ab\", N)) }\n",
         "60\n",
     ),
     (
@@ -3197,63 +3197,63 @@ const DEEP: [(&[&str], &str, &str); 12] = [
         "fn down(s String, t String, n Int) Int {\n\
          \tif n == 0 { 0 } else { down(t, s, n - 1) + last(s, n, n) }\n}\n\
          fn last(s String, a Int, b Int) Int {\n\
-         \tif a == 0 { string::length(s) + b } else { last('${s}y', 0, 0) + 1 }\n}\n\
-         pub fn main() { println(down('ab', 'c', N)) }\n",
+         \tif a == 0 { string::length(s) + b } else { last(\"${s}y\", 0, 0) + 1 }\n}\n\
+         pub fn main() { println(down(\"ab\", \"c\", N)) }\n",
         "105\n",
     ),
     (
         &["Call"],
         "fn down(s String, n Int, a Int, b Int, t String) Int {\n\
-         \tif n == 0 { a + b + string::length(t) } else { down(s, n - 1, b, a, '${t}z') + string::length(s) }\n}\n\
-         pub fn main() { println(down('ab', N, 1, 2, '')) }\n",
+         \tif n == 0 { a + b + string::length(t) } else { down(s, n - 1, b, a, \"${t}z\") + string::length(s) }\n}\n\
+         pub fn main() { println(down(\"ab\", N, 1, 2, \"\")) }\n",
         "93\n",
     ),
     (
         &["CallWide"],
         "fn down(s String, n Int, a Int, b Int, t String, c Int, d Int) Int {\n\
-         \tif n == 0 { a + b + c + d + string::length(t) } else { down(s, n - 1, b, a, '${t}z', d, c) + string::length(s) }\n}\n\
-         pub fn main() { println(down('ab', N, 1, 2, '', 3, 4)) }\n",
+         \tif n == 0 { a + b + c + d + string::length(t) } else { down(s, n - 1, b, a, \"${t}z\", d, c) + string::length(s) }\n}\n\
+         pub fn main() { println(down(\"ab\", N, 1, 2, \"\", 3, 4)) }\n",
         "100\n",
     ),
     (
         &["CallSelf", "RetClosure", "GetCapture"],
         "pub fn main() {\n\
-         \tkept = '${N}'\n\
-         \tdown = fn(s, n) { if n == 0 { '${s}${kept}' } else { '${down(s, n - 1)}${s}' } }\n\
-         \tprintln(string::length(down('ab', N)))\n}\n",
+         \tkept = \"${N}\"\n\
+         \tdown = fn(s, n) { if n == 0 { \"${s}${kept}\" } else { \"${down(s, n - 1)}${s}\" } }\n\
+         \tprintln(string::length(down(\"ab\", N)))\n}\n",
         "64\n",
     ),
     (
         &["CallSelfWide"],
         "pub fn main() {\n\
-         \tkept = '${N}'\n\
+         \tkept = \"${N}\"\n\
          \tdown = fn(s, n, a, b, c, d, e) {\n\
-         \t\tif n == 0 { '${s}${kept}' } else { '${down(s, n - 1, b, c, d, e, a)}${s}' }\n\t}\n\
-         \tprintln(string::length(down('ab', N, 1, 2, 3, 4, 5)))\n}\n",
+         \t\tif n == 0 { \"${s}${kept}\" } else { \"${down(s, n - 1, b, c, d, e, a)}${s}\" }\n\t}\n\
+         \tprintln(string::length(down(\"ab\", N, 1, 2, 3, 4, 5)))\n}\n",
         "64\n",
     ),
     (
         &["CallValue"],
         "fn down(f fn(String) String, n Int) Int {\n\
-         \tif n == 0 { 0 } else { down(fn(s) f('${s}.'), n - 1) + string::length(f('')) }\n}\n\
-         pub fn main() {\n\tkept = 'ab'\n\tprintln(down(fn(s) '${s}${kept}', N))\n}\n",
+         \tif n == 0 { 0 } else { down(fn(s) f(\"${s}.\"), n - 1) + string::length(f(\"\")) }\n}\n\
+         pub fn main() {\n\tkept = \"ab\"\n\tprintln(down(fn(s) \"${s}${kept}\", N))\n}\n",
         "495\n",
     ),
     (
         &["CallValueWide"],
         "fn down(f fn(Int, Int, Int, Int, Int, Int, String) String, n Int) String {\n\
-         \tif n == 0 { '${f(1, 2, 3, 4, 5, 6, 'x')}' } else {\n\t\tdown(fn(a, b, c, d, e, g, s) '${f(b, c, d, e, g, a, '${s}.')}', n - 1)\n\t}\n}\n\
-         pub fn main() {\n\tkept = 'ab'\n\
-         \tprintln(string::length(down(fn(a, b, c, d, e, g, s) '${s}${kept}${a + b + c + d + e + g}', N)))\n}\n",
+         \tif n == 0 { \"${f(1, 2, 3, 4, 5, 6, \"x\")}\" } else {\n\t\tdown(fn(a, b, c, d, e, g, s) \"${f(b, c, d, e, g, a, \"${s}.\")}\", n - 1)\n\t}\n}\n\
+         pub fn main() {\n\tkept = \"ab\"\n\
+         \tprintln(string::length(down(fn(a, b, c, d, e, g, s) \"${s}${kept}${a + b + c + d + e + g}\", N)))\n}\n",
         "35\n",
     ),
     (
         &["CallValue"],
         "fn down(n Int) Array(String) {\n\
-         \tif n == 0 { ['a'] } else {\n\
-         \t\tarray::map(['${n}'], fn(s) '${array::length(down(n - 1))}${folded(n)}${s}')\n\t}\n}\n\
+         \tif n == 0 { [\"a\"] } else {\n\
+         \t\tarray::map([\"${n}\"], fn(s) \"${array::length(down(n - 1))}${folded(n)}${s}\")\n\t}\n}\n\
          fn folded(n Int) Int {\n\
-         \tmap::fold(map::set(map::new(), 'k${n}', n), 0, fn(acc, _k, v) acc + v)\n}\n\
+         \tmap::fold(map::set(map::new(), \"k${n}\", n), 0, fn(acc, _k, v) acc + v)\n}\n\
          pub fn main() { println(down(N)) }\n",
         "[13030]\n",
     ),
@@ -3432,46 +3432,46 @@ const LOOPS: &[(&str, &str)] = &[
     // Every kind of move, of values made each turn.
     (
         "fn go(n Int, a String, b String, c Array(Int), d Array(Int)) Int {\n\
-         \tif n == 0 { string::length(a) + array::length(c) } else { go(n - 1, b, '${n % 10}', d, [n]) }\n}\n\
-         pub fn main() { println(go(N, 'x', 'y', [], [])) }\n",
+         \tif n == 0 { string::length(a) + array::length(c) } else { go(n - 1, b, \"${n % 10}\", d, [n]) }\n}\n\
+         pub fn main() { println(go(N, \"x\", \"y\", [], [])) }\n",
         "2\n",
     ),
     (
         "fn go(n Int, a String, b String, c String, d String, e String) String {\n\
-         \tif n == 0 { '${a}${a}' } else { go(n - 1, b, c, d, e, '${n % 10}') }\n}\n\
-         pub fn main() { println(string::length(go(N, 'a', 'b', 'c', 'd', 'e'))) }\n",
+         \tif n == 0 { \"${a}${a}\" } else { go(n - 1, b, c, d, e, \"${n % 10}\") }\n}\n\
+         pub fn main() { println(string::length(go(N, \"a\", \"b\", \"c\", \"d\", \"e\"))) }\n",
         "2\n",
     ),
     (
         "fn go(n Int, a String, b String) String {\n\
-         \tif n == 0 { a } else { if n % 3 == 0 { go(n - 1, b, a) } else { go(n - 1, '${n % 10}', a) } }\n}\n\
-         pub fn main() { println(string::length(go(N, 'a', 'b'))) }\n",
+         \tif n == 0 { a } else { if n % 3 == 0 { go(n - 1, b, a) } else { go(n - 1, \"${n % 10}\", a) } }\n}\n\
+         pub fn main() { println(string::length(go(N, \"a\", \"b\"))) }\n",
         "1\n",
     ),
     // A value to several parameters.
     (
         "fn go(n Int, a String, b String, c String) Int {\n\
-         \tif n == 0 { string::length('${a}${b}') } else { go(n - 1, c, c, '${n % 10}') }\n}\n\
-         pub fn main() { println(go(N, 'a', 'b', 'c')) }\n",
+         \tif n == 0 { string::length(\"${a}${b}\") } else { go(n - 1, c, c, \"${n % 10}\") }\n}\n\
+         pub fn main() { println(go(N, \"a\", \"b\", \"c\")) }\n",
         "2\n",
     ),
     // Two functions and three, of other widths.
     (
-        "fn a(n Int, s String) Int { if n == 0 { string::length(s) } else { b(n - 1, s, '${n % 10}') } }\n\
+        "fn a(n Int, s String) Int { if n == 0 { string::length(s) } else { b(n - 1, s, \"${n % 10}\") } }\n\
          fn b(n Int, s String, t String) Int {\n\
-         \tif n == 0 { string::length(s) } else { c(n - 1, t, s, [n, n], '${s}') }\n}\n\
+         \tif n == 0 { string::length(s) } else { c(n - 1, t, s, [n, n], \"${s}\") }\n}\n\
          fn c(n Int, s String, t String, xs Array(Int), u String) Int {\n\
-         \tif n == 0 { array::length(xs) + string::length('${s}${t}${u}') } else { a(n - 1, s) }\n}\n\
-         pub fn main() { println(a(N, 'x') > 0) }\n",
+         \tif n == 0 { array::length(xs) + string::length(\"${s}${t}${u}\") } else { a(n - 1, s) }\n}\n\
+         pub fn main() { println(a(N, \"x\") > 0) }\n",
         "True\n",
     ),
     // A closure's to itself, and one through a value that keeps its closure and
     // one that does not.
     (
         "pub fn main() {\n\
-         \tkept = '${N}'\n\
-         \tgo = fn(n, s) { if n == 0 { string::length('${s}${kept}') > 0 } else { go(n - 1, '${n % 10}') } }\n\
-         \tprintln(go(N, ''))\n}\n",
+         \tkept = \"${N}\"\n\
+         \tgo = fn(n, s) { if n == 0 { string::length(\"${s}${kept}\") > 0 } else { go(n - 1, \"${n % 10}\") } }\n\
+         \tprintln(go(N, \"\"))\n}\n",
         "True\n",
     ),
     (
@@ -3486,9 +3486,9 @@ const LOOPS: &[(&str, &str)] = &[
     ),
     (
         "fn wide(f fn(Int, Int, Int, Int, Int, Int, String) Int, n Int, s String) Int {\n\
-         \tif n == 0 { string::length(s) } else { f(n - 1, 1, 2, 3, 4, 5, '${n % 10}') }\n}\n\
+         \tif n == 0 { string::length(s) } else { f(n - 1, 1, 2, 3, 4, 5, \"${n % 10}\") }\n}\n\
          fn back(n Int, _a Int, _b Int, _c Int, _d Int, _e Int, s String) Int { wide(back, n, s) }\n\
-         pub fn main() { println(wide(back, N, 'x')) }\n",
+         pub fn main() { println(wide(back, N, \"x\")) }\n",
         "1\n",
     ),
     // What a match took apart.
@@ -3498,7 +3498,7 @@ const LOOPS: &[(&str, &str)] = &[
          \tmatch l {\n\
          \t\tCons(h, t) -> go(n, t, Cons(h, acc))\n\
          \t\tEnd -> if n == 0 { 1 } else { go(n - 1, acc, End) }\n\t}\n}\n\
-         pub fn main() { println(go(N / 4, Cons('a', Cons('b', End)), End)) }\n",
+         pub fn main() { println(go(N / 4, Cons(\"a\", Cons(\"b\", End)), End)) }\n",
         "1\n",
     ),
 ];

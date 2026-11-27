@@ -2,7 +2,7 @@ mod common;
 use common::check_rejects;
 
 reject_case! {
-    int_plus_string_is_type_error: ("pub fn main() {\n\tx = 1 + 'a'\n}\n", "Type mismatch"),
+    int_plus_string_is_type_error: ("pub fn main() {\n\tx = 1 + \"a\"\n}\n", "Type mismatch"),
     non_exhaustive_match_is_error: (
         "pub fn main() {\n\tf = fn(x) { match x { True -> 1 } }\n\tprintln(f(False))\n}\n",
         "not exhaustive",
@@ -22,18 +22,18 @@ reject_case! {
     // Destructuring a constructor through its module can fail when its type has
     // other constructors, so we refuse it and point at `match`.
     a_qualified_ctor_binding_must_be_irrefutable: (
-        "import scarlet/io\npub fn main() {\n\tio::NotFound(p) = io::PermissionDenied('x')\n\tprintln(p)\n}\n",
+        "import scarlet/io\npub fn main() {\n\tio::NotFound(p) = io::PermissionDenied(\"x\")\n\tprintln(p)\n}\n",
         "A binding's pattern must match every value, and this one misses",
     ),
     // When a constructor is used by its bare name and an imported module has
     // it, the error names the module to reach it through. This holds in a
     // pattern and in an expression.
     a_bare_constructor_in_a_pattern_names_its_module: (
-        "import scarlet/io\npub fn main() {\n\tmatch io::read_file('x') {\n\t\tErr(NotFound(p)) -> println(p)\n\t\t_ -> println('other')\n\t}\n}\n",
+        "import scarlet/io\npub fn main() {\n\tmatch io::read_file(\"x\") {\n\t\tErr(NotFound(p)) -> println(p)\n\t\t_ -> println(\"other\")\n\t}\n}\n",
         "Unknown constructor 'NotFound' in pattern. It is `io::NotFound`",
     ),
     a_bare_constructor_in_an_expression_names_its_module: (
-        "import scarlet/io\npub fn main() {\n\te = NotFound('x')\n\tprintln(e)\n}\n",
+        "import scarlet/io\npub fn main() {\n\te = NotFound(\"x\")\n\tprintln(e)\n}\n",
         "Unknown identifier 'NotFound'. A constructor of that name is `io::NotFound`",
     ),
     if_condition_must_be_bool:
@@ -65,7 +65,7 @@ reject_case! {
     ),
 
     unused_let_binding_is_error: (
-        "pub fn main() {\n\tx = 1\n\tprintln('done')\n}\n",
+        "pub fn main() {\n\tx = 1\n\tprintln(\"done\")\n}\n",
         "'x' is never used. Start its name with '_' if that's on purpose",
     ),
     unused_param_is_error: (
@@ -112,7 +112,7 @@ ok_case! {
 
 ok_case! {
     underscore_prefix_suppresses_unused_error:
-        ("pub fn main() {\n\t_x = 1\n\tprintln('done')\n}\n"),
+        ("pub fn main() {\n\t_x = 1\n\tprintln(\"done\")\n}\n"),
 
     used_let_binding_is_ok: ("pub fn main() {\n\tx = 1\n\tprintln(x)\n}\n"),
 
@@ -125,7 +125,7 @@ reject_case! {
     // rule's diagnostics as `check` reports them. `check` itself doesn't need a
     // `main` (see the library cases below), but `run` does.
     statement_at_module_scope_is_error: (
-        "println('early')\n\npub fn main() {\n\tprintln('main')\n}\n",
+        "println(\"early\")\n\npub fn main() {\n\tprintln(\"main\")\n}\n",
         "Statements aren't allowed at module scope. Put a program's code inside `pub fn main()`",
     ),
     binding_at_module_scope_is_error: (
@@ -133,7 +133,7 @@ reject_case! {
         "Statements aren't allowed at module scope. Put a program's code inside `pub fn main()`",
     ),
     private_main_is_error: (
-        "fn main() {\n\tprintln('hi')\n}\n",
+        "fn main() {\n\tprintln(\"hi\")\n}\n",
         "`main` must be public, because a program starts at `pub fn main()`",
     ),
     main_with_parameters_is_error: (
@@ -182,15 +182,15 @@ reject_case! {
     // Diagnostics for the arguments where a value is constructed, all from
     // `slot_ctor_args`.
     ctor_missing_field_is_error: (
-        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P(name: 'a'))\n}\n",
+        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P(name: \"a\"))\n}\n",
         "Constructor 'P' is missing field(s): age",
     ),
     ctor_unknown_field_is_error: (
-        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P(name: 'a', bogus: 1))\n}\n",
+        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P(name: \"a\", bogus: 1))\n}\n",
         "Constructor 'P' has no field 'bogus'. Available: name, age",
     ),
     ctor_too_many_positional_is_error: (
-        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P('a', 'b', 'c'))\n}\n",
+        "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P(\"a\", \"b\", \"c\"))\n}\n",
         "Constructor 'P' has 2 field(s) but more were supplied",
     ),
     ctor_nullary_with_args_is_error: (
@@ -199,7 +199,7 @@ reject_case! {
     ),
     ctor_duplicate_field_is_error: (
         "type P { P(name String, age Int) }\n\
-         pub fn main() {\n\tprintln(P(name: 'a', name: 'b', age: 1))\n}\n",
+         pub fn main() {\n\tprintln(P(name: \"a\", name: \"b\", age: 1))\n}\n",
         "Field 'name' is specified more than once",
     ),
 
@@ -342,7 +342,7 @@ reject_case! {
     field_access_partial_is_rejected: (
         "type Named {\n\tPerson(name String, age Int)\n\tOrg(name String, size Int)\n}\n\
          fn age_of(n Named) Int { n.age }\n\
-         pub fn main() {\n\tprintln(age_of(Person(name: 'al', age: 18)))\n}\n",
+         pub fn main() {\n\tprintln(age_of(Person(name: \"al\", age: 18)))\n}\n",
         "Field 'age' is not present on every variant of 'Named' (missing on 'Org')",
     ),
     field_access_on_tuple_is_error: (
@@ -376,7 +376,7 @@ ok_case! {
         ("pub fn main() {\n\t(x, y) = (1, 2)\n\tprintln(x + y)\n}\n"),
 
     // A builtin in value position gets an eta wrapper (see `typed_ir::eta`).
-    builtin_used_as_value_is_ok: ("pub fn main() {\n\tf = println\n\tf('done')\n}\n"),
+    builtin_used_as_value_is_ok: ("pub fn main() {\n\tf = println\n\tf(\"done\")\n}\n"),
 }
 
 reject_case! {
@@ -411,7 +411,7 @@ reject_case! {
          \tLocalOther\n\
          }\n\
          fn f() Parsed {\n\
-         \th1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0)\n\
+         \th1::parse_request(binary::from_string(\"GET / HTTP/1.1\\r\\n\\r\\n\"), 0)\n\
          }\n\
          pub fn main() {\n\
          \tprintln(f())\n\
@@ -436,7 +436,7 @@ ok_case! {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tremote = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \tremote = match h1::parse_request(binary::from_string(\"GET / HTTP/1.1\\r\\n\\r\\n\"), 0) {\n\
          \t\th1::Done(_, _, _, _, _, consumed) -> consumed\n\
          \t\th1::NeedMore -> 0 - 1\n\
          \t\th1::Bad(s) -> s\n\
@@ -453,15 +453,15 @@ ok_case! {
 fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
     let out = common::run_source(
         "check",
-        "type P {\n\tx Int\n\ty Int\n}\npub fn main() {\n\tprintln(P(y: 'why', x: 'ex'))\n}\n",
+        "type P {\n\tx Int\n\ty Int\n}\npub fn main() {\n\tprintln(P(y: \"why\", x: \"ex\"))\n}\n",
     );
     let text = out.combined();
     let x_at = text
         .find("6:25")
-        .expect("expected a diagnostic on `x: 'ex'`");
+        .expect(r#"expected a diagnostic on `x: "ex"`"#);
     let y_at = text
         .find("6:15")
-        .expect("expected a diagnostic on `y: 'why'`");
+        .expect(r#"expected a diagnostic on `y: "why"`"#);
     assert!(
         x_at < y_at,
         "expected the `x` field's diagnostic before the `y` field's:\n{text}"
@@ -534,7 +534,7 @@ reject_case! {
     /// `Failure.found` is a `Found`, not free text, so a decoder can't put a
     /// sentence where the document's shape belongs.
     decode_failure_found_rejects_free_text: (
-        "import scarlet/json/decode\n\ndecode::Failure([], 'a thing', 'a string')\n",
+        "import scarlet/json/decode\n\ndecode::Failure([], \"a thing\", \"a string\")\n",
         "expected 'Found', got 'String'",
     ),
     /// `one_of` takes its first alternative separately, so you can't build a
@@ -596,7 +596,7 @@ ok_case! {
     ),
     /// Numbers, strings and binaries can't be listed, so `_` stays.
     a_wildcard_over_values_that_cannot_be_listed_is_fine: (
-        "pub fn main() {\n\tprintln(match 3 {\n\t\t1 -> 'one'\n\t\t_ -> 'many'\n\t})\n}\n",
+        "pub fn main() {\n\tprintln(match 3 {\n\t\t1 -> \"one\"\n\t\t_ -> \"many\"\n\t})\n}\n",
     ),
     /// The arms a guarded arm's catch-all asks for are enough.
     naming_what_a_guarded_catch_all_stood_for_is_enough: (
@@ -644,7 +644,7 @@ const FN_FIELD: &str = "import scarlet/wire\n\
                         \tHandler(name String, run fn(Int) Int)\n\
                         }\n\
                         pub fn main() {\n\
-                        \tprintln(wire::encode(Handler('h', fn(x) { x + 1 })))\n\
+                        \tprintln(wire::encode(Handler(\"h\", fn(x) { x + 1 })))\n\
                         }\n";
 
 ok_case! {
@@ -739,8 +739,8 @@ mod unknown_payload {
              }\n\
              pub fn main() {\n\
              \tprintln(match read(<<1>>) {\n\
-             \t\tSome(_) -> 'ok'\n\
-             \t\tNone -> 'no'\n\
+             \t\tSome(_) -> \"ok\"\n\
+             \t\tNone -> \"no\"\n\
              \t})\n\
              }\n",
             WANTED,
@@ -799,7 +799,7 @@ mod opaque_from_another_module {
              \td = decimal::new(1999, 2)\n\
              \tmatch wire::decode(wire::encode(d)) {\n\
              \t\tOk(back) -> report(d, back)\n\
-             \t\tErr(_) -> println('err')\n\
+             \t\tErr(_) -> println(\"err\")\n\
              \t}\n\
              }\n",
             "True\n19.99\n",

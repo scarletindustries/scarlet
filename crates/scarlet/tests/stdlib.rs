@@ -76,7 +76,7 @@ fn stdlib_result() {
         "import scarlet/result\n\
          pub fn main() {\n\
          \tprintln(result::map(Ok(5), fn(x) x + 1))\n\
-         \tprintln(result::map_err(Err('bad'), fn(e) '${e}!'))\n\
+         \tprintln(result::map_err(Err(\"bad\"), fn(e) \"${e}!\"))\n\
          }\n",
         "Ok(6)\nErr(bad!)\n",
     );
@@ -85,7 +85,7 @@ fn stdlib_result() {
         "import scarlet/result\n\
          pub fn main() {\n\
          \tprintln(result::then(Ok(5), fn(x) Ok(x + 1)))\n\
-         \tprintln(result::then(Err('e'), fn(x) Ok(x + 1)))\n\
+         \tprintln(result::then(Err(\"e\"), fn(x) Ok(x + 1)))\n\
          }\n",
         "Ok(6)\nErr(e)\n",
     );
@@ -104,8 +104,8 @@ fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result::replace_err(Ok(5), 'boom'))\n\
-         \tprintln(result::replace_err(Err(Nil), 'boom'))\n\
+         \tprintln(result::replace_err(Ok(5), \"boom\"))\n\
+         \tprintln(result::replace_err(Err(Nil), \"boom\"))\n\
          }\n",
         "Ok(5)\nErr(boom)\n",
     );
@@ -113,8 +113,8 @@ fn stdlib_result() {
         "import scarlet/result\n\
          pub fn main() {\n\
          \tprintln(result::is_ok(Ok(1)))\n\
-         \tprintln(result::is_ok(Err('x')))\n\
-         \tprintln(result::is_err(Err('x')))\n\
+         \tprintln(result::is_ok(Err(\"x\")))\n\
+         \tprintln(result::is_err(Err(\"x\")))\n\
          \tprintln(result::is_err(Ok(1)))\n\
          }\n",
         "True\nFalse\nTrue\nFalse\n",
@@ -123,7 +123,7 @@ fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result::map(Err('e'), fn(x) x + 1))\n\
+         \tprintln(result::map(Err(\"e\"), fn(x) x + 1))\n\
          \tprintln(result::map_err(Ok(5), fn(e) e))\n\
          }\n",
         "Err(e)\nOk(5)\n",
@@ -137,7 +137,7 @@ fn stdlib_resource() {
     run_outputs(
         "import scarlet/resource\n\
          pub fn main() {\n\
-         \tr = resource::with(fn() 10, fn(c) println('release ${c}'), fn(c) c * 2)\n\
+         \tr = resource::with(fn() 10, fn(c) println(\"release ${c}\"), fn(c) c * 2)\n\
          \tprintln(r)\n\
          }\n",
         "release 10\n20\n",
@@ -147,8 +147,8 @@ fn stdlib_resource() {
     run_outputs(
         "import scarlet/resource\n\
          pub fn main() {\n\
-         \tprintln(resource::try_with(fn() Ok(1), fn(c) println('release ${c}'), fn(c) c + 1))\n\
-         \tprintln(resource::try_with(fn() Err(Nil), fn(_) println('never'), fn(c Int) c))\n\
+         \tprintln(resource::try_with(fn() Ok(1), fn(c) println(\"release ${c}\"), fn(c) c + 1))\n\
+         \tprintln(resource::try_with(fn() Err(Nil), fn(_) println(\"never\"), fn(c Int) c))\n\
          }\n",
         "release 1\nOk(2)\nErr(Nil)\n",
     );
@@ -158,7 +158,7 @@ fn stdlib_resource() {
         "import scarlet/resource\n\
          fn demo() Nil {\n\
          \tconn <- resource::with(fn() 7, fn(_) Nil)\n\
-         \tprintln('conn ${conn}')\n\
+         \tprintln(\"conn ${conn}\")\n\
          }\n\
          pub fn main() {\n\
          \tprintln(demo())\n\
@@ -216,14 +216,14 @@ fn stdlib_array() {
     run_outputs(
         "import scarlet/array\n\
          pub fn main() {\n\
-         \txs = ['a', 'b', 'c']\n\
-         \tprintln(array::set(xs, 2, 'z'))\n\
-         \tprintln(array::set(xs, 3, 'z'))\n\
-         \tprintln(array::put(xs, 0, 'z'))\n\
-         \tprintln(array::put(xs, -1, 'z'))\n\
+         \txs = [\"a\", \"b\", \"c\"]\n\
+         \tprintln(array::set(xs, 2, \"z\"))\n\
+         \tprintln(array::set(xs, 3, \"z\"))\n\
+         \tprintln(array::put(xs, 0, \"z\"))\n\
+         \tprintln(array::put(xs, -1, \"z\"))\n\
          \tprintln(array::swap(xs, 0, 2))\n\
          \tprintln(array::swap(xs, 0, 3))\n\
-         \tprintln(xs |> array::put(1, 'y') |> array::swap(1, 2))\n\
+         \tprintln(xs |> array::put(1, \"y\") |> array::swap(1, 2))\n\
          \tprintln(xs)\n\
          }\n",
         "Ok(\n  [a, b, z]\n)\nErr(Nil)\n[z, b, c]\n[a, b, c]\n[c, b, a]\n[a, b, c]\n\
@@ -353,21 +353,21 @@ fn stdlib_decimal() {
         "import scarlet/decimal\n\
          import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result::map(decimal::parse('19.99'), decimal::to_string))\n\
-         \tprintln(result::map(decimal::parse('-0.05'), decimal::to_string))\n\
-         \tprintln(result::map(decimal::parse('+1.50'), decimal::to_string))\n\
-         \tprintln(result::map(decimal::parse('42'), decimal::to_string))\n\
-         \tprintln(decimal::parse('1.'))\n\
-         \tprintln(decimal::parse('.5'))\n\
-         \tprintln(decimal::parse('1.2.3'))\n\
-         \tprintln(decimal::parse(''))\n\
-         \tprintln(decimal::parse('-'))\n\
-         \tprintln(decimal::parse('--5'))\n\
-         \tprintln(decimal::parse('1.-5'))\n\
-         \ttext = fn(s) { result::map(decimal::parse(s), decimal::to_string) or 'Err' }\n\
-         \tprintln(text('9223372036854775807.99'))\n\
-         \tprintln(result::map(decimal::parse('92233720368547758.07'), decimal::units))\n\
-         \tbig = '-123456789012345678901234567890.1234567890123456789012345'\n\
+         \tprintln(result::map(decimal::parse(\"19.99\"), decimal::to_string))\n\
+         \tprintln(result::map(decimal::parse(\"-0.05\"), decimal::to_string))\n\
+         \tprintln(result::map(decimal::parse(\"+1.50\"), decimal::to_string))\n\
+         \tprintln(result::map(decimal::parse(\"42\"), decimal::to_string))\n\
+         \tprintln(decimal::parse(\"1.\"))\n\
+         \tprintln(decimal::parse(\".5\"))\n\
+         \tprintln(decimal::parse(\"1.2.3\"))\n\
+         \tprintln(decimal::parse(\"\"))\n\
+         \tprintln(decimal::parse(\"-\"))\n\
+         \tprintln(decimal::parse(\"--5\"))\n\
+         \tprintln(decimal::parse(\"1.-5\"))\n\
+         \ttext = fn(s) { result::map(decimal::parse(s), decimal::to_string) or \"Err\" }\n\
+         \tprintln(text(\"9223372036854775807.99\"))\n\
+         \tprintln(result::map(decimal::parse(\"92233720368547758.07\"), decimal::units))\n\
+         \tbig = \"-123456789012345678901234567890.1234567890123456789012345\"\n\
          \tprintln(text(big))\n\
          \tprintln(result::map(decimal::parse(big), decimal::scale))\n\
          }\n",
@@ -400,7 +400,7 @@ fn stdlib_decimal() {
          \tprintln(decimal::to_string(decimal::round_with(decimal::new(1, 18), 0 - 1, decimal::Up)))\n\
          \tprintln(decimal::to_string(decimal::round_with(decimal::new(5000000000000000000, 18), 0 - 1, decimal::HalfUp)))\n\
          \tprintln(decimal::to_string(decimal::round(decimal::new(5000000000000000000, 18), 0 - 1)))\n\
-         \tshow = fn(q Result(decimal::Decimal, Nil)) { result::map(q, decimal::to_string) or 'Err' }\n\
+         \tshow = fn(q Result(decimal::Decimal, Nil)) { result::map(q, decimal::to_string) or \"Err\" }\n\
          \tprintln(show(decimal::div(decimal::from_int(1), decimal::from_int(1), 0 - 19)))\n\
          \tprintln(show(decimal::div(decimal::from_int(1), decimal::new(1, 18), 21)))\n\
          \tprintln(show(decimal::div(decimal::new(1, 12), decimal::from_int(1), 21)))\n\
@@ -456,7 +456,7 @@ fn stdlib_decimal() {
 fn stdlib_binary() {
     check_rejects(
         "import scarlet/net/socket\n\
-         fn f(c socket::Socket) Nil { socket::write(c, 'nope') or Nil }\n",
+         fn f(c socket::Socket) Nil { socket::write(c, \"nope\") or Nil }\n",
         "Type mismatch",
     );
 }
@@ -466,7 +466,7 @@ fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tb = binary::from_string('hi')\n\
+         \tb = binary::from_string(\"hi\")\n\
          \tprintln(binary::to_string(b))\n\
          \tprintln(binary::bit_size(b))\n\
          \tprintln(binary::byte_size(b))\n\
@@ -477,12 +477,12 @@ fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tb = binary::from_string('ABC')\n\
+         \tb = binary::from_string(\"ABC\")\n\
          \tprintln(binary::slice_bits(b, 8, 8))\n\
          \tprintln(binary::slice_bits(b, 0, 99))\n\
-         \tjoined = binary::append(binary::from_string('AB'), binary::from_string('C'))\n\
+         \tjoined = binary::append(binary::from_string(\"AB\"), binary::from_string(\"C\"))\n\
          \tprintln(binary::to_string(joined))\n\
-         \tprintln(binary::bit_size(binary::slice_bits(b, 0, 5) or binary::from_string('')))\n\
+         \tprintln(binary::bit_size(binary::slice_bits(b, 0, 5) or binary::from_string(\"\")))\n\
          }\n",
         "Ok(<<66>>)\nErr(Nil)\nOk(ABC)\n5\n",
     );
@@ -505,7 +505,7 @@ fn stdlib_binary_runs() {
         "import scarlet/binary\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tsrc = binary::from_string('ABCDE')\n\
+         \tsrc = binary::from_string(\"ABCDE\")\n\
          \tprintln(string::inspect(<<src:bytes(3)>>))\n\
          }\n",
         "<<65, 66, 67>>\n",
@@ -533,7 +533,7 @@ fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary::slice_bits(binary::from_string('ABC'), 0 - 1, 8))\n\
+         \tprintln(binary::slice_bits(binary::from_string(\"ABC\"), 0 - 1, 8))\n\
          }\n",
         "Err(Nil)\n",
     );
@@ -690,7 +690,7 @@ fn stdlib_binary_byte_at() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tb = binary::from_string('AZ')\n\
+         \tb = binary::from_string(\"AZ\")\n\
          \tprintln(binary::byte_at(b, 0))\n\
          \tprintln(binary::byte_at(b, 1))\n\
          \tprintln(binary::byte_at(b, 2))\n\
@@ -713,7 +713,7 @@ fn stdlib_http_builtins() {
         "import scarlet/binary\n\
          import scarlet/http/h1\n\
          pub fn main() {\n\
-         \tr = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \tr = match h1::parse_request(binary::from_string(\"GET / HTTP/1.1\\r\\n\\r\\n\"), 0) {\n\
          \t\th1::Done(_, _, version, _, _, consumed) ->\n\
          \t\t\tmatch version { h1::Http10 -> 10\n h1::Http11 -> 11 } + consumed\n\
          \t\th1::NeedMore -> 0\n\
@@ -726,7 +726,7 @@ fn stdlib_http_builtins() {
         "import scarlet/binary\n\
          import scarlet/http/h1\n\
          pub fn main() {\n\
-         \tr = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \tr = match h1::parse_request(binary::from_string(\"GET / HTTP/1.1\\r\\n\\r\\n\"), 0) {\n\
          \t\th1::Done(_, _, _, hdrs, _, _) -> match h1::framing(hdrs) {\n\
          \t\t\th1::NoBody -> 0\n\
          \t\t\th1::Length(n) -> n\n\
@@ -743,9 +743,9 @@ fn stdlib_http_builtins() {
          import scarlet/http/h1\n\
          import scarlet/http/headers\n\
          pub fn main() {\n\
-         \tr = match h1::chunk_decode(binary::from_string('5\\r\\nhello\\r\\n0\\r\\n\\r\\n'), 0, 1024) {\n\
+         \tr = match h1::chunk_decode(binary::from_string(\"5\\r\\nhello\\r\\n0\\r\\n\\r\\n\"), 0, 1024) {\n\
          \t\th1::ChunkedDone(body, trailers, consumed) -> {\n\
-         \t\t\thas_sum = headers::has(trailers, binary::from_string('x-sum'))\n\
+         \t\t\thas_sum = headers::has(trailers, binary::from_string(\"x-sum\"))\n\
          \t\t\tif has_sum { consumed } else { binary::byte_size(body) + consumed }\n\
          \t\t}\n\
          \t\th1::ChunkedNeedMore -> 0\n\
@@ -759,7 +759,7 @@ fn stdlib_http_builtins() {
          import scarlet/http/h1\n\
          import scarlet/http/headers\n\
          pub fn main() {\n\
-         \thead = h1::serialize_head(200, [headers::Header(name: binary::from_string('A'), value: binary::from_string('b'))])\n\
+         \thead = h1::serialize_head(200, [headers::Header(name: binary::from_string(\"A\"), value: binary::from_string(\"b\"))])\n\
          \tprintln(binary::byte_size(head))\n\
          }\n",
     );
@@ -767,10 +767,10 @@ fn stdlib_http_builtins() {
         "import scarlet/binary\n\
          import scarlet/http/headers\n\
          pub fn main() {\n\
-         \ths = [headers::Header(name: binary::from_string('Host'), value: binary::from_string('x'))]\n\
-         \tv = headers::get(hs, binary::from_string('host')) or binary::from_string('')\n\
+         \ths = [headers::Header(name: binary::from_string(\"Host\"), value: binary::from_string(\"x\"))]\n\
+         \tv = headers::get(hs, binary::from_string(\"host\")) or binary::from_string(\"\")\n\
          \tprintln(binary::to_string(v))\n\
-         \tprintln(headers::has(hs, binary::from_string('HOST')))\n\
+         \tprintln(headers::has(hs, binary::from_string(\"HOST\")))\n\
          }\n",
     );
 }
@@ -802,9 +802,9 @@ fn native_and_al_token_matching_agree() {
              import scarlet/http/h1\n\
              import scarlet/http/headers\n\
              pub fn main() {{\n\
-             \tname = binary::from_string('Connection')\n\
-             \tvalue = binary::from_string('{value}')\n\
-             \tnative = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\nConnection: {value}\\r\\n\\r\\n'), 0) {{\n\
+             \tname = binary::from_string(\"Connection\")\n\
+             \tvalue = binary::from_string(\"{value}\")\n\
+             \tnative = match h1::parse_request(binary::from_string(\"GET / HTTP/1.1\\r\\nConnection: {value}\\r\\n\\r\\n\"), 0) {{\n\
              \t\th1::Done(_, _, _, _, flags, _) -> match flags.conn {{\n\
              \t\t\th1::ConnClose -> True\n\
              \t\t\th1::ConnBoth -> True\n\
@@ -813,7 +813,7 @@ fn native_and_al_token_matching_agree() {
              \t\t}}\n\
              \t\th1::NeedMore | h1::Bad(_) -> False\n\
              \t}}\n\
-             \tal = headers::contains_token([headers::Header(name: name, value: value)], name, binary::from_string('close'))\n\
+             \tal = headers::contains_token([headers::Header(name: name, value: value)], name, binary::from_string(\"close\"))\n\
              \tprintln(native)\n\
              \tprintln(al)\n\
              }}\n"
@@ -835,7 +835,7 @@ fn stdlib_binary_ascii_builtins() {
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \ti = binary::index_of(binary::from_string('abc'), binary::from_string('b'), 0) or 0\n\
+         \ti = binary::index_of(binary::from_string(\"abc\"), binary::from_string(\"b\"), 0) or 0\n\
          \tprintln(i)\n\
          }\n",
     );
@@ -843,7 +843,7 @@ fn stdlib_binary_ascii_builtins() {
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tn = binary::parse_int(binary::from_string('42'), binary::Dec) or 0\n\
+         \tn = binary::parse_int(binary::from_string(\"42\"), binary::Dec) or 0\n\
          \tprintln(n)\n\
          }\n",
     );
@@ -851,14 +851,14 @@ fn stdlib_binary_ascii_builtins() {
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary::eq_ignore_ascii_case(binary::from_string('A'), binary::from_string('a')))\n\
+         \tprintln(binary::eq_ignore_ascii_case(binary::from_string(\"A\"), binary::from_string(\"a\")))\n\
          }\n",
     );
     // to_ascii_lower : (Binary) -> Binary
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary::to_string(binary::to_ascii_lower(binary::from_string('AB'))))\n\
+         \tprintln(binary::to_string(binary::to_ascii_lower(binary::from_string(\"AB\"))))\n\
          }\n",
     );
     // from_int_ascii : (Int, Radix) -> Binary
@@ -954,11 +954,11 @@ fn stdlib_string() {
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string::length('héllo'))\n\
-         \tprintln(string::split('abc', ''))\n\
-         \tprintln(string::contains('abc', 'z'))\n\
-         \tprintln(string::trim('\\t\\nhi\\n\\t'))\n\
-         \tprintln(string::inspect('hi'))\n\
+         \tprintln(string::length(\"héllo\"))\n\
+         \tprintln(string::split(\"abc\", \"\"))\n\
+         \tprintln(string::contains(\"abc\", \"z\"))\n\
+         \tprintln(string::trim(\"\\t\\nhi\\n\\t\"))\n\
+         \tprintln(string::inspect(\"hi\"))\n\
          \tprintln(string::inspect(42))\n\
          }\n",
         "5\n[a, b, c]\nFalse\nhi\nhi\n42\n",
@@ -969,24 +969,24 @@ fn stdlib_string() {
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string::replace('a-b-c', '-', '_'))\n\
-         \tprintln(string::replace('abc', 'z', 'Q'))\n\
-         \tprintln(string::replace('a\\r\\nb', '\\r', ''))\n\
+         \tprintln(string::replace(\"a-b-c\", \"-\", \"_\"))\n\
+         \tprintln(string::replace(\"abc\", \"z\", \"Q\"))\n\
+         \tprintln(string::replace(\"a\\r\\nb\", \"\\r\", \"\"))\n\
          }\n",
         "a_b_c\nabc\na\nb\n",
     );
     // to_graphemes keeps an extended grapheme cluster in one piece, where
-    // split('') would cut it at every scalar value. 'e' plus a combining acute
+    // split("") would cut it at every scalar value. 'e' plus a combining acute
     // (U+0301) is 2 scalar values and 1 cluster. The ZWJ family emoji from
     // T-287 is 7 scalar values and 1 cluster.
     run_outputs(
         "import scarlet/array\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string::length('e\u{0301}b'))\n\
-         \tprintln(array::length(string::to_graphemes('e\u{0301}b')))\n\
-         \tprintln(string::length('\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}'))\n\
-         \tprintln(array::length(string::to_graphemes('\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}')))\n\
+         \tprintln(string::length(\"e\u{0301}b\"))\n\
+         \tprintln(array::length(string::to_graphemes(\"e\u{0301}b\")))\n\
+         \tprintln(string::length(\"\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}\"))\n\
+         \tprintln(array::length(string::to_graphemes(\"\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}\")))\n\
          }\n",
         "3\n2\n7\n1\n",
     );
@@ -999,12 +999,12 @@ fn stdlib_string() {
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln('\\u{E9}')\n\
-         \tprintln(string::length('\\u{E9}'))\n\
-         \tprintln('\\u{1F469}')\n\
-         \tprintln(string::length('\\u{1F469}'))\n\
-         \tprintln('a\\u{0301}')\n\
-         \tprintln(string::length('a\\u{0301}'))\n\
+         \tprintln(\"\\u{E9}\")\n\
+         \tprintln(string::length(\"\\u{E9}\"))\n\
+         \tprintln(\"\\u{1F469}\")\n\
+         \tprintln(string::length(\"\\u{1F469}\"))\n\
+         \tprintln(\"a\\u{0301}\")\n\
+         \tprintln(string::length(\"a\\u{0301}\"))\n\
          }\n",
         "\u{E9}\n1\n\u{1F469}\n1\na\u{0301}\n2\n",
     );

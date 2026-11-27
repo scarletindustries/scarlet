@@ -45,9 +45,9 @@ fn kinds_clean(input: &str) -> Vec<Kind> {
 
 // Inlined rather than read from examples/: these assert an exact token
 // vector, which would otherwise freeze the example corpus.
-const HELLO_SRC: &str = "// Hello world, plus string interpolation with ${}.\n\nprintln('hello, world')\n\nname = 'Scarlet'\nprintln('hello from ${name}')\nprintln('2 + 2 = ${2 + 2}')\n";
+const HELLO_SRC: &str = "// Hello world, plus string interpolation with ${}.\n\nprintln(\"hello, world\")\n\nname = \"Scarlet\"\nprintln(\"hello from ${name}\")\nprintln(\"2 + 2 = ${2 + 2}\")\n";
 
-const FIZZBUZZ_SRC: &str = "fn fizzbuzz(n Int) String {\n\tmatch (n % 3, n % 5) {\n\t\t(0, 0) -> 'FizzBuzz'\n\t\t(0, _) -> 'Fizz'\n\t\t(_, 0) -> 'Buzz'\n\t\t_ -> '${n}'\n\t}\n}\n\nfn run(n Int, last Int) Nil {\n\tif n > last {\n\t\tNil\n\t} else {\n\t\tprintln(fizzbuzz(n))\n\t\trun(n + 1, last)\n\t}\n}\n\nrun(1, 20)\n";
+const FIZZBUZZ_SRC: &str = "fn fizzbuzz(n Int) String {\n\tmatch (n % 3, n % 5) {\n\t\t(0, 0) -> \"FizzBuzz\"\n\t\t(0, _) -> \"Fizz\"\n\t\t(_, 0) -> \"Buzz\"\n\t\t_ -> \"${n}\"\n\t}\n}\n\nfn run(n Int, last Int) Nil {\n\tif n > last {\n\t\tNil\n\t} else {\n\t\tprintln(fizzbuzz(n))\n\t\trun(n + 1, last)\n\t}\n}\n\nrun(1, 20)\n";
 
 #[test]
 fn digit_separators_stay_in_the_token() {
@@ -67,15 +67,15 @@ fn scans_hello_world() {
 
     #[rustfmt::skip]
         let expected = vec![
-            // println('hello, world')
+            // println("hello, world")
             ident("println"), PuncOpenParen, lit("hello, world"), PuncCloseParen,
-            // name = 'Scarlet'
+            // name = "Scarlet"
             ident("name"), PuncEquals, lit("Scarlet"),
-            // println('hello from ${name}')
+            // println("hello from ${name}")
             ident("println"), PuncOpenParen,
             InterpStringStart, part("hello from "), PuncOpenBrace, ident("name"), PuncCloseBrace, InterpStringEnd,
             PuncCloseParen,
-            // println('2 + 2 = ${2 + 2}')
+            // println("2 + 2 = ${2 + 2}")
             ident("println"), PuncOpenParen,
             InterpStringStart, part("2 + 2 = "), PuncOpenBrace, num("2"), PuncPlus, num("2"), PuncCloseBrace, InterpStringEnd,
             PuncCloseParen,
@@ -95,13 +95,13 @@ fn scans_fizzbuzz() {
             Keyword(Kw::Fn), ident("fizzbuzz"), PuncOpenParen, ident("n"), ident("Int"), PuncCloseParen, ident("String"), PuncOpenBrace,
             // match (n % 3, n % 5) {
             Keyword(Kw::Match), PuncOpenParen, ident("n"), PuncMod, num("3"), PuncComma, ident("n"), PuncMod, num("5"), PuncCloseParen, PuncOpenBrace,
-            // (0, 0) -> 'FizzBuzz'
+            // (0, 0) -> "FizzBuzz"
             PuncOpenParen, num("0"), PuncComma, num("0"), PuncCloseParen, PuncArrow, lit("FizzBuzz"),
-            // (0, _) -> 'Fizz'
+            // (0, _) -> "Fizz"
             PuncOpenParen, num("0"), PuncComma, ident("_"), PuncCloseParen, PuncArrow, lit("Fizz"),
-            // (_, 0) -> 'Buzz'
+            // (_, 0) -> "Buzz"
             PuncOpenParen, ident("_"), PuncComma, num("0"), PuncCloseParen, PuncArrow, lit("Buzz"),
-            // _ -> '${n}'
+            // _ -> "${n}"
             ident("_"), PuncArrow, InterpStringStart, PuncOpenBrace, ident("n"), PuncCloseBrace, InterpStringEnd,
             // } }
             PuncCloseBrace, PuncCloseBrace,
@@ -129,8 +129,8 @@ fn scans_fizzbuzz() {
 
 #[test]
 fn test_interp_nesting() {
-    // '${a}${b}' - two adjacent interpolations
-    let ks = kinds("'${a}${b}'");
+    // "${a}${b}" - two adjacent interpolations
+    let ks = kinds("\"${a}${b}\"");
     assert_eq!(
         ks,
         vec![
@@ -147,7 +147,7 @@ fn test_interp_nesting() {
     );
 
     // nested braces inside ${...}
-    let ks = kinds("'${ {a} }'");
+    let ks = kinds("\"${ {a} }\"");
     assert_eq!(
         ks,
         vec![
@@ -163,7 +163,7 @@ fn test_interp_nesting() {
     );
 
     // nested interpolated string inside ${...}
-    let ks = kinds("'a${'b${c}d'}e'");
+    let ks = kinds("\"a${\"b${c}d\"}e\"");
     assert_eq!(
         ks,
         vec![
@@ -317,7 +317,7 @@ fn hex_and_binary_literals() {
 
 #[test]
 fn test_string_literals() {
-    let (toks, _) = scan("'hello' 'a\\nb'");
+    let (toks, _) = scan("\"hello\" \"a\\nb\"");
     assert_tok(&toks, 0, lit("hello"));
     assert_tok(&toks, 1, lit("a\nb"));
 }
@@ -406,7 +406,7 @@ fn test_double_quote_interpolation() {
 
 #[test]
 fn test_mixed_quote_nesting() {
-    let ks = kinds_clean("\"outer ${'inner'}\"");
+    let ks = kinds_clean("\"outer ${\"inner\"}\"");
     assert!(ks.contains(&InterpStringStart));
     assert!(ks.contains(&lit("inner")));
     assert!(ks.contains(&InterpStringEnd));
@@ -463,22 +463,22 @@ fn test_float_then_method() {
 #[test]
 fn test_bare_dollar_is_not_interpolation() {
     // A `$` not followed by `{` or a name start is a literal char.
-    let (toks, _) = scan("'a$5'");
+    let (toks, _) = scan("\"a$5\"");
     assert_tok(&toks, 0, lit("a$5"));
     assert_tok(&toks, 1, Eof);
 
     // Bare `$` at end of string.
-    assert_eq!(kinds("'a$'"), vec![lit("a$"), Eof]);
+    assert_eq!(kinds("\"a$\""), vec![lit("a$"), Eof]);
 
     // But `${` and `$ident` still trigger interpolation.
-    assert_eq!(kinds("'a${x}'")[0], InterpStringStart);
-    assert_eq!(kinds("'a$x'")[0], InterpStringStart);
+    assert_eq!(kinds("\"a${x}\"")[0], InterpStringStart);
+    assert_eq!(kinds("\"a$x\"")[0], InterpStringStart);
 }
 
 #[test]
 fn test_backslash_at_newline_is_unterminated_not_unknown_escape() {
     // The `\` must not consume the newline, or the next line is lost.
-    let (toks, diags) = scan("x = 'abc\\\ny = 1");
+    let (toks, diags) = scan("x = \"abc\\\ny = 1");
     assert!(
         diags
             .iter()
@@ -496,7 +496,7 @@ fn test_backslash_at_newline_is_unterminated_not_unknown_escape() {
 
 #[test]
 fn test_backslash_at_eof_single_unterminated_error() {
-    let (toks, diags) = scan("x = '\\");
+    let (toks, diags) = scan("x = \"\\");
     assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
     assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
     assert!(diags[0].message().contains("This string is never closed"));
@@ -543,7 +543,7 @@ fn test_crlf_sources_scan_clean() {
 fn test_string_cannot_swallow_half_a_crlf() {
     // An unterminated string ends at the `\r`, and the `\r\n` still scans
     // as one newline rather than leaving a stray token.
-    let (toks, diags) = scan("x = 'abc\r\ny = 1");
+    let (toks, diags) = scan("x = \"abc\r\ny = 1");
     assert!(
         diags
             .iter()
@@ -558,7 +558,7 @@ fn test_string_cannot_swallow_half_a_crlf() {
 #[test]
 fn test_unterminated_plain_string_reports_at_opening_quote() {
     // Anchored at the opening quote (line 0, column 4), not at EOF.
-    let (_, diags) = scan("x = 'abc");
+    let (_, diags) = scan("x = \"abc");
     assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
     assert!(diags[0].message().contains("This string is never closed"));
     assert_eq!(
@@ -571,7 +571,7 @@ fn test_unterminated_plain_string_reports_at_opening_quote() {
 fn test_unterminated_interp_string_content_reports_at_opening_quote() {
     // The `${b}` closes, then the trailing content runs into EOF. The
     // error still anchors at the opening quote, column 4.
-    let (_, diags) = scan("x = 'a${b} cd");
+    let (_, diags) = scan("x = \"a${b} cd");
     let unterminated: Vec<_> = diags
         .iter()
         .filter(|d| d.message().contains("This string is never closed"))
@@ -590,7 +590,7 @@ fn test_unterminated_interp_string_content_reports_at_opening_quote() {
 fn test_unterminated_interpolation_reports_at_opening_quote() {
     // Regression: EOF inside `${...}` used to abandon the frame silently,
     // with no diagnostic at all.
-    let (toks, diags) = scan("x = '${abc");
+    let (toks, diags) = scan("x = \"${abc");
     assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
     let unterminated: Vec<_> = diags
         .iter()
@@ -610,7 +610,7 @@ fn test_unterminated_interpolation_reports_at_opening_quote() {
 #[test]
 fn test_nested_unterminated_interpolation_one_error_per_string() {
     // Two abandoned frames -> two errors, each at its own opening quote.
-    let (_, diags) = scan("'${\"${a");
+    let (_, diags) = scan("\"${\"${a");
     let cols: Vec<i32> = diags
         .iter()
         .filter(|d| d.message().contains("This string is never closed"))
@@ -658,11 +658,11 @@ fn test_unknown_escape_sequence_diagnostic() {
 fn test_unicode_escape_spells_a_code_point() {
     // A single scalar value, and one past the BMP (4-byte UTF-8). Both
     // scan cleanly, with no diagnostics.
-    assert_eq!(kinds_clean("'\\u{E9}'"), vec![lit("\u{E9}"), Eof]);
-    assert_eq!(kinds_clean("'\\u{1F469}'"), vec![lit("\u{1F469}"), Eof]);
+    assert_eq!(kinds_clean("\"\\u{E9}\""), vec![lit("\u{E9}"), Eof]);
+    assert_eq!(kinds_clean("\"\\u{1F469}\""), vec![lit("\u{1F469}"), Eof]);
 
     // Lowercase hex, and content on both sides survive untouched.
-    let ks = kinds_clean("'a\\u{1f469}b'");
+    let ks = kinds_clean("\"a\\u{1f469}b\"");
     assert!(ks.contains(&lit("a\u{1F469}b")), "tokens: {ks:?}");
 }
 
@@ -670,7 +670,7 @@ fn test_unicode_escape_spells_a_code_point() {
 fn test_unicode_escape_in_interpolated_string() {
     // The interp-string scanner is a second call site with its own copy
     // of the escape loop; cover it separately.
-    let ks = kinds_clean("'\\u{E9} $x'");
+    let ks = kinds_clean("\"\\u{E9} $x\"");
     assert!(ks.contains(&part("\u{E9} ")), "tokens: {ks:?}");
 }
 
@@ -678,7 +678,7 @@ fn test_unicode_escape_in_interpolated_string() {
 fn test_unicode_escape_malformed_recovers_with_diagnostic() {
     // Missing '{': the 'u' is echoed back, matching the unknown-escape
     // recovery style, and nothing after it is consumed.
-    let (toks, diags) = scan("'\\u41}'");
+    let (toks, diags) = scan("\"\\u41}\"");
     let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
     assert!(ks.contains(&lit("u41}")), "tokens: {ks:?}");
     assert!(
@@ -687,7 +687,7 @@ fn test_unicode_escape_malformed_recovers_with_diagnostic() {
     );
 
     // No closing '}'.
-    let (_, diags) = scan("'\\u{41'");
+    let (_, diags) = scan("\"\\u{41\"");
     assert!(
         diags
             .iter()
@@ -696,7 +696,7 @@ fn test_unicode_escape_malformed_recovers_with_diagnostic() {
     );
 
     // No digits at all.
-    let (toks, diags) = scan("'\\u{}'");
+    let (toks, diags) = scan("\"\\u{}\"");
     let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
     assert!(ks.contains(&lit("\u{FFFD}")), "tokens: {ks:?}");
     assert!(
@@ -707,7 +707,7 @@ fn test_unicode_escape_malformed_recovers_with_diagnostic() {
     );
 
     // A UTF-16 surrogate half: not a Unicode scalar value on its own.
-    let (toks, diags) = scan("'\\u{D800}'");
+    let (toks, diags) = scan("\"\\u{D800}\"");
     let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
     assert!(ks.contains(&lit("\u{FFFD}")), "tokens: {ks:?}");
     assert!(
@@ -718,11 +718,94 @@ fn test_unicode_escape_malformed_recovers_with_diagnostic() {
     );
 
     // Past U+10FFFF.
-    let (toks, diags) = scan("'\\u{110000}'");
+    let (toks, diags) = scan("\"\\u{110000}\"");
     let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
     assert!(ks.contains(&lit("\u{FFFD}")), "tokens: {ks:?}");
     assert!(
         diags.iter().any(|d| d.message().contains("U+10FFFF")),
         "diagnostics: {diags:?}"
     );
+}
+
+/// The scan errors of `src`, each with its line and column, counted from 0.
+fn errors(src: &str) -> Vec<(i32, i32, ScanError)> {
+    scan(src)
+        .1
+        .into_iter()
+        .map(|d| (d.span.start_line, d.span.start_column, d.problem))
+        .collect()
+}
+
+/// `single` scans as the same tokens as `double`, with one error at each of
+/// `at`, all on the first line.
+#[track_caller]
+fn scans_as(single: &str, double: &str, at: &[i32]) {
+    assert_eq!(kinds(single), kinds_clean(double), "{single}");
+    let want: Vec<_> = at
+        .iter()
+        .map(|c| (0, *c, ScanError::SingleQuotedString))
+        .collect();
+    assert_eq!(errors(single), want, "{single}");
+}
+
+#[test]
+fn a_single_quoted_string_is_one_error_at_its_quote() {
+    scans_as("x = 'hi'", r#"x = "hi""#, &[4]);
+    scans_as("''", r#""""#, &[0]);
+    scans_as("'it\\'s \\n'", r#""it's \n""#, &[0]);
+    scans_as(r#"'say "hi"'"#, r#""say \"hi\"""#, &[0]);
+    scans_as("f('a', 'b')", r#"f("a", "b")"#, &[2, 7]);
+    scans_as("'h\u{e9}' 'b'", "\"h\u{e9}\" \"b\"", &[0, 6]);
+}
+
+#[test]
+fn a_single_quoted_interpolation_is_one_error_at_its_quote() {
+    scans_as("x = 'a ${b} c'", r#"x = "a ${b} c""#, &[4]);
+    scans_as("'$x'", r#""$x""#, &[0]);
+}
+
+/// The outer string closes last, and is still reported first.
+#[test]
+fn single_quotes_inside_an_interpolation_are_their_own_errors() {
+    scans_as("\"a ${'b'} c\"", r#""a ${"b"} c""#, &[5]);
+    scans_as("'a ${'b'} c'", r#""a ${"b"} c""#, &[0, 5]);
+    scans_as(
+        "'${'${'x'}'}' + 'y'",
+        r#""${"${"x"}"}" + "y""#,
+        &[0, 3, 6, 16],
+    );
+    scans_as("'${f(\"b\")}'", r#""${f("b")}""#, &[0]);
+}
+
+#[test]
+fn a_single_quoted_pattern_is_one_error() {
+    scans_as(
+        "match x { 'a' -> <<'b', ..>> }",
+        r#"match x { "a" -> <<"b", ..>> }"#,
+        &[10, 19],
+    );
+}
+
+#[test]
+fn an_unclosed_single_quote_is_one_error() {
+    use ScanError::UnclosedSingleQuote;
+    for src in [
+        "x = 'abc",
+        "x = 'a\\",
+        "x = 'a ${b} c",
+        "x = 'a ${b",
+        "x = '",
+    ] {
+        assert_eq!(errors(src), [(0, 4, UnclosedSingleQuote)], "{src}");
+    }
+    // It ends with its line, and the next line scans.
+    assert_eq!(errors("x = 'abc\ny = \"b\""), [(0, 4, UnclosedSingleQuote)]);
+    assert_eq!(errors("don't\nx = 1"), [(0, 3, UnclosedSingleQuote)]);
+}
+
+#[test]
+fn an_apostrophe_is_fine_in_a_string_and_in_a_comment() {
+    assert_eq!(kinds_clean(r#""it's""#), [lit("it's"), Eof]);
+    assert_eq!(kinds_clean(r#""it\'s""#), [lit("it's"), Eof]);
+    assert_eq!(kinds_clean("// don't\n/* can't */"), [Eof]);
 }

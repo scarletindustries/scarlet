@@ -696,7 +696,7 @@ fn updates_in_a_loop_leave_nothing() {
         "import scarlet/internal\n\
          type P {\n\tP(a String, b Int, c String)\n}\n\
          fn go(p P, q P, n Int) String {\n\
-         \tif n == 0 { p.a + q.c } else { go(P(..q, a: 'x'), P(..p, c: p.a, b: n), n - 1) }\n\
+         \tif n == 0 { p.a + q.c } else { go(P(..q, a: \"x\"), P(..p, c: p.a, b: n), n - 1) }\n\
          }\n\
          fn kept(p P, s String, n Int, acc Int) Int {\n\
          \tif n == 0 {\n\t\tacc\n\t} else {\n\
@@ -704,10 +704,10 @@ fn updates_in_a_loop_leave_nothing() {
          \t\tkept(p, s, n - 1, if q.a == s && q.c == p.c { acc + 1 } else { acc })\n\t}\n\
          }\n\
          pub fn main() {\n\
-         \tp = P('1', 0, '2')\n\
+         \tp = P(\"1\", 0, \"2\")\n\
          \tprintln(go(p, p, 1000))\n\
-         \tr = P('${p.b}', 0, '4')\n\
-         \ts = 'a${p.b}'\n\
+         \tr = P(\"${p.b}\", 0, \"4\")\n\
+         \ts = \"a${p.b}\"\n\
          \tcells = internal::cells_made()\n\
          \tprintln(kept(r, s, 1000, 0) + internal::cells_made() - cells)\n\
          }\n",

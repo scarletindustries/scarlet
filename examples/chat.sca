@@ -106,83 +106,83 @@ fn remember(history Array(Binary), frame Binary) Array(Binary) {
 
 // An SSE event has an `event:` line, a `data:` line per line, then a blank line.
 fn sse(event String, lines Array(String)) Binary {
-	framed = array::fold(lines, 'event: ${event}\n', fn(acc, line) acc + 'data: ${line}\n')
-	binary::from_string(framed + '\n')
+	framed = array::fold(lines, "event: ${event}\n", fn(acc, line) acc + "data: ${line}\n")
+	binary::from_string(framed + "\n")
 }
 
 fn message_frame(name String, text String) Binary {
-	sse('message', [name, ..string::split(text, '\n')])
+	sse("message", [name, ..string::split(text, "\n")])
 }
 
 fn stats_frame(r Room) Binary {
 	restarts = process::info(r.place).restarts
-	sse('stats', ['${map::size(r.members)} ${r.said} ${restarts}'])
+	sse("stats", ["${map::size(r.members)} ${r.said} ${restarts}"])
 }
 
 fn tree_frame(r Room) Binary {
-	sse('tree', render(process::parent(r.place), '', r.place))
+	sse("tree", render(process::parent(r.place), "", r.place))
 }
 
-const HELLO = <<'retry: 1000\n\n'>>
-const PING = <<': ping\n\n'>>
-const RESTARTED = sse('system', [
-	'the room process crashed and was restarted; this tab rejoined it',
+const HELLO = <<"retry: 1000\n\n">>
+const PING = <<": ping\n\n">>
+const RESTARTED = sse("system", [
+	"the room process crashed and was restarted; this tab rejoined it",
 ])
 
 // The tree, as text
 
 // One line per node. Identical siblings collapse into one line with a count.
 fn render(node process::Supervised, indent String, me process::Supervised) Array(String) {
-	blocks = node |> process::children |> array::map(fn(child) render(child, indent + '  ', me))
+	blocks = node |> process::children |> array::map(fn(child) render(child, indent + "  ", me))
 	blocks |> collapse |> array::fold([indent + describe(node, me)], array::concat)
 }
 
 fn describe(node process::Supervised, me process::Supervised) String {
 	info = process::info(node)
 	what = match info.kind {
-		process::Process -> 'process'
-		process::Worker(policy) if node == me -> 'room  ${policy_name(policy)} worker'
-		process::Worker(policy) -> '${policy_name(policy)} worker'
-		process::SupervisorOf(strategy) -> 'supervisor ' + strategy_name(strategy)
+		process::Process -> "process"
+		process::Worker(policy) if node == me -> "room  ${policy_name(policy)} worker"
+		process::Worker(policy) -> "${policy_name(policy)} worker"
+		process::SupervisorOf(strategy) -> "supervisor " + strategy_name(strategy)
 		process::FactoryOf(process::Disposable) ->
-			'factory disposable, ${process::count(node)} live'
+			"factory disposable, ${process::count(node)} live"
 		process::FactoryOf(process::Restarted(restarts, within_ms)) ->
-			'factory ${budget(restarts, within_ms)}, ${process::count(node)} live'
+			"factory ${budget(restarts, within_ms)}, ${process::count(node)} live"
 	}
 	restarted = if info.restarts > 0 {
-		', restarted ${info.restarts}'
+		", restarted ${info.restarts}"
 	} else {
-		''
+		""
 	}
 	status = match info.status {
-		process::Running -> ''
-		process::Restarting -> ' (restarting)'
-		process::Gone -> ' (gone)'
+		process::Running -> ""
+		process::Restarting -> " (restarting)"
+		process::Gone -> " (gone)"
 	}
 	what + restarted + status
 }
 
 fn policy_name(policy process::Policy) String {
 	match policy {
-		process::Permanent -> 'permanent'
-		process::Transient -> 'transient'
-		process::Temporary -> 'temporary'
+		process::Permanent -> "permanent"
+		process::Transient -> "transient"
+		process::Temporary -> "temporary"
 	}
 }
 
 fn strategy_name(strategy process::Strategy) String {
 	match strategy {
-		process::OneForOne(restarts, within_ms) -> 'one-for-one, ${budget(restarts, within_ms)}'
-		process::OneForAll(restarts, within_ms) -> 'one-for-all, ${budget(restarts, within_ms)}'
-		process::RestForOne(restarts, within_ms) -> 'rest-for-one, ${budget(restarts, within_ms)}'
+		process::OneForOne(restarts, within_ms) -> "one-for-one, ${budget(restarts, within_ms)}"
+		process::OneForAll(restarts, within_ms) -> "one-for-all, ${budget(restarts, within_ms)}"
+		process::RestForOne(restarts, within_ms) -> "rest-for-one, ${budget(restarts, within_ms)}"
 	}
 }
 
 fn budget(restarts Int, within_ms Int) String {
 	if within_ms % 1000 == 0 {
-		'${restarts} restarts/${within_ms / 1000}s'
+		"${restarts} restarts/${within_ms / 1000}s"
 	} else {
-		'${restarts} restarts/${within_ms}ms'
+		"${restarts} restarts/${within_ms}ms"
 	}
 }
 
@@ -194,7 +194,7 @@ fn collapse(blocks Array(Array(String))) Array(Array(String)) {
 	runs
 	|> array::reverse
 	|> array::map(fn(run) match run {
-		([first, ..rest], n) if n > 1 -> ['${first} ×${n}', ..rest]
+		([first, ..rest], n) if n > 1 -> ["${first} ×${n}", ..rest]
 		(block, _) -> block
 	})
 }
@@ -203,13 +203,13 @@ fn collapse(blocks Array(Array(String))) Array(Array(String)) {
 
 fn route(req http::Request, chat process::Subject(RoomMsg)) http::Response {
 	match (req.method, http::path(req)) {
-		(http::Get, <<'/'>>) -> page()
-		(http::Get, <<'/events'>>) -> events(chat)
-		(http::Post, <<'/say'>>) -> match parse_say(req) {
+		(http::Get, <<"/">>) -> page()
+		(http::Get, <<"/events">>) -> events(chat)
+		(http::Post, <<"/say">>) -> match parse_say(req) {
 			Ok(msg) -> send(chat, msg)
 			Err(bad) -> bad
 		}
-		(http::Post, <<'/crash'>>) -> send(chat, Crash)
+		(http::Post, <<"/crash">>) -> send(chat, Crash)
 		(
 			http::Get
 			| http::Post
@@ -260,15 +260,15 @@ fn live(chat process::Subject(RoomMsg), feed process::Subject(Feed)) body::Body 
 
 // The body is a name, a newline, then the message.
 fn parse_say(req http::Request) Result(RoomMsg, http::Response) {
-	bytes <- result::then(body::collect(req.body, MAX_SAY) |> or_reply(413, 'too long'))
-	s <- result::then(binary::to_string(bytes) |> or_reply(400, 'not utf-8'))
+	bytes <- result::then(body::collect(req.body, MAX_SAY) |> or_reply(413, "too long"))
+	s <- result::then(binary::to_string(bytes) |> or_reply(400, "not utf-8"))
 	// A stray \r would end an SSE line early.
-	(first, rest) = match s |> without('\r') |> string::split('\n') {
-		[first, ..rest] -> (first, join(rest, '\n'))
-		[] -> ('', '')
+	(first, rest) = match s |> without("\r") |> string::split("\n") {
+		[first, ..rest] -> (first, join(rest, "\n"))
+		[] -> ("", "")
 	}
-	name <- result::then(field(first, MAX_NAME, 'bad name'))
-	message <- result::then(field(rest, MAX_TEXT, 'bad message'))
+	name <- result::then(field(first, MAX_NAME, "bad name"))
+	message <- result::then(field(rest, MAX_TEXT, "bad message"))
 	Ok(Say(name, message))
 }
 
@@ -278,7 +278,7 @@ fn or_reply(r Result(a, e), status Int, why String) Result(a, http::Response) {
 
 fn field(s String, max Int, why String) Result(String, http::Response) {
 	trimmed = string::trim(s)
-	if trimmed == '' || string::length(trimmed) > max {
+	if trimmed == "" || string::length(trimmed) > max {
 		Err(text(400, why))
 	} else {
 		Ok(trimmed)
@@ -286,27 +286,27 @@ fn field(s String, max Int, why String) Result(String, http::Response) {
 }
 
 fn without(s String, needle String) String {
-	s |> string::split(needle) |> join('')
+	s |> string::split(needle) |> join("")
 }
 
 fn join(parts Array(String), sep String) String {
 	match parts {
-		[] -> ''
+		[] -> ""
 		[first, ..rest] -> array::fold(rest, first, fn(acc, part) acc + sep + part)
 	}
 }
 
-const NAME_CONTENT_TYPE = <<'Content-Type'>>
-const NAME_CACHE_CONTROL = <<'Cache-Control'>>
+const NAME_CONTENT_TYPE = <<"Content-Type">>
+const NAME_CACHE_CONTROL = <<"Cache-Control">>
 const SSE_HEADERS = [
-	headers::Header(name: NAME_CONTENT_TYPE, value: <<'text/event-stream'>>),
-	headers::Header(name: NAME_CACHE_CONTROL, value: <<'no-cache'>>),
+	headers::Header(name: NAME_CONTENT_TYPE, value: <<"text/event-stream">>),
+	headers::Header(name: NAME_CACHE_CONTROL, value: <<"no-cache">>),
 ]
 
 fn page() http::Response {
 	http::Response(
 		status: 200,
-		headers: [headers::Header(name: NAME_CONTENT_TYPE, value: <<'text/html; charset=utf-8'>>)],
+		headers: [headers::Header(name: NAME_CONTENT_TYPE, value: <<"text/html; charset=utf-8">>)],
 		body: http::Fixed(binary::byte_size(PAGE), body::from_binary(PAGE)),
 	)
 }
@@ -319,7 +319,7 @@ fn text(status Int, s String) http::Response {
 	bytes = binary::from_string(s)
 	http::Response(
 		status: status,
-		headers: [headers::Header(name: NAME_CONTENT_TYPE, value: <<'text/plain; charset=utf-8'>>)],
+		headers: [headers::Header(name: NAME_CONTENT_TYPE, value: <<"text/plain; charset=utf-8">>)],
 		body: http::Fixed(binary::byte_size(bytes), body::from_binary(bytes)),
 	)
 }
@@ -330,157 +330,157 @@ pub fn main() Nil {
 	// Past 10 crashes a minute the supervisor gives up and the program exits.
 	app <- process::root(process::OneForOne(restarts: 10, within_ms: 60_000))
 	chat = process::permanent(app, room)
-	port = { os::get_env('PORT') or '8080' }
+	port = { os::get_env("PORT") or "8080" }
 		|> binary::from_string
 		|> binary::parse_int(binary::Dec) or 8080
-	match http::serve_in(app, '0.0.0.0', port, fn(req) route(req, chat), log_failed) {
-		Ok(_) -> println('chat is up on http://localhost:${port}')
+	match http::serve_in(app, "0.0.0.0", port, fn(req) route(req, chat), log_failed) {
+		Ok(_) -> println("chat is up on http://localhost:${port}")
 		Err(e) -> {
-			println('cannot listen on port ${port}: ${e}')
+			println("cannot listen on port ${port}: ${e}")
 			process::kill(process::self())
 		}
 	}
 }
 
 fn log_failed(e net::ConnectionError) Nil {
-	println('connection from ${address::to_string(e.peer)} failed: ${e.error}')
+	println("connection from ${address::to_string(e.peer)} failed: ${e.error}")
 }
 
 // The dashboard. Messages render with textContent, never as markup.
 
-const PAGE = PAGE_LINES |> join('\n') |> binary::from_string
+const PAGE = PAGE_LINES |> join("\n") |> binary::from_string
 
 const PAGE_LINES = [
-	'<!doctype html>',
-	'<html lang="en">',
-	'<head>',
-	'<meta charset="utf-8">',
-	'<meta name="viewport" content="width=device-width, initial-scale=1">',
-	'<title>scarlet chat</title>',
-	'<style>',
-	':root{--bg:#0c0e13;--panel:#12151d;--line:#222835;--fg:#e8eaf0;--dim:#8b93a7;--red:#e5484d;--red-soft:rgba(229,72,77,.13);--ok:#3ddc84;',
-	'--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,Inter,"Segoe UI",Roboto,sans-serif}',
-	'*{box-sizing:border-box}',
-	'html,body{height:100%;margin:0}',
-	'body{display:grid;grid-template-rows:54px 1fr;grid-template-columns:1fr 340px;grid-template-areas:"head head" "chat side";background:var(--bg);color:var(--fg);font:15px/1.45 var(--sans)}',
-	'header{grid-area:head;display:flex;align-items:center;gap:12px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--panel)}',
-	'header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}',
-	'header h1 b{color:var(--red)}',
-	'#dot{width:8px;height:8px;border-radius:50%;background:var(--dim);transition:background .3s,box-shadow .3s}',
-	'#dot.on{background:var(--ok);box-shadow:0 0 10px var(--ok)}',
-	'#state{margin-left:auto;color:var(--dim);font:12px var(--mono)}',
-	'main{grid-area:chat;display:flex;flex-direction:column;min-height:0}',
-	'#log{flex:1;overflow-y:auto;padding:18px 24px 8px}',
-	'.col{max-width:760px;margin:0 auto}',
-	'#empty{padding:80px 0;color:var(--dim);text-align:center;font-size:13px}',
-	'.m{display:grid;grid-template-columns:34px 1fr;gap:10px;padding:5px 0;animation:in .18s ease-out}',
-	'@keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}',
-	'.av{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-weight:700;font-size:14px;color:#0c0e13}',
-	'.who{font-weight:600;font-size:13px}',
-	'.when{margin-left:8px;color:var(--dim);font:11px var(--mono)}',
-	'.txt{white-space:pre-wrap;overflow-wrap:anywhere}',
-	'.sys{padding:10px 0;text-align:center;color:var(--red);font:12px var(--mono)}',
-	'footer{padding:14px 24px 18px;border-top:1px solid var(--line);background:var(--panel)}',
-	'form{display:grid;grid-template-columns:150px 1fr auto;gap:8px}',
-	'input,button{min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--fg);font:inherit;outline:none}',
-	'input:focus{border-color:var(--red)}',
-	'button{padding:10px 18px;border-color:var(--red);background:var(--red);color:#fff;font-weight:600;cursor:pointer}',
-	'aside{grid-area:side;display:flex;flex-direction:column;gap:18px;padding:18px;border-left:1px solid var(--line);background:var(--panel);overflow-y:auto}',
-	'aside h2{margin:0 0 8px;color:var(--dim);font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase}',
-	'.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}',
-	'.tile{padding:10px 6px;border:1px solid var(--line);border-radius:10px;background:var(--bg);text-align:center}',
-	'.tile b{display:block;font-size:22px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;transition:color .5s}',
-	'.tile.bump b{color:var(--red);transition:none}',
-	'.tile span{color:var(--dim);font-size:11px}',
-	'pre{margin:0;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--dim);font:11.5px/1.6 var(--mono);overflow-x:auto}',
-	'#crash{margin-top:auto;border-color:transparent;background:var(--red-soft);color:var(--red);font-size:13px;font-weight:500}',
-	'#crash:hover{background:var(--red);color:#fff}',
-	'aside p{margin:8px 0 0;color:var(--dim);font-size:11.5px;line-height:1.45}',
-	'@media (max-width:760px){body{grid-template-columns:1fr;grid-template-areas:"head" "chat"}aside{display:none}form{grid-template-columns:110px 1fr auto}}',
-	'</style>',
-	'</head>',
-	'<body>',
-	'<header><span id="dot"></span><h1><b>scarlet</b> chat</h1><span id="state">connecting</span></header>',
-	'<main>',
-	'<div id="log"><div class="col" id="messages"></div></div>',
-	'<footer><form class="col" id="composer">',
-	'<input id="who" placeholder="name" maxlength="24" autocomplete="off">',
-	'<input id="what" placeholder="say something" maxlength="500" autocomplete="off" autofocus>',
-	'<button>send</button>',
-	'</form></footer>',
-	'</main>',
-	'<aside>',
-	'<section><h2>Room</h2><div class="tiles">',
-	'<div class="tile"><b id="n-online">0</b><span>online</span></div>',
-	'<div class="tile"><b id="n-said">0</b><span>messages</span></div>',
-	'<div class="tile"><b id="n-restarts">0</b><span>restarts</span></div>',
-	'</div></section>',
-	'<section><h2>Process tree</h2><pre id="tree">waiting for the room</pre></section>',
-	'<button id="crash" type="button">crash the room process</button>',
-	'<p>The room is a supervised worker. Crash it and the supervisor restarts it at the same address:',
-	' every open tab rejoins the new one without reconnecting, and only the history is lost.',
-	' Crash it more than ten times in a minute and the supervisor gives up, and the program exits.</p>',
-	'</aside>',
-	'<script>',
-	'(function () {',
-	'  var byId = function (id) { return document.getElementById(id); };',
-	'  var log = byId("log"), list = byId("messages"), tree = byId("tree"), dot = byId("dot"), state = byId("state");',
-	'  var who = byId("who"), what = byId("what"), crash = byId("crash");',
-	'  var tiles = [byId("n-online"), byId("n-said"), byId("n-restarts")];',
-	'  who.value = localStorage.getItem("chat.name") || "";',
-	'  function hue(s) { var h = 0; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % 360; }',
-	'  function two(n) { return (n < 10 ? "0" : "") + n; }',
-	'  function stamp() { var d = new Date(); return two(d.getHours()) + ":" + two(d.getMinutes()); }',
-	'  function el(tag, cls, body) { var e = document.createElement(tag); e.className = cls; if (body !== undefined) e.textContent = body; return e; }',
-	'  function add(node) {',
-	'    var pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 40;',
-	'    var empty = byId("empty");',
-	'    if (empty) empty.remove();',
-	'    list.appendChild(node);',
-	'    while (list.children.length > 400) list.removeChild(list.firstChild);',
-	'    if (pinned) log.scrollTop = log.scrollHeight;',
-	'  }',
-	'  function reset(note) { list.textContent = ""; var e = el("div", "", note); e.id = "empty"; list.appendChild(e); }',
-	'  function system(line) { add(el("div", "sys", line)); }',
-	'  function message(name, body) {',
-	'    var m = el("div", "m"), av = el("div", "av", name.charAt(0).toUpperCase()), right = el("div", "");',
-	'    var head = el("div", ""), n = el("span", "who", name);',
-	'    av.style.background = "hsl(" + hue(name) + " 70% 66%)";',
-	'    n.style.color = "hsl(" + hue(name) + " 70% 74%)";',
-	'    head.appendChild(n); head.appendChild(el("span", "when", stamp()));',
-	'    right.appendChild(head); right.appendChild(el("div", "txt", body));',
-	'    m.appendChild(av); m.appendChild(right); add(m);',
-	'  }',
-	'  function stats(line) {',
-	'    line.split(" ").forEach(function (n, i) {',
-	'      var tile = tiles[i];',
-	'      if (tile.textContent === n) return;',
-	'      tile.textContent = n;',
-	'      tile.parentNode.classList.add("bump");',
-	'      setTimeout(function () { tile.parentNode.classList.remove("bump"); }, 50);',
-	'    });',
-	'  }',
-	'  var events = new EventSource("/events");',
-	'  events.onopen = function () { reset("nothing said yet"); dot.className = "on"; state.textContent = "live"; };',
-	'  events.onerror = function () { dot.className = ""; state.textContent = "reconnecting"; };',
-	'  events.addEventListener("message", function (e) { var i = e.data.indexOf("\\n"); message(e.data.slice(0, i), e.data.slice(i + 1)); });',
-	'  events.addEventListener("stats", function (e) { stats(e.data); });',
-	'  events.addEventListener("tree", function (e) { tree.textContent = e.data; });',
-	'  events.addEventListener("system", function (e) { system(e.data); });',
-	'  byId("composer").onsubmit = function (e) {',
-	'    e.preventDefault();',
-	'    var name = who.value.trim() || "anon", body = what.value.trim();',
-	'    if (!body) return;',
-	'    localStorage.setItem("chat.name", name);',
-	'    what.value = "";',
-	'    var restore = function (why) { system(why); if (!what.value) what.value = body; };',
-	'    fetch("/say", { method: "POST", body: name + "\\n" + body })',
-	'      .then(function (r) { if (!r.ok) restore("rejected: " + r.status); },',
-	'            function () { restore("send failed"); });',
-	'  };',
-	'  crash.onclick = function () { fetch("/crash", { method: "POST" }); what.focus(); };',
-	'})();',
-	'</script>',
-	'</body>',
-	'</html>',
+	"<!doctype html>",
+	"<html lang=\"en\">",
+	"<head>",
+	"<meta charset=\"utf-8\">",
+	"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+	"<title>scarlet chat</title>",
+	"<style>",
+	":root{--bg:#0c0e13;--panel:#12151d;--line:#222835;--fg:#e8eaf0;--dim:#8b93a7;--red:#e5484d;--red-soft:rgba(229,72,77,.13);--ok:#3ddc84;",
+	"--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:-apple-system,BlinkMacSystemFont,Inter,\"Segoe UI\",Roboto,sans-serif}",
+	"*{box-sizing:border-box}",
+	"html,body{height:100%;margin:0}",
+	"body{display:grid;grid-template-rows:54px 1fr;grid-template-columns:1fr 340px;grid-template-areas:\"head head\" \"chat side\";background:var(--bg);color:var(--fg);font:15px/1.45 var(--sans)}",
+	"header{grid-area:head;display:flex;align-items:center;gap:12px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--panel)}",
+	"header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}",
+	"header h1 b{color:var(--red)}",
+	"#dot{width:8px;height:8px;border-radius:50%;background:var(--dim);transition:background .3s,box-shadow .3s}",
+	"#dot.on{background:var(--ok);box-shadow:0 0 10px var(--ok)}",
+	"#state{margin-left:auto;color:var(--dim);font:12px var(--mono)}",
+	"main{grid-area:chat;display:flex;flex-direction:column;min-height:0}",
+	"#log{flex:1;overflow-y:auto;padding:18px 24px 8px}",
+	".col{max-width:760px;margin:0 auto}",
+	"#empty{padding:80px 0;color:var(--dim);text-align:center;font-size:13px}",
+	".m{display:grid;grid-template-columns:34px 1fr;gap:10px;padding:5px 0;animation:in .18s ease-out}",
+	"@keyframes in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}",
+	".av{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-weight:700;font-size:14px;color:#0c0e13}",
+	".who{font-weight:600;font-size:13px}",
+	".when{margin-left:8px;color:var(--dim);font:11px var(--mono)}",
+	".txt{white-space:pre-wrap;overflow-wrap:anywhere}",
+	".sys{padding:10px 0;text-align:center;color:var(--red);font:12px var(--mono)}",
+	"footer{padding:14px 24px 18px;border-top:1px solid var(--line);background:var(--panel)}",
+	"form{display:grid;grid-template-columns:150px 1fr auto;gap:8px}",
+	"input,button{min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--fg);font:inherit;outline:none}",
+	"input:focus{border-color:var(--red)}",
+	"button{padding:10px 18px;border-color:var(--red);background:var(--red);color:#fff;font-weight:600;cursor:pointer}",
+	"aside{grid-area:side;display:flex;flex-direction:column;gap:18px;padding:18px;border-left:1px solid var(--line);background:var(--panel);overflow-y:auto}",
+	"aside h2{margin:0 0 8px;color:var(--dim);font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase}",
+	".tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}",
+	".tile{padding:10px 6px;border:1px solid var(--line);border-radius:10px;background:var(--bg);text-align:center}",
+	".tile b{display:block;font-size:22px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;transition:color .5s}",
+	".tile.bump b{color:var(--red);transition:none}",
+	".tile span{color:var(--dim);font-size:11px}",
+	"pre{margin:0;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--dim);font:11.5px/1.6 var(--mono);overflow-x:auto}",
+	"#crash{margin-top:auto;border-color:transparent;background:var(--red-soft);color:var(--red);font-size:13px;font-weight:500}",
+	"#crash:hover{background:var(--red);color:#fff}",
+	"aside p{margin:8px 0 0;color:var(--dim);font-size:11.5px;line-height:1.45}",
+	"@media (max-width:760px){body{grid-template-columns:1fr;grid-template-areas:\"head\" \"chat\"}aside{display:none}form{grid-template-columns:110px 1fr auto}}",
+	"</style>",
+	"</head>",
+	"<body>",
+	"<header><span id=\"dot\"></span><h1><b>scarlet</b> chat</h1><span id=\"state\">connecting</span></header>",
+	"<main>",
+	"<div id=\"log\"><div class=\"col\" id=\"messages\"></div></div>",
+	"<footer><form class=\"col\" id=\"composer\">",
+	"<input id=\"who\" placeholder=\"name\" maxlength=\"24\" autocomplete=\"off\">",
+	"<input id=\"what\" placeholder=\"say something\" maxlength=\"500\" autocomplete=\"off\" autofocus>",
+	"<button>send</button>",
+	"</form></footer>",
+	"</main>",
+	"<aside>",
+	"<section><h2>Room</h2><div class=\"tiles\">",
+	"<div class=\"tile\"><b id=\"n-online\">0</b><span>online</span></div>",
+	"<div class=\"tile\"><b id=\"n-said\">0</b><span>messages</span></div>",
+	"<div class=\"tile\"><b id=\"n-restarts\">0</b><span>restarts</span></div>",
+	"</div></section>",
+	"<section><h2>Process tree</h2><pre id=\"tree\">waiting for the room</pre></section>",
+	"<button id=\"crash\" type=\"button\">crash the room process</button>",
+	"<p>The room is a supervised worker. Crash it and the supervisor restarts it at the same address:",
+	" every open tab rejoins the new one without reconnecting, and only the history is lost.",
+	" Crash it more than ten times in a minute and the supervisor gives up, and the program exits.</p>",
+	"</aside>",
+	"<script>",
+	"(function () {",
+	"  var byId = function (id) { return document.getElementById(id); };",
+	"  var log = byId(\"log\"), list = byId(\"messages\"), tree = byId(\"tree\"), dot = byId(\"dot\"), state = byId(\"state\");",
+	"  var who = byId(\"who\"), what = byId(\"what\"), crash = byId(\"crash\");",
+	"  var tiles = [byId(\"n-online\"), byId(\"n-said\"), byId(\"n-restarts\")];",
+	"  who.value = localStorage.getItem(\"chat.name\") || \"\";",
+	"  function hue(s) { var h = 0; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % 360; }",
+	"  function two(n) { return (n < 10 ? \"0\" : \"\") + n; }",
+	"  function stamp() { var d = new Date(); return two(d.getHours()) + \":\" + two(d.getMinutes()); }",
+	"  function el(tag, cls, body) { var e = document.createElement(tag); e.className = cls; if (body !== undefined) e.textContent = body; return e; }",
+	"  function add(node) {",
+	"    var pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 40;",
+	"    var empty = byId(\"empty\");",
+	"    if (empty) empty.remove();",
+	"    list.appendChild(node);",
+	"    while (list.children.length > 400) list.removeChild(list.firstChild);",
+	"    if (pinned) log.scrollTop = log.scrollHeight;",
+	"  }",
+	"  function reset(note) { list.textContent = \"\"; var e = el(\"div\", \"\", note); e.id = \"empty\"; list.appendChild(e); }",
+	"  function system(line) { add(el(\"div\", \"sys\", line)); }",
+	"  function message(name, body) {",
+	"    var m = el(\"div\", \"m\"), av = el(\"div\", \"av\", name.charAt(0).toUpperCase()), right = el(\"div\", \"\");",
+	"    var head = el(\"div\", \"\"), n = el(\"span\", \"who\", name);",
+	"    av.style.background = \"hsl(\" + hue(name) + \" 70% 66%)\";",
+	"    n.style.color = \"hsl(\" + hue(name) + \" 70% 74%)\";",
+	"    head.appendChild(n); head.appendChild(el(\"span\", \"when\", stamp()));",
+	"    right.appendChild(head); right.appendChild(el(\"div\", \"txt\", body));",
+	"    m.appendChild(av); m.appendChild(right); add(m);",
+	"  }",
+	"  function stats(line) {",
+	"    line.split(\" \").forEach(function (n, i) {",
+	"      var tile = tiles[i];",
+	"      if (tile.textContent === n) return;",
+	"      tile.textContent = n;",
+	"      tile.parentNode.classList.add(\"bump\");",
+	"      setTimeout(function () { tile.parentNode.classList.remove(\"bump\"); }, 50);",
+	"    });",
+	"  }",
+	"  var events = new EventSource(\"/events\");",
+	"  events.onopen = function () { reset(\"nothing said yet\"); dot.className = \"on\"; state.textContent = \"live\"; };",
+	"  events.onerror = function () { dot.className = \"\"; state.textContent = \"reconnecting\"; };",
+	"  events.addEventListener(\"message\", function (e) { var i = e.data.indexOf(\"\\n\"); message(e.data.slice(0, i), e.data.slice(i + 1)); });",
+	"  events.addEventListener(\"stats\", function (e) { stats(e.data); });",
+	"  events.addEventListener(\"tree\", function (e) { tree.textContent = e.data; });",
+	"  events.addEventListener(\"system\", function (e) { system(e.data); });",
+	"  byId(\"composer\").onsubmit = function (e) {",
+	"    e.preventDefault();",
+	"    var name = who.value.trim() || \"anon\", body = what.value.trim();",
+	"    if (!body) return;",
+	"    localStorage.setItem(\"chat.name\", name);",
+	"    what.value = \"\";",
+	"    var restore = function (why) { system(why); if (!what.value) what.value = body; };",
+	"    fetch(\"/say\", { method: \"POST\", body: name + \"\\n\" + body })",
+	"      .then(function (r) { if (!r.ok) restore(\"rejected: \" + r.status); },",
+	"            function () { restore(\"send failed\"); });",
+	"  };",
+	"  crash.onclick = function () { fetch(\"/crash\", { method: \"POST\" }); what.focus(); };",
+	"})();",
+	"</script>",
+	"</body>",
+	"</html>",
 ]

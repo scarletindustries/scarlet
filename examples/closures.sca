@@ -29,38 +29,38 @@ fn pipeline(steps Array(fn(Int) Int)) fn(Int) Int {
 
 pub fn main() {
 	orders = [
-		Line(sku: 'AL-1', qty: 4, cents: 1250),
-		Line(sku: 'AL-2', qty: 12, cents: 800),
-		Line(sku: 'AL-3', qty: 40, cents: 250),
-		Line(sku: 'AL-4', qty: 7, cents: 9900),
+		Line(sku: "AL-1", qty: 4, cents: 1250),
+		Line(sku: "AL-2", qty: 12, cents: 800),
+		Line(sku: "AL-3", qty: 40, cents: 250),
+		Line(sku: "AL-4", qty: 7, cents: 9900),
 	]
 
 	// map, filter and fold read as a chain of small anonymous functions.
-	lines = orders |> array::filter(at_least(10)) |> array::map(fn(o) '${o.sku} x${o.qty}')
+	lines = orders |> array::filter(at_least(10)) |> array::map(fn(o) "${o.sku} x${o.qty}")
 	revenue = array::fold(orders, 0, fn(sum, o) sum + o.qty * o.cents)
 
-	array::each(lines, fn(line) println('bulk: ${line}'))
-	println('revenue: ${revenue} cents over ${array::length(orders)} orders')
+	array::each(lines, fn(line) println("bulk: ${line}"))
+	println("revenue: ${revenue} cents over ${array::length(orders)} orders")
 
 	// A closure captures the value a name holds when made; rebinding
 	// afterwards doesn't reach into it.
 	base = 10
 	add_base = adder(base)
 	base = 100
-	println('add_base(1) = ${add_base(1)}, base is now ${base}')
+	println("add_base(1) = ${add_base(1)}, base is now ${base}")
 
 	// Steps are ordinary values, so a pipeline can be assembled at run time.
 	normalise = pipeline([adder(-1), fn(x) x * x, adder(100)])
-	println('normalise ${1..5 |> array::map(normalise) |> string::inspect}')
+	println("normalise ${1..5 |> array::map(normalise) |> string::inspect}")
 
 	// A spread splices one array into another. Ranges are arrays, so they splice too.
 	qtys = [..array::map(orders, fn(o) o.qty), ..{ 1..3 }]
-	println('quantities ${string::inspect(qtys)}')
+	println("quantities ${string::inspect(qtys)}")
 
 	// find returns an Option. option::map works inside it, and or gives the fallback.
 	biggest = array::find(orders, fn(o) o.qty > 30)
-	println('biggest sku: ${option::map(biggest, fn(o) o.sku) or 'none'}')
+	println("biggest sku: ${option::map(biggest, fn(o) o.sku) or "none"}")
 
 	cheap = array::find(orders, fn(o) o.cents < 100)
-	println('cheap sku: ${option::map(cheap, fn(o) o.sku) or 'none'}')
+	println("cheap sku: ${option::map(cheap, fn(o) o.sku) or "none"}")
 }

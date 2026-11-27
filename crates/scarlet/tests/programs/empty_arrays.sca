@@ -62,7 +62,7 @@ fn every_way() Array(Array(Int)) {
 		array::set([], 0, 1) or [],
 		map::keys(map::new()),
 		map::values(map::delete(map::set(map::new(), 1, 2), 1)),
-		array::map(json::elements(doc('[]')), fn(_) 1),
+		array::map(json::elements(doc("[]")), fn(_) 1),
 		Box([], 1).xs,
 		Box(..Box([1], 2), xs: []).xs,
 	]
@@ -71,15 +71,15 @@ fn every_way() Array(Array(Int)) {
 fn doc(text String) json::Doc {
 	match json::parse(text) {
 		Ok(d) -> d
-		Err(_) -> doc('null')
+		Err(_) -> doc("null")
 	}
 }
 
 fn shape(xs Array(Int)) String {
 	match xs {
-		[] -> 'none'
-		[_] -> 'one'
-		[_, ..t] -> 'more ${array::length(t)}'
+		[] -> "none"
+		[_] -> "one"
+		[_, ..t] -> "more ${array::length(t)}"
 	}
 }
 
@@ -93,19 +93,19 @@ pub fn main() {
 	array::each(ways, fn(xs) {
 		same_as = array::filter(ways, fn(ys) xs == ys)
 		println(
-			'${xs} ${array::length(
+			"${xs} ${array::length(
 				xs,
 			)} ${shape(
 				xs,
 			)} ${xs[0]} ${xs[0..0]} ${xs[0..1]} ${[
 				..xs,
 				1,
-			]} ${[2, ..xs]} ${[..xs, 1, 2]} ${[1, 2, ..xs]} ${[..xs, ..xs]} ${[..xs, ..0..2]}',
+			]} ${[2, ..xs]} ${[..xs, 1, 2]} ${[1, 2, ..xs]} ${[..xs, ..xs]} ${[..xs, ..0..2]}",
 		)
 		println(
-			'${array::length(
+			"${array::length(
 				same_as,
-			)} ${xs == 0..0} ${xs != []} ${xs == [1]} ${[1] == xs} ${0..3 == xs}',
+			)} ${xs == 0..0} ${xs != []} ${xs == [1]} ${[1] == xs} ${0..3 == xs}",
 		)
 	})
 	println(ways == array::reverse(ways))
@@ -121,19 +121,19 @@ pub fn main() {
 	println(
 		{
 			map::new()
-			|> map::set([], 'empty')
-			|> map::set([1], 'one')
-			|> map::set([1, 2], 'two')
-			|> map::set(0..1, 'zero')
+			|> map::set([], "empty")
+			|> map::set([1], "one")
+			|> map::set([1, 2], "two")
+			|> map::set(0..1, "zero")
 		},
 	)
 	println(
 		{
 			map::new()
-			|> map::set(([], 1), 'a')
-			|> map::set((rest([3]), 1), 'b')
-			|> map::set(([1], 1), 'c')
-			|> map::set(([], 2), 'd')
+			|> map::set(([], 1), "a")
+			|> map::set((rest([3]), 1), "b")
+			|> map::set(([1], 1), "c")
+			|> map::set(([], 2), "d")
 		},
 	)
 	println(
@@ -155,19 +155,19 @@ pub fn main() {
 		},
 	)
 	println(map::to_list(map::set(map::new(), [], [])))
-	println(string::split('', ','))
-	println(string::split('', ''))
-	println(string::to_graphemes(''))
-	println(string::split('a', '') == string::to_graphemes('a'))
-	println(json::elements(doc('[]')))
-	println(json::elements(doc('{}')))
-	println(json::entries(doc('{}')))
-	println(json::entries(doc('3')))
+	println(string::split("", ","))
+	println(string::split("", ""))
+	println(string::to_graphemes(""))
+	println(string::split("a", "") == string::to_graphemes("a"))
+	println(json::elements(doc("[]")))
+	println(json::elements(doc("{}")))
+	println(json::entries(doc("{}")))
+	println(json::entries(doc("3")))
 	println(json::encode(json::List([])))
 	println(json::encode(json::Object([])))
 	println(
 		json::encode(
-			json::List([json::List([]), json::Object([('a', json::List(rest([json::Null])))])]),
+			json::List([json::List([]), json::Object([("a", json::List(rest([json::Null])))])]),
 		),
 	)
 	println(map::from_list([]))
@@ -187,5 +187,5 @@ pub fn main() {
 	println(([], 1) == (5..5, 1))
 	println(Box([], 2) == Box(rest(0..1), 2))
 	println(global == rest([1]))
-	println([] == rest(['a']))
+	println([] == rest(["a"]))
 }

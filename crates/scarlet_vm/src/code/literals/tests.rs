@@ -125,7 +125,7 @@ fn the_elements_beside_a_spread_are_made_a_piece_at_a_time() {
 /// dropped too, once the next one is made.
 #[test]
 fn what_a_piece_holds_is_given_up_with_it() {
-    let pairs: Vec<String> = (0..64).map(|i| format!("({i}, 'x')")).collect();
+    let pairs: Vec<String> = (0..64).map(|i| format!(r#"({i}, "x")"#)).collect();
     let src = format!(
         "fn f(n Int) Array((Int, String)) {{\n\
          \txs = [{}]\n\
@@ -149,7 +149,7 @@ fn what_a_piece_holds_is_given_up_with_it() {
     // One that is read again is dropped where it was.
     let src = src
         .replace("println(n)", "println(xs)")
-        .replace("xs = [", "t = (n, 'y')\n\txs = [t, ");
+        .replace("xs = [", "t = (n, \"y\")\n\txs = [t, ");
     let src = src.replace("println(xs)", "println(t)");
     let found = pieces(&src, "f").expect("three pieces");
     let first = found.iter().position(|s| s == "MakeArray 32");
@@ -158,7 +158,7 @@ fn what_a_piece_holds_is_given_up_with_it() {
     assert_eq!(count(&after[..next.expect("a tuple")], "drop"), 31);
 
     let parts = "${n} ".repeat(70);
-    let src = format!("fn f(n Int) String {{ '{parts}' }}\npub fn main() {{ println(f(1)) }}\n",);
+    let src = format!("fn f(n Int) String {{ \"{parts}\" }}\npub fn main() {{ println(f(1)) }}\n",);
     let found = pieces(&src, "f").expect("some pieces");
     let joins = found.iter().filter(|s| s.starts_with("StringConcatMany"));
     let joins: Vec<_> = joins.collect();
@@ -169,7 +169,7 @@ fn what_a_piece_holds_is_given_up_with_it() {
 /// Every local a function's straight run reads or drops has its value by then.
 #[test]
 fn a_piece_goes_after_its_last_element() {
-    let pairs: Vec<String> = (0..100).map(|i| format!("(n, '{i}')")).collect();
+    let pairs: Vec<String> = (0..100).map(|i| format!(r#"(n, "{i}")"#)).collect();
     let src = format!(
         "fn f(n Int) Array((Int, String)) {{\n\
          \txs = [{}]\n\

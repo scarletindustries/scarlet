@@ -390,7 +390,7 @@ pub enum Rest {
 /// One `<<..>>` segment in pattern position.
 #[derive(Debug, Clone)]
 pub enum BinSegPat {
-    /// `<<'text'>>`: these bytes, as a prefix.
+    /// `<<"text">>`: these bytes, as a prefix.
     Text(String),
     Utf8(Pattern),
     /// An integer in `bits` bits (8 when unwritten).

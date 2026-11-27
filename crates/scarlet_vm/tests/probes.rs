@@ -713,8 +713,8 @@ type R {\n\txs Array(Int)\n\tm map::Map(Int, Int)\n\tn Int\n}\n\
 fn same(x a) a { x }\n\
 fn call(f fn() a) a { f() }\n\
 fn text(xs Array(Int), i Int, acc String) String {\n\
-\tmatch xs[i] {\n\t\tSome(x) -> text(xs, i + 1, acc + '${x},')\n\t\tNone -> acc\n\t}\n}\n\
-fn say(xs Array(Int)) Nil { println(text(xs, 0, '')) }\n\
+\tmatch xs[i] {\n\t\tSome(x) -> text(xs, i + 1, acc + \"${x},\")\n\t\tNone -> acc\n\t}\n}\n\
+fn say(xs Array(Int)) Nil { println(text(xs, 0, \"\")) }\n\
 fn looked(m map::Map(Int, Int), k Int, acc Int) Int {\n\
 \tif k == 12 { acc } else { looked(m, k + 1, acc * 3 + { map::get(m, k) or { 0 - 1 } } % 50) }\n}\n\
 fn look(m map::Map(Int, Int)) Int { looked(m, 0 - 1, 0) }\n";

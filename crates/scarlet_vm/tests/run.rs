@@ -48,9 +48,9 @@ fn one_plus_two() {
 fn print_leaves_the_line_open() {
     prints(
         "pub fn main() {\n\
-         \tprint('a')\n\
+         \tprint(\"a\")\n\
          \tprint(1 + 2)\n\
-         \tprintln(' b')\n\
+         \tprintln(\" b\")\n\
          \tprint([1, 2])\n\
          }\n",
         "a3 b\n[1, 2]",
@@ -71,7 +71,7 @@ fn sleep_waits() {
          \tprocess::sleep(0)\n\
          \tprocess::sleep(-5)\n\
          \tprocess::sleep(-9223372036854775807 * 1000)\n\
-         \tprintln('done')\n\
+         \tprintln(\"done\")\n\
          }\n",
         "True\ndone\n",
     );
@@ -441,11 +441,11 @@ fn only_calling_an_unbuilt_function_stops_the_run() {
 #[test]
 fn strings_print_join_and_interpolate() {
     prints(
-        "fn greet(name String) String { 'hello, ' + name }\n\
+        "fn greet(name String) String { \"hello, \" + name }\n\
          pub fn main() {\n\
-         \tprintln('hello, world')\n\
-         \tprintln(greet('Scarlet'))\n\
-         \tprintln('2 + 2 = ${2 + 2}, and 3 < 4 is ${3 < 4}')\n\
+         \tprintln(\"hello, world\")\n\
+         \tprintln(greet(\"Scarlet\"))\n\
+         \tprintln(\"2 + 2 = ${2 + 2}, and 3 < 4 is ${3 < 4}\")\n\
          }\n",
         "hello, world\nhello, Scarlet\n2 + 2 = 4, and 3 < 4 is True\n",
     );
@@ -726,8 +726,8 @@ fn a_constructor_prints_as_it_is_written() {
          \tprintln(Some(1))\n\
          \tprintln(Some(None))\n\
          \tprintln(Err(Nil))\n\
-         \tprintln(Ok('fine'))\n\
-         \tprintln('${Some(True)} and ${None}')\n\
+         \tprintln(Ok(\"fine\"))\n\
+         \tprintln(\"${Some(True)} and ${None}\")\n\
          }\n",
         "Circle(2)\nRect(3, 4)\nDot\nSome(1)\nSome(None)\nErr(Nil)\nOk(fine)\nSome(True) and None\n",
     );
@@ -761,7 +761,7 @@ fn a_nested_constructor_takes_a_line_per_field() {
          pub fn main() {\n\
          \tprintln(Seg(a: Point(x: 1, y: 2), b: Point(x: 3, y: 4)))\n\
          \tprintln(Some(Some(1)))\n\
-         \tprintln(Ok('a string of twenty or more'))\n\
+         \tprintln(Ok(\"a string of twenty or more\"))\n\
          }\n",
         "Seg {\n  a: Point{ x: 1, y: 2 },\n  b: Point{ x: 3, y: 4 }\n}\n\
          Some(\n  Some(1)\n)\n\
@@ -820,10 +820,10 @@ fn a_nested_pattern_falls_through_to_the_next_case() {
     prints(
         "fn describe(o Option(Option(Int))) String {\n\
          \tmatch o {\n\
-         \t\tSome(Some(0)) -> 'zero'\n\
-         \t\tSome(Some(n)) -> 'some ${n}'\n\
-         \t\tSome(None) -> 'some none'\n\
-         \t\tNone -> 'none'\n\
+         \t\tSome(Some(0)) -> \"zero\"\n\
+         \t\tSome(Some(n)) -> \"some ${n}\"\n\
+         \t\tSome(None) -> \"some none\"\n\
+         \t\tNone -> \"none\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -841,16 +841,16 @@ fn a_match_on_ints_and_strings() {
     prints(
         "fn count(n Int) String {\n\
          \tmatch n {\n\
-         \t\t0 -> 'none'\n\
-         \t\t1 | 2 -> 'a few'\n\
-         \t\t_ -> 'many'\n\
+         \t\t0 -> \"none\"\n\
+         \t\t1 | 2 -> \"a few\"\n\
+         \t\t_ -> \"many\"\n\
          \t}\n\
          }\n\
          fn greet(s String) String {\n\
          \tmatch s {\n\
-         \t\t'hi' -> 'hello'\n\
-         \t\t'' -> 'nothing'\n\
-         \t\tother -> 'what is ${other}?'\n\
+         \t\t\"hi\" -> \"hello\"\n\
+         \t\t\"\" -> \"nothing\"\n\
+         \t\tother -> \"what is ${other}?\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -858,9 +858,9 @@ fn a_match_on_ints_and_strings() {
          \tprintln(count(2))\n\
          \tprintln(count(9))\n\
          \tprintln(count(9223372036854775807))\n\
-         \tprintln(greet('hi'))\n\
-         \tprintln(greet(''))\n\
-         \tprintln(greet('hiya'))\n\
+         \tprintln(greet(\"hi\"))\n\
+         \tprintln(greet(\"\"))\n\
+         \tprintln(greet(\"hiya\"))\n\
          }\n",
         "none\na few\nmany\nmany\nhello\nnothing\nwhat is hiya?\n",
     );
@@ -917,8 +917,8 @@ fn a_closure_sees_what_it_captured() {
         "fn apply(f fn(Int) String, x Int) String { f(x) }\n\
          pub fn main() {\n\
          \tn = 5\n\
-         \ts = 'x'\n\
-         \tprintln(apply(fn(a) { '${s}${a + n}' }, 1))\n\
+         \ts = \"x\"\n\
+         \tprintln(apply(fn(a) { \"${s}${a + n}\" }, 1))\n\
          }\n",
         "x6\n",
     );
@@ -987,11 +987,11 @@ fn a_tuple_is_built_read_and_shown() {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(swap((1, 'one')))\n\
+         \tprintln(swap((1, \"one\")))\n\
          \tprintln(sum((1, (2, 3))))\n\
          \tprintln((1, (2, 3)))\n\
          \tprintln(Some((True, Nil)))\n\
-         \tprintln('${(1, 2)}')\n\
+         \tprintln(\"${(1, 2)}\")\n\
          }\n",
         "(one, 1)\n6\n(\n  1,\n  (2, 3)\n)\nSome(\n  (True, Nil)\n)\n(1, 2)\n",
     );
@@ -1001,14 +1001,12 @@ fn a_tuple_is_built_read_and_shown() {
 /// line per element past that.
 #[test]
 fn a_wide_tuple_takes_a_line_per_element() {
-    let exactly_80 =
-        "('aaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbb', 'cccccccccccccccccc', 'dddddddddddddddddd')";
+    let exactly_80 = r#"("aaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbb", "cccccccccccccccccc", "dddddddddddddddddd")"#;
     prints(
         &format!("pub fn main() {{\n\tprintln({exactly_80})\n}}\n"),
         "(aaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbb, cccccccccccccccccc, dddddddddddddddddd)\n",
     );
-    let past_80 =
-        "('aaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbb', 'cccccccccccccccccc', 'ddddddddddddddddddd')";
+    let past_80 = r#"("aaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbb", "cccccccccccccccccc", "ddddddddddddddddddd")"#;
     prints(
         &format!("pub fn main() {{\n\tprintln({past_80})\n}}\n"),
         "(\n  aaaaaaaaaaaaaaaaaa,\n  bbbbbbbbbbbbbbbbbb,\n  cccccccccccccccccc,\n  ddddddddddddddddddd\n)\n",
@@ -1021,10 +1019,10 @@ fn an_array_is_built_and_shown() {
         "pub fn main() {\n\
          \tprintln([1, 2, 3])\n\
          \tprintln([])\n\
-         \tprintln(['a', 'b'])\n\
+         \tprintln([\"a\", \"b\"])\n\
          \tprintln([[1, 2], [3, 4]])\n\
          \tprintln(Some([1]))\n\
-         \tprintln('${[True, False]}')\n\
+         \tprintln(\"${[True, False]}\")\n\
          }\n",
         "[1, 2, 3]\n[]\n[a, b]\n[\n  [1, 2],\n  [3, 4]\n]\nSome(\n  [1]\n)\n[True, False]\n",
     );
@@ -1068,10 +1066,10 @@ fn an_array_is_walked_built_and_joined() {
          }\n\
          fn describe(xs Array(Int)) String {\n\
          \tmatch xs {\n\
-         \t\t[] -> 'empty'\n\
-         \t\t[a] -> 'one ${a}'\n\
-         \t\t[a, b] -> 'two ${a} ${b}'\n\
-         \t\t[a, _, ..rest] -> 'from ${a}, then ${rest}'\n\
+         \t\t[] -> \"empty\"\n\
+         \t\t[a] -> \"one ${a}\"\n\
+         \t\t[a, b] -> \"two ${a} ${b}\"\n\
+         \t\t[a, _, ..rest] -> \"from ${a}, then ${rest}\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -1101,18 +1099,18 @@ fn an_array_is_walked_built_and_joined() {
 fn indexing_an_array_gives_an_option() {
     prints(
         "pub fn main() {\n\
-         \txs = ['a', 'b', 'c']\n\
+         \txs = [\"a\", \"b\", \"c\"]\n\
          \tprintln(xs[0])\n\
          \tprintln(xs[2])\n\
          \tprintln(xs[3])\n\
          \tprintln(xs[-1])\n\
          \tprintln(xs[9223372036854775807])\n\
          \tmatch xs[1] {\n\
-         \t\tSome(s) -> println('found ${s}')\n\
-         \t\tNone -> println('none')\n\
+         \t\tSome(s) -> println(\"found ${s}\")\n\
+         \t\tNone -> println(\"none\")\n\
          \t}\n\
-         \tprintln(xs[5] or 'default')\n\
-         \tprintln(xs[1 - 2] or 'computed')\n\
+         \tprintln(xs[5] or \"default\")\n\
+         \tprintln(xs[1 - 2] or \"computed\")\n\
          }\n",
         "Some(a)\nSome(c)\nNone\nNone\nNone\nfound b\ndefault\ncomputed\n",
     );
@@ -1139,7 +1137,7 @@ fn a_slice_is_a_result() {
          \tbig = upto(5000, [])\n\
          \tmatch big[4990..4995] {\n\
          \t\tOk(part) -> println(part)\n\
-         \t\tErr(Nil) -> println('missed')\n\
+         \t\tErr(Nil) -> println(\"missed\")\n\
          \t}\n\
          \tprintln(xs[9..10] or [0])\n\
          }\n",
@@ -1156,7 +1154,7 @@ fn a_slice_is_a_result() {
 fn a_write_at_an_index_gives_a_new_array_and_leaves_the_old_one() {
     prints(
         "import scarlet/array\n\
-         const kept = ['a', 'b', 'c']\n\
+         const kept = [\"a\", \"b\", \"c\"]\n\
          pub fn main() {\n\
          \txs = [1, 2, 3]\n\
          \tprintln(array::put(xs, 1, 9))\n\
@@ -1168,7 +1166,7 @@ fn a_write_at_an_index_gives_a_new_array_and_leaves_the_old_one() {
          \tprintln(array::set(xs, 3, 7))\n\
          \tprintln(array::set(xs, -1, 7))\n\
          \tprintln(xs)\n\
-         \tprintln(array::put(kept, 2, 'z'))\n\
+         \tprintln(array::put(kept, 2, \"z\"))\n\
          \tprintln(kept)\n\
          \tprintln(array::put(0..5, 2, 40))\n\
          \tprintln(array::put(0..5, 5, 40))\n\
@@ -1178,12 +1176,12 @@ fn a_write_at_an_index_gives_a_new_array_and_leaves_the_old_one() {
          \tprintln(put(xs, 2, 0))\n\
          \tprintln(set(xs, 9, 0))\n\
          \tmatch array::set(xs, 1, 5) {\n\
-         \t\tOk(ys) -> println('wrote ${ys}, kept ${xs}')\n\
-         \t\tErr(Nil) -> println('missed')\n\
+         \t\tOk(ys) -> println(\"wrote ${ys}, kept ${xs}\")\n\
+         \t\tErr(Nil) -> println(\"missed\")\n\
          \t}\n\
          \tmatch array::set(xs, 5, 5) {\n\
          \t\tOk(ys) -> println(ys)\n\
-         \t\tErr(Nil) -> println('missed, kept ${xs}')\n\
+         \t\tErr(Nil) -> println(\"missed, kept ${xs}\")\n\
          \t}\n\
          \tr = 0..6\n\
          \tw = array::put(r, 2, 100)\n\
@@ -1380,10 +1378,10 @@ fn a_write_keeps_every_element_counted() {
          \tturn Int\n\
          }\n\
          fn names(n Int, acc Array(String)) Array(String) {\n\
-         \tif n == 0 { acc } else { names(n - 1, ['n${n}', ..acc]) }\n\
+         \tif n == 0 { acc } else { names(n - 1, [\"n${n}\", ..acc]) }\n\
          }\n\
          fn mark(b Board, i Int) Board {\n\
-         \tBoard(..b, rows: array::put(b.rows, i, 'x${i}'), turn: b.turn + 1)\n\
+         \tBoard(..b, rows: array::put(b.rows, i, \"x${i}\"), turn: b.turn + 1)\n\
          }\n\
          fn play(b Board, i Int) Board {\n\
          \tif i >= 40 { b } else { play(mark(b, i), i + 3) }\n\
@@ -1398,14 +1396,14 @@ fn a_write_keeps_every_element_counted() {
          \tprintln(swapped[0])\n\
          \tprintln(swapped[39])\n\
          \tprintln(done.rows[39])\n\
-         \tprintln(array::swap(['a', 'b', 'c'], 0, 2))\n\
-         \tprintln(array::swap(['a', 'b', 'c'], 1, 1))\n\
-         \tprintln(array::swap(['a', 'b', 'c'], 0, 3))\n\
-         \tprintln(array::swap(['a', 'b', 'c'], -1, 0))\n\
-         \tkeep = fn(i) array::put(start.rows, i, 'kept')\n\
+         \tprintln(array::swap([\"a\", \"b\", \"c\"], 0, 2))\n\
+         \tprintln(array::swap([\"a\", \"b\", \"c\"], 1, 1))\n\
+         \tprintln(array::swap([\"a\", \"b\", \"c\"], 0, 3))\n\
+         \tprintln(array::swap([\"a\", \"b\", \"c\"], -1, 0))\n\
+         \tkeep = fn(i) array::put(start.rows, i, \"kept\")\n\
          \tprintln(keep(1)[0..3])\n\
          \tprintln(start.rows[0..3])\n\
-         \tjoined = if done.turn > 3 { array::put(done.rows, 0, 'first') } else { done.rows }\n\
+         \tjoined = if done.turn > 3 { array::put(done.rows, 0, \"first\") } else { done.rows }\n\
          \tprintln(joined[0])\n\
          }\n",
         "14\nOk(\n  [x0, n2, n3, x3, n5, n6, x6]\n)\nOk(\n  [n1, n2, n3, n4, n5, n6, n7]\n)\n\
@@ -1535,17 +1533,17 @@ fn a_record_update_leaves_a_record_that_is_still_held_alone() {
          \tThin(xs Array(Int), n Int)\n\
          }\n\
          fn retitle(p Page, i Int) Page {\n\
-         \tPage(..p, title: 'page ${i}', lines: array::put(p.lines, 0, 'line ${i}'))\n\
+         \tPage(..p, title: \"page ${i}\", lines: array::put(p.lines, 0, \"line ${i}\"))\n\
          }\n\
          fn thin(s Shape) Shape { Thin(..s, n: array::length(s.xs)) }\n\
          pub fn main() {\n\
-         \tp = Page('first', ['a', 'b'], ['x', 'y'])\n\
+         \tp = Page(\"first\", [\"a\", \"b\"], [\"x\", \"y\"])\n\
          \tq = retitle(p, 2)\n\
-         \tr = Page(lines: [..q.lines, 'c'], ..q)\n\
+         \tr = Page(lines: [..q.lines, \"c\"], ..q)\n\
          \tprintln(p)\n\
          \tprintln(q)\n\
          \tprintln(r)\n\
-         \tprintln(retitle(retitle(Page('t', ['l'], []), 3), 4))\n\
+         \tprintln(retitle(retitle(Page(\"t\", [\"l\"], []), 3), 4))\n\
          \tw = Wide(0, [1, 2, 3], 0)\n\
          \tprintln(thin(w))\n\
          \tprintln(thin(Thin([4, 5], 0)))\n\
@@ -1579,11 +1577,11 @@ fn a_record_update_runs_its_parts_in_the_order_written() {
          \tP(10, 20, 30)\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(P(a: say('a', 1), ..base('base'), c: say('c', 3)))\n\
-         \tprintln(P(c: say('c', 3), a: say('a', 1), ..base('base')))\n\
-         \tprintln(P(..base('base'), c: say('c', 3), a: say('a', 1)))\n\
-         \tp = base('p')\n\
-         \tprintln(P(c: say('c', 3), ..p, a: say('a', p.b)))\n\
+         \tprintln(P(a: say(\"a\", 1), ..base(\"base\"), c: say(\"c\", 3)))\n\
+         \tprintln(P(c: say(\"c\", 3), a: say(\"a\", 1), ..base(\"base\")))\n\
+         \tprintln(P(..base(\"base\"), c: say(\"c\", 3), a: say(\"a\", 1)))\n\
+         \tp = base(\"p\")\n\
+         \tprintln(P(c: say(\"c\", 3), ..p, a: say(\"a\", p.b)))\n\
          }\n",
         "a\nbase\nc\nP{ a: 1, b: 20, c: 3 }\n\
          c\na\nbase\nP{ a: 1, b: 20, c: 3 }\n\
@@ -1758,7 +1756,7 @@ fn an_update_writes_a_record_in_place_when_nothing_else_holds_it() {
             "import scarlet/internal\n\
              type P {{\n\ta Int\n\tb String\n\tc Array(Int)\n\td Float\n}}\n\
              type O {{\n\tp P\n\tn Int\n}}\n\
-             fn made(n Int) P {{ P(n, 'b', [n], 0.5) }}\n\
+             fn made(n Int) P {{ P(n, \"b\", [n], 0.5) }}\n\
              fn step(n Int, o O) O {{\n\t{step}\n}}\n\
              fn out(n Int, o O) O {{ if n == 0 {{ o }} else {{ out(n - 1, step(n, o)) }} }}\n\
              pub fn main() {{\n\
@@ -1766,7 +1764,7 @@ fn an_update_writes_a_record_in_place_when_nothing_else_holds_it() {
              \tcells = internal::cells_made()\n\
              \tq = out(1000, o)\n\
              \tprintln(internal::cells_made() - cells)\n\
-             \tprintln('${{q.p.a}} ${{q.p.b}} ${{q.p.c}} ${{q.p.d}} ${{q.n}}')\n\
+             \tprintln(\"${{q.p.a}} ${{q.p.b}} ${{q.p.c}} ${{q.p.d}} ${{q.n}}\")\n\
              }}\n"
         )
     };
@@ -1794,7 +1792,7 @@ fn an_update_writes_a_record_in_place_when_nothing_else_holds_it() {
          \t\tgo(n - 1, p, acc + q.a + p.a)\n\t}\n\
          }\n\
          pub fn main() {\n\
-         \tp = P(1, 'b', [2])\n\
+         \tp = P(1, \"b\", [2])\n\
          \tcells = internal::cells_made()\n\
          \tprintln(go(1000, p, 0))\n\
          \tprintln(internal::cells_made() - cells)\n\
@@ -1921,7 +1919,7 @@ fn first_connection_ends_before_the_new_field_runs(
          \tBoth(x a, y b)\n\
          }}\n\
          fn dial(port Int) Option(socket::Socket) {{\n\
-         \tmatch net::connect('127.0.0.1', port) {{\n\
+         \tmatch net::connect(\"127.0.0.1\", port) {{\n\
          \t\tOk(sock) -> Some(sock)\n\
          \t\tErr(_) -> None\n\
          \t}}\n\
@@ -1981,8 +1979,8 @@ fn first_connection_ends_before_the_new_field_runs(
          }}\n\
          pub fn main() {{\n\
          \tmatch swap(start({port})).conn {{\n\
-         \t\tSome(_) -> println('open')\n\
-         \t\tNone -> println('failed')\n\
+         \t\tSome(_) -> println(\"open\")\n\
+         \t\tNone -> println(\"failed\")\n\
          \t}}\n\
          }}\n"
     );
@@ -2186,9 +2184,9 @@ fn the_longest_range_has_its_length() {
         "import scarlet/array\n\
          fn kind(xs Array(Int)) String {\n\
          \tmatch xs {\n\
-         \t\t[] -> 'none'\n\
-         \t\t[_] -> 'one'\n\
-         \t\t_ -> 'more'\n\
+         \t\t[] -> \"none\"\n\
+         \t\t[_] -> \"one\"\n\
+         \t\t_ -> \"more\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -2355,7 +2353,7 @@ fn a_range_is_an_array_of_its_ints() {
          \tprintln({ 0..10 }[8..11])\n\
          \tprintln([1, ..{ 5..8 }, 9])\n\
          \tprintln([..{ 0..2 }, ..{ 7..9 }])\n\
-         \tprintln('${0..3}')\n\
+         \tprintln(\"${0..3}\")\n\
          \tprintln(0..40)\n\
          \tprintln({ 9223372036854775800..9223372036854775807 }[6] or 0)\n\
          \tbig = 0..1000000000000\n\
@@ -2382,15 +2380,15 @@ fn equality_is_structural() {
          \tprintln(1 == 1)\n\
          \tprintln(1 != 2)\n\
          \tprintln(9223372036854775807 + 1 == 9223372036854775807 + 1)\n\
-         \tprintln('ab' == 'a${'b'}')\n\
-         \tprintln('ab' == 'abc')\n\
+         \tprintln(\"ab\" == \"a${\"b\"}\")\n\
+         \tprintln(\"ab\" == \"abc\")\n\
          \tprintln(Circle(r: 2) == Circle(r: 2))\n\
          \tprintln(Circle(r: 2) == Circle(r: 3))\n\
          \tprintln(Circle(r: 2) == Dot)\n\
          \tprintln(Dot == Dot)\n\
          \tprintln(Some([1, 2]) == Some([1, 2]))\n\
-         \tprintln((1, 'a') == (1, 'a'))\n\
-         \tprintln((1, 'a') == (1, 'b'))\n\
+         \tprintln((1, \"a\") == (1, \"a\"))\n\
+         \tprintln((1, \"a\") == (1, \"b\"))\n\
          \tprintln([1, 2, 3] == [1, 2])\n\
          \tprintln(0..3 == [0, 1, 2])\n\
          \tprintln([0, 1, 2] == 0..3)\n\
@@ -2434,9 +2432,9 @@ fn the_first_built_ins_run() {
          import scarlet/string\n\
          pub fn main() {\n\
          \tprintln(string::inspect(Some([1, 2])))\n\
-         \tprintln(string::inspect('as is'))\n\
-         \tprintln(string::length('héllo'))\n\
-         \tprintln(string::length(''))\n\
+         \tprintln(string::inspect(\"as is\"))\n\
+         \tprintln(string::length(\"héllo\"))\n\
+         \tprintln(string::length(\"\"))\n\
          \tprintln(array::length([1, 2, 3]))\n\
          \tprintln(array::length(0..1000000000000))\n\
          \tprintln(int::to_string(-42))\n\
@@ -2473,7 +2471,7 @@ fn floats_are_never_nan_or_infinite() {
          \tprintln(double(3))\n\
          \tn = 2.5\n\
          \tprintln(-n)\n\
-         \tprintln('${Some(1.5)}')\n\
+         \tprintln(\"${Some(1.5)}\")\n\
          \tprintln(float::floor(-2.5))\n\
          \tprintln(float::round(2.5))\n\
          \tprintln(float::truncate(-2.9))\n\
@@ -2498,9 +2496,9 @@ fn binaries_are_built_shown_and_matched() {
         "import scarlet/binary\n\
          fn describe(b Binary) String {\n\
          \tmatch b {\n\
-         \t\t<<1, rest:binary>> -> 'one then ${rest}'\n\
-         \t\t<<n:size(16), _:binary>> -> 'a 16-bit ${n}'\n\
-         \t\t_ -> 'something else'\n\
+         \t\t<<1, rest:binary>> -> \"one then ${rest}\"\n\
+         \t\t<<n:size(16), _:binary>> -> \"a 16-bit ${n}\"\n\
+         \t\t_ -> \"something else\"\n\
          \t}\n\
          }\n\
          fn first_char(b Binary) Int {\n\
@@ -2515,18 +2513,18 @@ fn binaries_are_built_shown_and_matched() {
          \tprintln(<<5:size(3)>>)\n\
          \tprintln(<<255, 5:size(3)>>)\n\
          \tprintln(<<-1:size(12)>>)\n\
-         \tprintln(<<'hi':utf8>>)\n\
+         \tprintln(<<\"hi\":utf8>>)\n\
          \tprintln(<<1:size(4), 2:size(4)>>)\n\
          \tprintln(describe(<<1, 7, 9>>))\n\
          \tprintln(describe(<<2, 1>>))\n\
          \tprintln(describe(<<2>>))\n\
-         \tprintln(first_char(<<'é':utf8>>))\n\
+         \tprintln(first_char(<<\"é\":utf8>>))\n\
          \tprintln(first_char(<<255>>))\n\
          \tprintln(<<1, 2>> == <<1, 2>>)\n\
          \tprintln(<<1, 2>> == <<1, 2, 0>>)\n\
          \tprintln(binary::bit_size(<<1, 5:size(3)>>))\n\
          \tprintln(binary::byte_size(<<1, 5:size(3)>>))\n\
-         \tprintln(binary::to_string(binary::from_string('héllo')))\n\
+         \tprintln(binary::to_string(binary::from_string(\"héllo\")))\n\
          \tprintln(binary::to_string(<<255>>))\n\
          \tprintln(binary::append(<<1>>, <<2, 3>>))\n\
          \tprintln(binary::slice_bits(<<1, 2, 3>>, 8, 16))\n\
@@ -2547,29 +2545,29 @@ fn the_rest_of_the_binary_module_runs() {
     prints(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tb = <<'hello':utf8>>\n\
+         \tb = <<\"hello\":utf8>>\n\
          \tprintln(binary::byte_at(b, 0))\n\
          \tprintln(binary::byte_at(b, 4))\n\
          \tprintln(binary::byte_at(b, 5))\n\
          \tprintln(binary::byte_at(b, -1))\n\
          \tprintln(binary::byte_at(<<1, 5:size(3)>>, 1))\n\
-         \tprintln(binary::index_of(b, <<'l':utf8>>, 0))\n\
-         \tprintln(binary::index_of(b, <<'l':utf8>>, 3))\n\
-         \tprintln(binary::index_of(b, <<'z':utf8>>, 0))\n\
+         \tprintln(binary::index_of(b, <<\"l\":utf8>>, 0))\n\
+         \tprintln(binary::index_of(b, <<\"l\":utf8>>, 3))\n\
+         \tprintln(binary::index_of(b, <<\"z\":utf8>>, 0))\n\
          \tprintln(binary::index_of(b, <<>>, 2))\n\
-         \tprintln(binary::index_of(b, <<'h':utf8>>, 99))\n\
-         \tprintln(binary::parse_int(<<'1234':utf8>>, binary::Dec))\n\
-         \tprintln(binary::parse_int(<<'ff':utf8>>, binary::Hex))\n\
-         \tprintln(binary::parse_int(<<'FF':utf8>>, binary::Hex))\n\
-         \tprintln(binary::parse_int(<<'12a':utf8>>, binary::Dec))\n\
+         \tprintln(binary::index_of(b, <<\"h\":utf8>>, 99))\n\
+         \tprintln(binary::parse_int(<<\"1234\":utf8>>, binary::Dec))\n\
+         \tprintln(binary::parse_int(<<\"ff\":utf8>>, binary::Hex))\n\
+         \tprintln(binary::parse_int(<<\"FF\":utf8>>, binary::Hex))\n\
+         \tprintln(binary::parse_int(<<\"12a\":utf8>>, binary::Dec))\n\
          \tprintln(binary::parse_int(<<>>, binary::Dec))\n\
-         \tprintln(binary::parse_int(<<'-1':utf8>>, binary::Dec))\n\
-         \tprintln(binary::parse_int(<<'99999999999999999999':utf8>>, binary::Dec))\n\
-         \tprintln(binary::eq_ignore_ascii_case(<<'Content-Length':utf8>>, <<'content-length':utf8>>))\n\
-         \tprintln(binary::eq_ignore_ascii_case(<<'ab':utf8>>, <<'abc':utf8>>))\n\
-         \tprintln(binary::to_ascii_lower(<<'HeLLo':utf8>>) == <<'hello':utf8>>)\n\
-         \tprintln(binary::from_int_ascii(255, binary::Hex) == <<'ff':utf8>>)\n\
-         \tprintln(binary::from_int_ascii(-42, binary::Dec) == <<'-42':utf8>>)\n\
+         \tprintln(binary::parse_int(<<\"-1\":utf8>>, binary::Dec))\n\
+         \tprintln(binary::parse_int(<<\"99999999999999999999\":utf8>>, binary::Dec))\n\
+         \tprintln(binary::eq_ignore_ascii_case(<<\"Content-Length\":utf8>>, <<\"content-length\":utf8>>))\n\
+         \tprintln(binary::eq_ignore_ascii_case(<<\"ab\":utf8>>, <<\"abc\":utf8>>))\n\
+         \tprintln(binary::to_ascii_lower(<<\"HeLLo\":utf8>>) == <<\"hello\":utf8>>)\n\
+         \tprintln(binary::from_int_ascii(255, binary::Hex) == <<\"ff\":utf8>>)\n\
+         \tprintln(binary::from_int_ascii(-42, binary::Dec) == <<\"-42\":utf8>>)\n\
          }\n",
         "104\n111\n-1\n-1\n-1\nSome(2)\nSome(3)\nNone\nSome(2)\nNone\n\
          Ok(1234)\nOk(255)\nOk(255)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(99999999999999999999)\n\
@@ -2583,21 +2581,21 @@ fn the_string_built_ins_run() {
         "import scarlet/int\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string::split('a,b,,c', ','))\n\
-         \tprintln(string::split('abc', ''))\n\
-         \tprintln(string::split('abc', 'x'))\n\
-         \tprintln(string::split('', ','))\n\
-         \tprintln(string::contains('hello', 'ell'))\n\
-         \tprintln(string::contains('hello', ''))\n\
-         \tprintln(string::contains('hello', 'z'))\n\
-         \tprintln('[${string::trim('  hi \\t\\n')}]')\n\
-         \tprintln(string::to_graphemes('e\\u{0301}a'))\n\
-         \tprintln(int::from_string('-42'))\n\
-         \tprintln(int::from_string('+007'))\n\
-         \tprintln(int::from_string('20O'))\n\
-         \tprintln(int::from_string(' 1'))\n\
-         \tprintln(int::from_string('-'))\n\
-         \tprintln(int::from_string('123456789012345678901234567890'))\n\
+         \tprintln(string::split(\"a,b,,c\", \",\"))\n\
+         \tprintln(string::split(\"abc\", \"\"))\n\
+         \tprintln(string::split(\"abc\", \"x\"))\n\
+         \tprintln(string::split(\"\", \",\"))\n\
+         \tprintln(string::contains(\"hello\", \"ell\"))\n\
+         \tprintln(string::contains(\"hello\", \"\"))\n\
+         \tprintln(string::contains(\"hello\", \"z\"))\n\
+         \tprintln(\"[${string::trim(\"  hi \\t\\n\")}]\")\n\
+         \tprintln(string::to_graphemes(\"e\\u{0301}a\"))\n\
+         \tprintln(int::from_string(\"-42\"))\n\
+         \tprintln(int::from_string(\"+007\"))\n\
+         \tprintln(int::from_string(\"20O\"))\n\
+         \tprintln(int::from_string(\" 1\"))\n\
+         \tprintln(int::from_string(\"-\"))\n\
+         \tprintln(int::from_string(\"123456789012345678901234567890\"))\n\
          }\n",
         "[a, b, , c]\n[a, b, c]\n[abc]\n[]\nTrue\nTrue\nFalse\n[hi]\n[e\u{0301}, a]\n\
          Ok(-42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(123456789012345678901234567890)\n",
@@ -2629,8 +2627,8 @@ fn bitwise_operations_are_any_size() {
          \tprintln(int::bitwise_and(big + 5, 7))\n\
          \tprintln(int::bitwise_shift_right(big, 99))\n\
          \tprintln(int::bitwise_and(int::bitwise_shift_right(-1, 4), int::bitwise_shift_left(1, 28) - 1))\n\
-         \tprintln(binary::hex_byte(13) == <<'0D':utf8>>)\n\
-         \tprintln(binary::hex_byte(255) == <<'FF':utf8>>)\n\
+         \tprintln(binary::hex_byte(13) == <<\"0D\":utf8>>)\n\
+         \tprintln(binary::hex_byte(255) == <<\"FF\":utf8>>)\n\
          }\n",
         "8\n14\n6\n-1\n-6\n255\n18446744073709551616\n1\n-4\n-4\n0\n-1\n8\n5\n2\n268435455\nTrue\nTrue\n",
     );
@@ -2641,22 +2639,22 @@ fn the_map_built_ins_run() {
     prints(
         "import scarlet/map\n\
          pub fn main() {\n\
-         \tm = map::set(map::set(map::new(), 'a', 1), 'b', 2)\n\
-         \tprintln(map::get(m, 'a'))\n\
-         \tprintln(map::get(m, 'z'))\n\
-         \tprintln(map::has(m, 'b'))\n\
+         \tm = map::set(map::set(map::new(), \"a\", 1), \"b\", 2)\n\
+         \tprintln(map::get(m, \"a\"))\n\
+         \tprintln(map::get(m, \"z\"))\n\
+         \tprintln(map::has(m, \"b\"))\n\
          \tprintln(map::size(m))\n\
-         \tn = map::set(m, 'a', 10)\n\
-         \tprintln('${map::get(n, 'a')} ${map::get(m, 'a')} ${map::size(n)}')\n\
-         \tgone = map::delete(m, 'a')\n\
-         \tprintln('${map::has(gone, 'a')} ${map::has(m, 'a')} ${map::size(gone)}')\n\
-         \tprintln(map::size(map::delete(m, 'nope')))\n\
+         \tn = map::set(m, \"a\", 10)\n\
+         \tprintln(\"${map::get(n, \"a\")} ${map::get(m, \"a\")} ${map::size(n)}\")\n\
+         \tgone = map::delete(m, \"a\")\n\
+         \tprintln(\"${map::has(gone, \"a\")} ${map::has(m, \"a\")} ${map::size(gone)}\")\n\
+         \tprintln(map::size(map::delete(m, \"nope\")))\n\
          \tprintln(gone)\n\
          \tprintln(map::keys(gone))\n\
          \tprintln(map::values(gone))\n\
          \tprintln(map::to_list(gone))\n\
          \tprintln(map::new())\n\
-         \tprintln(map::delete(gone, 'b'))\n\
+         \tprintln(map::delete(gone, \"b\"))\n\
          }\n",
         "Some(1)\nNone\nTrue\n2\nSome(10) Some(1) 2\nFalse True 1\n2\n{b: 2}\n[b]\n[2]\n[\n  (b, 2)\n]\n{}\n{}\n",
     );
@@ -2677,7 +2675,7 @@ fn equal_maps_are_in_the_same_order() {
          \tdown = fill(map::new(), 499, -1, -1)\n\
          \tprintln(up == down)\n\
          \tprintln(map::keys(up) == map::keys(down))\n\
-         \tprintln('${up}' == '${down}')\n\
+         \tprintln(\"${up}\" == \"${down}\")\n\
          \tfewer = map::delete(map::set(down, 1000, 0), 1000)\n\
          \tprintln(fewer == up)\n\
          \tprintln(map::to_list(fewer) == map::to_list(up))\n\
@@ -2697,7 +2695,7 @@ fn a_key_is_found_by_any_equal_value() {
          import scarlet/binary\n\
          import scarlet/int\n\
          type P { P(x Int, y String) }\n\
-         fn one(key k, look k) Option(String) { map::get(map::set(map::new(), key, 'found'), look) }\n\
+         fn one(key k, look k) Option(String) { map::get(map::set(map::new(), key, \"found\"), look) }\n\
          pub fn main() {\n\
          \tprintln(one(0..3, [0, 1, 2]))\n\
          \tprintln(one(0.0, -0.0))\n\
@@ -2706,13 +2704,13 @@ fn a_key_is_found_by_any_equal_value() {
          \t\tErr(Nil) -> None\n\
          \t})\n\
          \tprintln(one(int::bitwise_shift_left(1, 100), int::bitwise_shift_left(2, 99)))\n\
-         \tprintln(one((1, 'a'), (1, 'a')))\n\
-         \tprintln(one(P(1, 'p'), P(1, 'p')))\n\
-         \tprintln(one('abc', 'ab${'c'}'))\n\
-         \tinner = map::set(map::set(map::new(), 1, 'one'), 2, 'two')\n\
-         \tprintln(one(inner, map::set(map::set(map::new(), 2, 'two'), 1, 'one')))\n\
+         \tprintln(one((1, \"a\"), (1, \"a\")))\n\
+         \tprintln(one(P(1, \"p\"), P(1, \"p\")))\n\
+         \tprintln(one(\"abc\", \"ab${\"c\"}\"))\n\
+         \tinner = map::set(map::set(map::new(), 1, \"one\"), 2, \"two\")\n\
+         \tprintln(one(inner, map::set(map::set(map::new(), 2, \"two\"), 1, \"one\")))\n\
          \tprintln(one(0..3, [0, 1]))\n\
-         \tprintln(one(P(1, 'p'), P(1, 'q')))\n\
+         \tprintln(one(P(1, \"p\"), P(1, \"q\")))\n\
          \tprintln(one(inner, map::delete(inner, 1)))\n\
          }\n",
         "Some(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nNone\nNone\nNone\n",
@@ -2733,9 +2731,9 @@ fn argv_and_env_come_from_the_host() {
          import scarlet/map\n\
          pub fn main() {\n\
          \tprintln(os::argv())\n\
-         \tprintln(os::get_env('HOME'))\n\
-         \tprintln(os::get_env('LANG'))\n\
-         \tprintln(os::get_env('NOT_SET'))\n\
+         \tprintln(os::get_env(\"HOME\"))\n\
+         \tprintln(os::get_env(\"LANG\"))\n\
+         \tprintln(os::get_env(\"NOT_SET\"))\n\
          \tprintln(map::size(os::env()))\n\
          \tprintln(os::env() == os::env())\n\
          }\n",
@@ -2753,27 +2751,27 @@ fn files_read_and_write_and_fail_with_their_error() {
     let src = "import scarlet/io\n\
          fn say(r Result(a, io::IoError)) String {\n\
          \tmatch r {\n\
-         \t\tOk(v) -> 'ok ${v}'\n\
-         \t\tErr(io::NotFound(p)) -> 'not found ${p}'\n\
-         \t\tErr(io::IsADirectory(p)) -> 'a directory ${p}'\n\
-         \t\tErr(io::NotADirectory(p)) -> 'not a directory ${p}'\n\
-         \t\tErr(io::InvalidData(p)) -> 'not text ${p}'\n\
-         \t\tErr(io::UnalignedBinary) -> 'not whole bytes'\n\
-         \t\tErr(io::PermissionDenied(_) | io::AlreadyExists(_) | io::ReadOnlyFilesystem(_) | io::FilesystemLoop(_) | io::StorageFull | io::QuotaExceeded | io::FileTooLarge(_) | io::Errno(_)) -> 'another error'\n\
+         \t\tOk(v) -> \"ok ${v}\"\n\
+         \t\tErr(io::NotFound(p)) -> \"not found ${p}\"\n\
+         \t\tErr(io::IsADirectory(p)) -> \"a directory ${p}\"\n\
+         \t\tErr(io::NotADirectory(p)) -> \"not a directory ${p}\"\n\
+         \t\tErr(io::InvalidData(p)) -> \"not text ${p}\"\n\
+         \t\tErr(io::UnalignedBinary) -> \"not whole bytes\"\n\
+         \t\tErr(io::PermissionDenied(_) | io::AlreadyExists(_) | io::ReadOnlyFilesystem(_) | io::FilesystemLoop(_) | io::StorageFull | io::QuotaExceeded | io::FileTooLarge(_) | io::Errno(_)) -> \"another error\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(say(io::write_text('DIR/a.txt', 'hello')))\n\
-         \tprintln(say(io::read_text('DIR/a.txt')))\n\
-         \tprintln(say(io::write_file('DIR/a.txt', <<104, 105>>)))\n\
-         \tprintln(say(io::read_file('DIR/a.txt')))\n\
-         \tprintln(say(io::write_file('DIR/b.txt', <<1:4>>)))\n\
-         \tprintln(say(io::read_file('DIR/missing')))\n\
-         \tprintln(say(io::read_file('DIR')))\n\
-         \tprintln(say(io::write_text('DIR/no/such/dir', 'x')))\n\
-         \tprintln(say(io::read_file('DIR/plain/under')))\n\
-         \tprintln(say(io::write_file('DIR/x.bin', <<255>>)))\n\
-         \tprintln(say(io::read_text('DIR/x.bin')))\n\
+         \tprintln(say(io::write_text(\"DIR/a.txt\", \"hello\")))\n\
+         \tprintln(say(io::read_text(\"DIR/a.txt\")))\n\
+         \tprintln(say(io::write_file(\"DIR/a.txt\", <<104, 105>>)))\n\
+         \tprintln(say(io::read_file(\"DIR/a.txt\")))\n\
+         \tprintln(say(io::write_file(\"DIR/b.txt\", <<1:4>>)))\n\
+         \tprintln(say(io::read_file(\"DIR/missing\")))\n\
+         \tprintln(say(io::read_file(\"DIR\")))\n\
+         \tprintln(say(io::write_text(\"DIR/no/such/dir\", \"x\")))\n\
+         \tprintln(say(io::read_file(\"DIR/plain/under\")))\n\
+         \tprintln(say(io::write_file(\"DIR/x.bin\", <<255>>)))\n\
+         \tprintln(say(io::read_text(\"DIR/x.bin\")))\n\
          }\n"
     .replace("DIR", &dir.display().to_string());
     let d = dir.display();
@@ -2850,10 +2848,10 @@ fn the_crypto_built_ins_run() {
     let src = "import scarlet/crypto\n\
          import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(crypto::sha256(<<'abc'>>) == Ok(SHA256_ABC))\n\
-         \tprintln(crypto::sha512(<<'abc'>>) == Ok(SHA512_ABC))\n\
-         \tprintln(crypto::sha1(<<'abc'>>) == Ok(SHA1_ABC))\n\
-         \tprintln(crypto::hmac_sha256(<<'Jefe'>>, <<'what do ya want for nothing?'>>) == Ok(HMAC_JEFE))\n\
+         \tprintln(crypto::sha256(<<\"abc\">>) == Ok(SHA256_ABC))\n\
+         \tprintln(crypto::sha512(<<\"abc\">>) == Ok(SHA512_ABC))\n\
+         \tprintln(crypto::sha1(<<\"abc\">>) == Ok(SHA1_ABC))\n\
+         \tprintln(crypto::hmac_sha256(<<\"Jefe\">>, <<\"what do ya want for nothing?\">>) == Ok(HMAC_JEFE))\n\
          \tprintln(crypto::sha256(<<1:4>>))\n\
          \tprintln(crypto::sha512(<<97, 1:4>>))\n\
          \tprintln(crypto::hmac_sha256(<<1:4>>, <<>>))\n\
@@ -2864,14 +2862,14 @@ fn the_crypto_built_ins_run() {
          \tprintln(crypto::const_eq(<<1, 2:4>>, <<1, 3:4>>))\n\
          \tprintln(crypto::const_eq(<<1, 2:4>>, <<1, 2:4>>))\n\
          \tprintln(crypto::const_eq(<<1:4>>, <<16>>))\n\
-         \tprintln(crypto::p256_verify(P256_KEY, <<'signed'>>, P256_SIG))\n\
-         \tprintln(crypto::p256_verify(P256_KEY, <<'signeD'>>, P256_SIG))\n\
-         \tprintln(crypto::p256_verify(<<4, 1, 2>>, <<'signed'>>, P256_SIG))\n\
-         \tprintln(crypto::p256_verify(P256_KEY, <<'signed', 1:4>>, P256_SIG))\n\
-         \tprintln(crypto::ed25519_verify(ED_KEY, <<'signed'>>, ED_SIG))\n\
-         \tprintln(crypto::ed25519_verify(ED_KEY, <<'signeD'>>, ED_SIG))\n\
-         \tprintln(crypto::ed25519_verify(ED_KEY, <<'signed'>>, <<1, 2, 3>>))\n\
-         \tprintln(crypto::ed25519_verify(ED_KEY, <<'signed'>>, P256_SIG))\n\
+         \tprintln(crypto::p256_verify(P256_KEY, <<\"signed\">>, P256_SIG))\n\
+         \tprintln(crypto::p256_verify(P256_KEY, <<\"signeD\">>, P256_SIG))\n\
+         \tprintln(crypto::p256_verify(<<4, 1, 2>>, <<\"signed\">>, P256_SIG))\n\
+         \tprintln(crypto::p256_verify(P256_KEY, <<\"signed\", 1:4>>, P256_SIG))\n\
+         \tprintln(crypto::ed25519_verify(ED_KEY, <<\"signed\">>, ED_SIG))\n\
+         \tprintln(crypto::ed25519_verify(ED_KEY, <<\"signeD\">>, ED_SIG))\n\
+         \tprintln(crypto::ed25519_verify(ED_KEY, <<\"signed\">>, <<1, 2, 3>>))\n\
+         \tprintln(crypto::ed25519_verify(ED_KEY, <<\"signed\">>, P256_SIG))\n\
          }\n"
         .replace(
             "SHA256_ABC",
@@ -2918,28 +2916,28 @@ fn the_json_built_ins_run() {
     prints(
         "import scarlet/json\n\
          pub fn main() {\n\
-         \tsrc = '{\"id\": 18446744073709551615, \"n\": -3, \"x\": 0.5, \"s\": \"a\\\\u00e9\", \"t\": [true, null], \"o\": {}}'\n\
+         \tsrc = \"{\\\"id\\\": 18446744073709551615, \\\"n\\\": -3, \\\"x\\\": 0.5, \\\"s\\\": \\\"a\\\\u00e9\\\", \\\"t\\\": [true, null], \\\"o\\\": {}}\"\n\
          \tmatch json::parse(src) {\n\
          \t\tOk(d) -> {\n\
-         \t\t\tprintln('${d} ${json::size(d)}')\n\
-         \t\t\tprintln(json::int(json::field(d, 'id') or d))\n\
-         \t\t\tprintln(json::int_text(json::field(d, 'n') or d))\n\
-         \t\t\tprintln(json::float(json::field(d, 'x') or d))\n\
-         \t\t\tprintln(json::string(json::field(d, 's') or d))\n\
-         \t\t\tt = json::field(d, 't') or d\n\
+         \t\t\tprintln(\"${d} ${json::size(d)}\")\n\
+         \t\t\tprintln(json::int(json::field(d, \"id\") or d))\n\
+         \t\t\tprintln(json::int_text(json::field(d, \"n\") or d))\n\
+         \t\t\tprintln(json::float(json::field(d, \"x\") or d))\n\
+         \t\t\tprintln(json::string(json::field(d, \"s\") or d))\n\
+         \t\t\tt = json::field(d, \"t\") or d\n\
          \t\t\tprintln(json::bool(json::index(t, 0) or d))\n\
          \t\t\tprintln(json::is_null(json::index(t, 1) or d))\n\
          \t\t\tprintln(json::index(t, 2))\n\
-         \t\t\tprintln(json::field(d, 'missing'))\n\
-         \t\t\tprintln(json::size(json::field(d, 'o') or d))\n\
+         \t\t\tprintln(json::field(d, \"missing\"))\n\
+         \t\t\tprintln(json::size(json::field(d, \"o\") or d))\n\
          \t\t\tprintln(json::reencode(d))\n\
          \t\t}\n\
-         \t\tErr(_) -> println('did not parse')\n\
+         \t\tErr(_) -> println(\"did not parse\")\n\
          \t}\n\
-         \tprintln(json::encode(json::List([json::Null, json::Boolean(True), json::Integer(-7), json::Real(1.0), json::Str('a\"b'), json::Object([('k', json::Number('1e9'))]), json::Number('x')])))\n\
-         \tprintln(match json::parse('[1,]') {\n\
-         \t\tOk(_) -> 'parsed'\n\
-         \t\tErr(_) -> 'refused'\n\
+         \tprintln(json::encode(json::List([json::Null, json::Boolean(True), json::Integer(-7), json::Real(1.0), json::Str(\"a\\\"b\"), json::Object([(\"k\", json::Number(\"1e9\"))]), json::Number(\"x\")])))\n\
+         \tprintln(match json::parse(\"[1,]\") {\n\
+         \t\tOk(_) -> \"parsed\"\n\
+         \t\tErr(_) -> \"refused\"\n\
          \t})\n\
          }\n",
         "<json object#0> 6\nSome(18446744073709551615)\nSome(-3)\nSome(0.5)\nSome(aé)\n\
@@ -2955,9 +2953,9 @@ fn a_float_pattern_matches_as_equality_does() {
     prints(
         "fn name(x Float) String {\n\
          \tmatch x {\n\
-         \t\t0.0 -> 'zero'\n\
-         \t\t1.5 -> 'one and a half'\n\
-         \t\t_ -> 'other'\n\
+         \t\t0.0 -> \"zero\"\n\
+         \t\t1.5 -> \"one and a half\"\n\
+         \t\t_ -> \"other\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -3039,7 +3037,7 @@ fn a_backpass_binds_a_pattern() {
     prints(
         "import scarlet/result\n\
          fn check(n Int) Result(Nil, String) {\n\
-         \tif n > 0 { Ok(Nil) } else { Err('bad') }\n\
+         \tif n > 0 { Ok(Nil) } else { Err(\"bad\") }\n\
          }\n\
          fn pair(n Int) Result((Int, Int), String) {\n\
          \tOk((n, n + 1))\n\
@@ -3076,15 +3074,15 @@ fn a_dropped_connection_is_closed() {
          import scarlet/net/address\n\
          import scarlet/result\n\
          fn open() Nil {{\n\
-         \tmatch net::connect('127.0.0.1', {port}) {{\n\
-         \t\tOk(sock) -> println('connected to ${{address::to_string(sock.peer)}}')\n\
-         \t\tErr(e) -> println('failed: ${{e}}')\n\
+         \tmatch net::connect(\"127.0.0.1\", {port}) {{\n\
+         \t\tOk(sock) -> println(\"connected to ${{address::to_string(sock.peer)}}\")\n\
+         \t\tErr(e) -> println(\"failed: ${{e}}\")\n\
          \t}}\n\
          }}\n\
          pub fn main() {{\n\
          \topen()\n\
-         \tprintln(result::map(net::resolve('::1'), address::ip_to_string))\n\
-         \tprintln(address::parse('nope'))\n\
+         \tprintln(result::map(net::resolve(\"::1\"), address::ip_to_string))\n\
+         \tprintln(address::parse(\"nope\"))\n\
          }}\n"
     );
     prints(
@@ -3170,18 +3168,18 @@ fn a_found_value_that_nothing_reads_is_put_nowhere() {
 fn cases_that_come_to_one_place_give_up_the_value() {
     let src = "type A {\n\tA0(f Option(Int))\n\tA1\n}\n\
         type Rec {\n\tid Int\n\tname String\n}\n\
-        fn say(k Int, s String) String {\n\t'${k}${s}'\n}\n\
+        fn say(k Int, s String) String {\n\t\"${k}${s}\"\n}\n\
         fn f(v (A, String, Int, Rec)) String {\n\
         \tmatch v {\n\
-        \t\t(A0(_) | A1, 'a' | 'b' | 'c' | 'd', n | n, Rec(m | m | m, _)) if n > 4 -> say(m, 'big')\n\
-        \t\t(_, 'a', _, Rec(k, 'z')) -> say(k, 'one')\n\
-        \t\t(A0(_) | A1, _, _, Rec(_, _)) -> say(0, 'other')\n\
+        \t\t(A0(_) | A1, \"a\" | \"b\" | \"c\" | \"d\", n | n, Rec(m | m | m, _)) if n > 4 -> say(m, \"big\")\n\
+        \t\t(_, \"a\", _, Rec(k, \"z\")) -> say(k, \"one\")\n\
+        \t\t(A0(_) | A1, _, _, Rec(_, _)) -> say(0, \"other\")\n\
         \t}\n}\n\
         pub fn main() {\n\
-        \tprintln(f((A0(Some(1)), 'a', 9, Rec(7, 'y'))))\n\
-        \tprintln(f((A0(Some(1)), 'a', 3, Rec(1, 'z'))))\n\
-        \tprintln(f((A0(Some(1)), 'e', 3, Rec(7, 'y'))))\n\
-        \tprintln(f((A1, 'e', 3, Rec(7, 'y'))))\n}\n";
+        \tprintln(f((A0(Some(1)), \"a\", 9, Rec(7, \"y\"))))\n\
+        \tprintln(f((A0(Some(1)), \"a\", 3, Rec(1, \"z\"))))\n\
+        \tprintln(f((A0(Some(1)), \"e\", 3, Rec(7, \"y\"))))\n\
+        \tprintln(f((A1, \"e\", 3, Rec(7, \"y\"))))\n}\n";
     let (out, counts) = counted(src);
     assert_eq!(out, "7big\n1one\n0other\n0other\n");
     assert_eq!(counts.cells_live, 0);
@@ -3221,9 +3219,9 @@ const EVERY_KIND: &str = "import scarlet/array\n\
     type L {\n\tCons(h String, t L)\n\tEnd\n}\n\
     type P {\n\tP(name String, xs Array(Int), n Int)\n}\n\
     const big = 9223372036854775807\n\
-    const kept = ['a', 'b']\n\
+    const kept = [\"a\", \"b\"]\n\
     fn build(n Int, acc L) L {\n\
-    \tif n == 0 { acc } else { build(n - 1, Cons('${n}', acc)) }\n\
+    \tif n == 0 { acc } else { build(n - 1, Cons(\"${n}\", acc)) }\n\
     }\n\
     fn flip(l L, acc L) L {\n\
     \tmatch l {\n\t\tCons(h, t) -> flip(t, Cons(h, acc))\n\t\tEnd -> acc\n\t}\n\
@@ -3235,15 +3233,15 @@ const EVERY_KIND: &str = "import scarlet/array\n\
     \tmatch xs {\n\t\t[h, ..t] -> walk(t, acc + h)\n\t\t[] -> acc\n\t}\n\
     }\n\
     fn fill(n Int, m map::Map(String, Int)) map::Map(String, Int) {\n\
-    \tif n == 0 { m } else { fill(n - 1, map::set(m, 'k${n}', n)) }\n\
+    \tif n == 0 { m } else { fill(n - 1, map::set(m, \"k${n}\", n)) }\n\
     }\n\
     fn drain(n Int, m map::Map(String, Int)) map::Map(String, Int) {\n\
-    \tif n == 0 { m } else { drain(n - 1, map::delete(m, 'k${n}')) }\n\
+    \tif n == 0 { m } else { drain(n - 1, map::delete(m, \"k${n}\")) }\n\
     }\n\
     fn bump(p P, n Int) P {\n\
     \tif n == 0 { p } else { bump(P(..p, xs: array::put(p.xs, n, n), n: p.n + n), n - 1) }\n\
     }\n\
-    fn adder(s String) fn(Int) String {\n\tfn(n) { '${s}${n}' }\n}\n\
+    fn adder(s String) fn(Int) String {\n\tfn(n) { \"${s}${n}\" }\n}\n\
     fn over(n Int, acc Int) Int {\n\
     \tif n == 0 { acc } else { over(n - 1, { acc + big } - big) }\n\
     }\n\
@@ -3260,13 +3258,13 @@ const EVERY_KIND: &str = "import scarlet/array\n\
     \tprintln(xs[2..4])\n\
     \tm = fill(20, map::new())\n\
     \tprintln(map::size(drain(15, m)))\n\
-    \tprintln(map::get(m, 'k3'))\n\
-    \tprintln(bump(P('p', [0, 0, 0, 0], 0), 3))\n\
-    \tf = adder('n')\n\
+    \tprintln(map::get(m, \"k3\"))\n\
+    \tprintln(bump(P(\"p\", [0, 0, 0, 0], 0), 3))\n\
+    \tf = adder(\"n\")\n\
     \tprintln((f(1), f(2)))\n\
     \tprintln(over(3, 7))\n\
-    \tb = tail(<<1, 2, 'x'>>)\n\
-    \tprintln((b, b == <<2, 'x'>>))\n\
+    \tb = tail(<<1, 2, \"x\">>)\n\
+    \tprintln((b, b == <<2, \"x\">>))\n\
     \tprintln(kept)\n\
     }\n";
 
@@ -3329,8 +3327,8 @@ const EVERY_TYPE: &str = "import scarlet/array\n\
     \tmatch t {\n\t\tLeaf -> acc\n\t\tNode(l, s, _, r) -> shades(r, [..shades(l, acc), s])\n\t}\n}\n\
     fn mixed(m Mixed, s Shade) Int {\n\
     \tmatch m {\n\
-    \t\tPlain -> leave(s, 1, 'x')\n\
-    \t\tHeld(n) -> leave(flip(s), n, 'y')\n\
+    \t\tPlain -> leave(s, 1, \"x\")\n\
+    \t\tHeld(n) -> leave(flip(s), n, \"y\")\n\
     \t\tOther -> {\n\t\t\tagain = same(m)\n\t\t\tif again == m { 3 } else { 4 }\n\t\t}\n\
     \t}\n}\n\
     fn leave(s Shade, n Int, name String) Int { if s == Dark { n } else { n + 10 * array::length([name]) } }\n\
@@ -3345,7 +3343,7 @@ const EVERY_TYPE: &str = "import scarlet/array\n\
     \tprintln((a.a, a.b, a.c, a.d, a.e, a.f, a.g, a.h, a.i, a.j(a.a)))\n\
     \tbig = 1125899906842624 * 1125899906842624\n\
     \tprintln((through(Dark, 5), through(One, 4), through(2.5, 3), through(True, 5), through(Nil, 4)))\n\
-    \tprintln((through(big, 5), through('s', 4), through([1, 2], 3), through(Held(3), 5), through(Plain, 4)))\n\
+    \tprintln((through(big, 5), through(\"s\", 4), through([1, 2], 3), through(Held(3), 5), through(Plain, 4)))\n\
     \tprintln((twice(flip, Dark), twice(fn(n) { n * big }, 1), twice(fn(x) { x * 2.0 }, 1.5)))\n\
     \tprintln((depth(deepen(Dark)), depth(deepen([1])), depth(Deep(Flat((1.5, 2.5))))))\n\
     \tt = add(add(add(add(Leaf, 5), 2), 9), 4)\n\
@@ -3498,19 +3496,19 @@ fn every_operator(kind: &str, constants: &[String], values: &[String]) -> String
     let alike = |a: &str, b: &str| -> Vec<String> {
         let mut out = Vec::new();
         for (op, name) in arith {
-            out.push(format!("'${{{a} {op} {b}}}' == '${{{name}({a}, {b})}}'"));
+            out.push(format!(r#""${{{a} {op} {b}}}" == "${{{name}({a}, {b})}}""#));
         }
         for (op, name) in compare {
             out.push(format!("{{ {a} {op} {b} }} == {name}({a}, {b})"));
             out.push(format!(
-                "{{ if {a} {op} {b} {{ 'y' }} else {{ 'n' }} }} == '${{yes({name}({a}, {b}))}}'"
+                r#"{{ if {a} {op} {b} {{ "y" }} else {{ "n" }} }} == "${{yes({name}({a}, {b}))}}""#
             ));
         }
         out
     };
     let mut src = String::from(
         "import scarlet/float\n\
-         fn yes(b Bool) String { if b { 'y' } else { 'n' } }\n",
+         fn yes(b Bool) String { if b { \"y\" } else { \"n\" } }\n",
     );
     for (op, name) in arith.into_iter().chain(compare) {
         src += &format!("fn {name}(a, b) {{ a {op} b }}\n");
@@ -3522,11 +3520,11 @@ fn every_operator(kind: &str, constants: &[String], values: &[String]) -> String
     }
     let zero = if kind == "Int" { "0" } else { "-0.0" };
     groups.push(vec![
-        format!("'${{-x}}' == '${{sub({zero}, x)}}'"),
+        format!(r#""${{-x}}" == "${{sub({zero}, x)}}""#),
         String::from("float::from_int(-3) == -3.0"),
     ]);
     let calls: String = (0..groups.len())
-        .map(|i| format!("\tcheck('${{x}} ${{y}} {i}', f{i}(x, y), 0)\n"))
+        .map(|i| format!("\tcheck(\"${{x}} ${{y}} {i}\", f{i}(x, y), 0)\n"))
         .collect();
     for (i, lines) in groups.iter().enumerate() {
         let lines = lines.join(",\n\t\t");
@@ -3546,13 +3544,13 @@ fn every_operator(kind: &str, constants: &[String], values: &[String]) -> String
          \tmatch same {{\n\
          \t\t[] -> Nil\n\
          \t\t[ok, ..rest] -> {{\n\
-         \t\t\tif ok {{ Nil }} else {{ println('${{at}} ${{line}}') }}\n\
+         \t\t\tif ok {{ Nil }} else {{ println(\"${{at}} ${{line}}\") }}\n\
          \t\t\tcheck(at, rest, line + 1)\n\
          \t\t}}\n\
          \t}}\n\
          }}\n\
          fn all(x {kind}, y {kind}) Nil {{\n{calls}\tNil\n}}\n\
-         pub fn main() {{\n{pairs}\tprintln('done')\n}}\n"
+         pub fn main() {{\n{pairs}\tprintln(\"done\")\n}}\n"
     )
 }
 
@@ -3688,7 +3686,7 @@ fn a_counted_run_that_stops_has_no_counts() {
     let src = "import scarlet/internal\n\
                fn later() Int { internal::live_subjects() }\n\
                pub fn main() {\n\
-               \tprintln('before')\n\
+               \tprintln(\"before\")\n\
                \tprintln(later())\n\
                }\n";
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
@@ -3843,11 +3841,11 @@ fn the_listing_says_why_a_function_did_not_load() {
 #[test]
 fn a_literal_may_be_longer_than_a_frame() {
     let ints = |n: usize| each_of(n, |i| (i * 7919 % 1000).to_string()).join(", ");
-    let pairs = each_of(400, |i| format!("({i}, 'n{i}', [{i}, k])")).join(", ");
+    let pairs = each_of(400, |i| format!(r#"({i}, "n{i}", [{i}, k])"#)).join(", ");
     let parts = each_of(600, |i| format!("${{k + {i}}}")).join(" ");
     let bytes = each_of(300, |i| format!("k:size(8), {}:size(8)", i % 256)).join(", ");
-    let rows = each_of(290, |i| format!("[..ys, '{i}']")).join(", ");
-    let texts = each_of(300, |i| format!("'${{k}}{i}'")).join(", ");
+    let rows = each_of(290, |i| format!(r#"[..ys, "{i}"]"#)).join(", ");
+    let texts = each_of(300, |i| format!(r#""${{k}}{i}""#)).join(", ");
     let src = format!(
         "import scarlet/array\n\
          import scarlet/binary\n\
@@ -3859,7 +3857,7 @@ fn a_literal_may_be_longer_than_a_frame() {
          \tprintln(k)\n\
          \txs\n\
          }}\n\
-         fn text(k Int) String {{ '{parts}' }}\n\
+         fn text(k Int) String {{ \"{parts}\" }}\n\
          fn bytes(k Int) Binary {{ <<{bytes}>> }}\n\
          fn rows(c Bool, k Int) Array(Array(String)) {{\n\
          \tys = if c {{ [{texts}] }} else {{ [] }}\n\
@@ -3885,7 +3883,7 @@ fn a_literal_may_be_longer_than_a_frame() {
          \tprintln(binary::byte_at(bytes(9), 599))\n\
          \tprintln(count(rows(True, 2), 0))\n\
          \tprintln(count(rows(False, 2), 0))\n\
-         \tprintln(array::length(same('x')))\n\
+         \tprintln(array::length(same(\"x\")))\n\
          }}\n",
         table = ints(1000),
         same = "x, ".repeat(2999) + "x",
@@ -3896,7 +3894,7 @@ fn a_literal_may_be_longer_than_a_frame() {
     // A short run of it, with the heap checked before every instruction.
     let src = format!(
         "fn ints(k Int) Array(Int) {{ [k, {}] }}\n\
-         fn text(k Int) String {{ '{}' }}\n\
+         fn text(k Int) String {{ \"{}\" }}\n\
          pub fn main() {{\n\
          \tprintln(ints(3)[260])\n\
          \tprintln(text(0) == text(1))\n\
@@ -3914,7 +3912,7 @@ fn a_literal_may_be_longer_than_a_frame() {
 /// places. The array that is spread stays as it was.
 #[test]
 fn a_literal_with_a_spread_may_be_longer_than_a_frame() {
-    let texts = |from: usize, n: usize| each_of(n, |i| format!("'${{k + {}}}'", from + i));
+    let texts = |from: usize, n: usize| each_of(n, |i| format!(r#""${{k + {}}}""#, from + i));
     let src = |n: usize| {
         let (a, b) = (texts(0, n).join(", "), texts(1000, n).join(", "));
         format!(
@@ -3927,14 +3925,14 @@ fn a_literal_with_a_spread_may_be_longer_than_a_frame() {
              \t[..xs, {}, array::length(xs) * k, {}]\n\
              }}\n\
              fn row(k Int, xs Array(String)) Array(String) {{\n\
-             \t[..array::map(xs, fn(x) {{ '${{x}}${{k}}' }}), {a}]\n\
+             \t[..array::map(xs, fn(x) {{ \"${{x}}${{k}}\" }}), {a}]\n\
              }}\n\
              fn shown(xs Array(String)) {{\n\
-             \tprintln('${{array::length(xs)}} ${{array::reverse(xs)[0]}} ${{xs[0]}} ${{xs[1]}} ${{xs[2]}} ${{xs[250]}} ${{xs[258]}}')\n\
+             \tprintln(\"${{array::length(xs)}} ${{array::reverse(xs)[0]}} ${{xs[0]}} ${{xs[1]}} ${{xs[2]}} ${{xs[250]}} ${{xs[258]}}\")\n\
              }}\n\
              pub fn main() {{\n\
-             \tt = 't'\n\
-             \txs = ['s${{t}}', t]\n\
+             \tt = \"t\"\n\
+             \txs = [\"s${{t}}\", t]\n\
              \tshown(back(xs, 1))\n\
              \tshown(front(xs, 1))\n\
              \tshown(middle(xs, 1))\n\
@@ -3964,7 +3962,7 @@ fn a_literal_with_a_spread_may_be_longer_than_a_frame() {
         "fn back(xs Array(String), k Int) Array(String) {{ [..xs, {elements}] }}\n\
          fn front(xs Array(String), k Int) Array(String) {{ [{elements}, ..xs] }}\n\
          pub fn main() {{\n\
-         \txs = ['${{1}}']\n\
+         \txs = [\"${{1}}\"]\n\
          \tprintln(back(xs, 1)[256])\n\
          \tprintln(front(xs, 1)[256])\n\
          }}\n"
@@ -4004,17 +4002,17 @@ fn a_long_literal_makes_a_few_cells_for_each_leaf() {
 fn a_wide_tuple_and_a_wide_push_hold_every_operand_in_order() {
     let program = |n: usize| {
         let parts = each_of(n, |i| format!("s{i}")).join(", ");
-        let lets = each_of(n, |i| format!("\ts{i} = '${{k + {i}}}'\n")).concat();
+        let lets = each_of(n, |i| format!("\ts{i} = \"${{k + {i}}}\"\n")).concat();
         format!(
             "fn tuple(k Int) ({types}) {{\n{lets}\t({parts})\n}}\n\
              fn front(k Int, xs Array(String)) Array(String) {{\n{lets}\t[{parts}, ..xs]\n}}\n\
              fn back(k Int, xs Array(String)) Array(String) {{\n{lets}\t[..xs, {parts}]\n}}\n\
              pub fn main() {{\n\
-             \txs = ['${{0}}']\n\
-             \tprintln('${{tuple(10)}}')\n\
-             \tprintln('${{front(10, xs)}}')\n\
-             \tprintln('${{back(10, xs)}}')\n\
-             \tprintln('${{front(10, [])}} ${{xs}}')\n\
+             \txs = [\"${{0}}\"]\n\
+             \tprintln(\"${{tuple(10)}}\")\n\
+             \tprintln(\"${{front(10, xs)}}\")\n\
+             \tprintln(\"${{back(10, xs)}}\")\n\
+             \tprintln(\"${{front(10, [])}} ${{xs}}\")\n\
              }}\n",
             types = each_of(n, |_| "String".to_string()).join(", "),
         )
@@ -4046,9 +4044,9 @@ fn each_of(n: usize, f: impl Fn(usize) -> String) -> Vec<String> {
 #[test]
 fn a_function_may_hold_254_values_at_once() {
     let long = each_of(4000, |i| match i {
-        0 => "\tx0 = a\n\tt0 = '${x0}'\n".to_string(),
+        0 => "\tx0 = a\n\tt0 = \"${x0}\"\n".to_string(),
         i => format!(
-            "\tx{i} = x{} + string::length(t{})\n\tt{i} = '${{x{i}}}'\n",
+            "\tx{i} = x{} + string::length(t{})\n\tt{i} = \"${{x{i}}}\"\n",
             i - 1,
             i - 1
         ),
@@ -4067,7 +4065,7 @@ fn a_function_may_hold_254_values_at_once() {
         format!(
             "fn wide(a Int) Int {{\n{lets}\ts0 = 0\n{sums}\ts{n}\n}}\n\
              pub fn main() {{\n\
-             \tprintln('before')\n\
+             \tprintln(\"before\")\n\
              \tprintln(wide(2))\n\
              }}\n"
         )
@@ -4101,13 +4099,13 @@ fn a_closure_called_in_tail_position_reads_its_captures() {
             &format!(
                 "fn through(f fn({ints}) String) String {{ f({args}) }}\n\
                  pub fn main() {{\n\
-                 \tkept = '${{40 + 2}}'\n\
-                 \tinner = fn({names}) '${{kept}}:${{{sum}}}'\n\
+                 \tkept = \"${{40 + 2}}\"\n\
+                 \tinner = fn({names}) \"${{kept}}:${{{sum}}}\"\n\
                  \tprintln(through(inner))\n\
-                 \tafter = '${{kept}}!'\n\
-                 \tfrom = fn(g) if kept == '42' {{ g({args}) }} else {{ after }}\n\
+                 \tafter = \"${{kept}}!\"\n\
+                 \tfrom = fn(g) if kept == \"42\" {{ g({args}) }} else {{ after }}\n\
                  \tprintln(from(inner))\n\
-                 \tprintln('${{inner({args})}} ${{after}}')\n\
+                 \tprintln(\"${{inner({args})}} ${{after}}\")\n\
                  }}\n"
             ),
             &{
@@ -4162,8 +4160,8 @@ fn frames_of_every_register_call_each_other() {
     // The result of a call is a value beside those held across it, so the most
     // that the caller in the middle of one has is one fewer.
     for (n, m, wide) in [(200, 200, 0), (253, 254, 2)] {
-        let lets = each_of(n, |i| format!("\t\tx{i} = '${{n + {i}}}'\n")).concat();
-        let captured = each_of(m, |i| format!("\tx{i} = '${{{i}}}'\n")).concat();
+        let lets = each_of(n, |i| format!("\t\tx{i} = \"${{n + {i}}}\"\n")).concat();
+        let captured = each_of(m, |i| format!("\tx{i} = \"${{{i}}}\"\n")).concat();
         let src = format!(
             "import scarlet/string\n\
              fn down(n Int) Int {{\n\
@@ -4201,10 +4199,10 @@ fn a_tail_call_fits_the_frame_to_its_callee() {
         "import scarlet/string\n\
          fn narrow(k Int) Int { k }\n\
          fn wide(n Int) Int {\n\
-         \ta = '${n}a'\n\
-         \tb = '${n}b'\n\
-         \tc = '${n}c'\n\
-         \tk = string::length('${a}${b}${c}${a}')\n\
+         \ta = \"${n}a\"\n\
+         \tb = \"${n}b\"\n\
+         \tc = \"${n}c\"\n\
+         \tk = string::length(\"${a}${b}${c}${a}\")\n\
          \tnarrow(k)\n\
          }\n\
          fn up(n Int) Int { if n == 0 { narrow(1) } else { wide(n) } }\n\
@@ -4358,7 +4356,7 @@ fn the_widest_record_in_the_arena_is_a_record() {
          \tprintln(total(v))\n\
          \tprintln(w == v)\n\
          \tprintln(w == with(v, 0))\n\
-         \tm = map::set(map::set(map::new(), w, 'first'), v, 'second')\n\
+         \tm = map::set(map::set(map::new(), w, \"first\"), v, \"second\")\n\
          \tprintln(map::get(m, with(v, 0)))\n\
          \tprintln(map::get(m, with(w, 1)))\n\
          \tprintln(map::get(m, with(w, 8)))\n\
@@ -4408,7 +4406,7 @@ fn a_record_too_wide_for_the_arena_is_a_record() {
              \tv = spin(w, 101)\n\
              \tprintln(internal::cells_made() - made)\n\
              \tprintln(ends(v))\n\
-             \tm = map::set(map::set(map::new(), w, 'w'), v, 'v')\n\
+             \tm = map::set(map::set(map::new(), w, \"w\"), v, \"v\")\n\
              \tprintln(map::get(m, wide(2, 0, 1)))\n\
              \tprintln(map::get(m, wide(2, 0, 2)))\n\
              \tprintln([first(W(v)), first(Plain)])\n\
@@ -4462,7 +4460,7 @@ fn a_constructor_too_wide_for_the_arena_is_rebuilt_in_the_same_words() {
              }}\n\
              fn new(z Int, s String) T {{ A(0, {zeros}s) }}\n\
              pub fn main() {{\n\
-             \tv = new(0, 'tail' + 'end')\n\
+             \tv = new(0, \"tail\" + \"end\")\n\
              \tmade = internal::cells_made()\n\
              \tw = spin(v, N - 1)\n\
              \tx = spin(w, 1)\n\
@@ -4618,31 +4616,31 @@ fn a_string_or_binary_too_long_for_the_arena_reads_the_same() {
          import scarlet/internal\n\
          import scarlet/map\n\
          import scarlet/string\n\
-         fn grow(s String, n Int) String { if n == 0 { s } else { grow(s + 'abcdefghij', n - 1) } }\n\
+         fn grow(s String, n Int) String { if n == 0 { s } else { grow(s + \"abcdefghij\", n - 1) } }\n\
          fn lengths(s String, n Int, acc Int) Int {\n\
          \tif n == 0 { acc } else {\n\
-         \t\tt = s + 'x'\n\
+         \t\tt = s + \"x\"\n\
          \t\tlengths(t, n - 1, acc + string::length(t))\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \ta = grow('', 201)\n\
-         \tb = grow('', 202)\n\
-         \tc = grow('', 1000)\n\
+         \ta = grow(\"\", 201)\n\
+         \tb = grow(\"\", 202)\n\
+         \tc = grow(\"\", 1000)\n\
          \tprintln(string::length(a))\n\
          \tprintln(string::length(b))\n\
          \tprintln(a == b)\n\
-         \tprintln(b == grow('', 202))\n\
+         \tprintln(b == grow(\"\", 202))\n\
          \tprintln(string::length(a + b + c))\n\
-         \tprintln(string::contains(c, 'jabc'))\n\
-         \tprintln(string::contains(c, 'jj'))\n\
-         \tprintln(array::length(string::split(c, 'j')))\n\
+         \tprintln(string::contains(c, \"jabc\"))\n\
+         \tprintln(string::contains(c, \"jj\"))\n\
+         \tprintln(array::length(string::split(c, \"j\")))\n\
          \tmade = internal::cells_made()\n\
-         \tprintln(lengths(grow('', 195), 100, 0))\n\
+         \tprintln(lengths(grow(\"\", 195), 100, 0))\n\
          \tprintln(internal::cells_made() - made)\n\
          \tm = map::set(map::set(map::new(), b, 1), c, 2)\n\
-         \tprintln(map::get(m, grow('', 202)))\n\
-         \tprintln(map::get(m, grow('', 1000)))\n\
+         \tprintln(map::get(m, grow(\"\", 202)))\n\
+         \tprintln(map::get(m, grow(\"\", 1000)))\n\
          \tprintln(map::get(m, a))\n\
          \tbits = binary::from_string(c)\n\
          \tprintln(binary::byte_size(bits))\n\
@@ -4654,7 +4652,7 @@ fn a_string_or_binary_too_long_for_the_arena_reads_the_same() {
          \t\t\tprintln(binary::byte_at(half, 4999))\n\
          \t\t\tprintln(binary::to_string(binary::drop_bytes(half, 4990)))\n\
          \t\t}\n\
-         \t\tErr(Nil) -> println('no slice')\n\
+         \t\tErr(Nil) -> println(\"no slice\")\n\
          \t}\n\
          }\n",
         "2010\n2020\nFalse\nTrue\n14030\nTrue\nFalse\n1001\n200050\n591\nSome(1)\nSome(2)\nNone\n\

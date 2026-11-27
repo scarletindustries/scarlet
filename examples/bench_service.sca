@@ -28,7 +28,7 @@ const FNV_SEED = 2166136261
 const ROT_LO = 524288
 const ROT_HI = 8192
 
-const SECRET = <<'al-bench-signing-key-v1'>>
+const SECRET = <<"al-bench-signing-key-v1">>
 
 fn rotl13(h Int) Int {
 	{ h % ROT_LO } * ROT_HI + h / ROT_LO
@@ -55,12 +55,12 @@ fn sign(user Binary) Int {
 }
 
 fn make_user(i Int) User {
-	name = 'user${i}'
+	name = "user${i}"
 	User(
 		id: i,
 		name: name,
-		email: '${name}@example.com',
-		pw_hash: checksum(binary::from_string('pw-${i}')),
+		email: "${name}@example.com",
+		pw_hash: checksum(binary::from_string("pw-${i}")),
 	)
 }
 
@@ -93,10 +93,10 @@ fn build_tables(i Int, n Int, t Tables) Tables {
 	}
 }
 
-const AMP = <<'&'>>
-const EQ = <<'='>>
-const SEMI = <<';'>>
-const DOT = <<'.'>>
+const AMP = <<"&">>
+const EQ = <<"=">>
+const SEMI = <<";">>
+const DOT = <<".">>
 const SP = 32
 
 fn form_get(b Binary, key Binary) Option(Binary) {
@@ -161,11 +161,11 @@ fn skip_spaces(b Binary, i Int, n Int) Int {
 
 // Responses
 
-const NAME_CONTENT_TYPE = <<'Content-Type'>>
-const NAME_SET_COOKIE = <<'Set-Cookie'>>
-const NAME_COOKIE = <<'Cookie'>>
-const VAL_JSON = <<'application/json'>>
-const VAL_TEXT = <<'text/plain; charset=utf-8'>>
+const NAME_CONTENT_TYPE = <<"Content-Type">>
+const NAME_SET_COOKIE = <<"Set-Cookie">>
+const NAME_COOKIE = <<"Cookie">>
+const VAL_JSON = <<"application/json">>
+const VAL_TEXT = <<"text/plain; charset=utf-8">>
 
 fn respond(code Int, content_type Binary, s String) http::Response {
 	bin = binary::from_string(s)
@@ -181,17 +181,17 @@ fn json(code Int, s String) http::Response {
 }
 
 fn unauthorized() http::Response {
-	json(401, '{"error":"unauthorized"}')
+	json(401, "{\"error\":\"unauthorized\"}")
 }
 
 fn profile_json(u User) String {
-	'{"id":${u.id},"name":"${u.name}","email":"${u.email}"}'
+	"{\"id\":${u.id},\"name\":\"${u.name}\",\"email\":\"${u.email}\"}"
 }
 
 fn session_cookie(name String, sig Int) Binary {
 	binary::append(
-		binary::from_string('session=${name}.'),
-		binary::append(binary::from_int_ascii(sig, binary::Hex), <<'; Path=/; HttpOnly'>>),
+		binary::from_string("session=${name}."),
+		binary::append(binary::from_int_ascii(sig, binary::Hex), <<"; Path=/; HttpOnly">>),
 	)
 }
 
@@ -199,7 +199,7 @@ fn session_cookie(name String, sig Int) Binary {
 
 fn verify_session(req http::Request, t Tables) Option(User) {
 	option::then(headers::get(req.headers, NAME_COOKIE), fn(raw) option::then(
-		cookie_get(raw, <<'session'>>),
+		cookie_get(raw, <<"session">>),
 		fn(token) option::then(split_token(token), fn(parts) match parts {
 			(user, sig_bytes) -> match binary::parse_int(sig_bytes, binary::Hex) {
 				Ok(sig) -> if sig == sign(user) {
@@ -225,20 +225,20 @@ fn split_token(token Binary) Option((Binary, Binary)) {
 
 fn handle_login(req http::Request, t Tables) http::Response {
 	match body::collect(req.body, 8192) {
-		Err(_) -> json(400, '{"error":"bad body"}')
+		Err(_) -> json(400, "{\"error\":\"bad body\"}")
 		Ok(
 			raw,
 		) -> match option::then(
-			form_get(raw, <<'user'>>),
-			fn(u) option::map(form_get(raw, <<'password'>>), fn(p) (u, p)),
+			form_get(raw, <<"user">>),
+			fn(u) option::map(form_get(raw, <<"password">>), fn(p) (u, p)),
 		) {
-			None -> json(400, '{"error":"missing user or password"}')
+			None -> json(400, "{\"error\":\"missing user or password\"}")
 			Some(creds) -> match creds {
 				(user, password) -> match find_by_name(t, user) {
 					None -> unauthorized()
 					Some(u) -> if checksum(password) == u.pw_hash {
 						http::with_header(
-							json(200, '{"ok":true,"user":"${u.name}"}'),
+							json(200, "{\"ok\":true,\"user\":\"${u.name}\"}"),
 							NAME_SET_COOKIE,
 							session_cookie(u.name, sign(user)),
 						)
@@ -259,10 +259,12 @@ fn handle_me(req http::Request, t Tables) http::Response {
 }
 
 fn handle_logout() http::Response {
-	http::with_header(json(200, '{"ok":true}'), NAME_SET_COOKIE, <<'session=; Path=/; Max-Age=0'>>)
+	http::with_header(json(200, "{\"ok\":true}"), NAME_SET_COOKIE, <<
+		"session=; Path=/; Max-Age=0",
+	>>)
 }
 
-const USERS_PREFIX = <<'/users/'>>
+const USERS_PREFIX = <<"/users/">>
 const USERS_PREFIX_LEN = 7
 
 fn handle_user_by_id(path Binary, t Tables) http::Response {
@@ -272,7 +274,7 @@ fn handle_user_by_id(path Binary, t Tables) http::Response {
 		Err(Nil) -> None
 	}
 	match user {
-		None -> json(404, '{"error":"no such user"}')
+		None -> json(404, "{\"error\":\"no such user\"}")
 		Some(u) -> json(200, profile_json(u))
 	}
 }
@@ -281,27 +283,27 @@ fn route(req http::Request, t Tables) http::Response {
 	path = http::path(req)
 	match req.method {
 		http::Get -> match path {
-			<<'/'>> -> respond(200, VAL_TEXT, 'hello')
-			<<'/me'>> -> handle_me(req, t)
+			<<"/">> -> respond(200, VAL_TEXT, "hello")
+			<<"/me">> -> handle_me(req, t)
 			_ -> match binary::slice_bytes(path, 0, USERS_PREFIX_LEN) {
 				Ok(
 					prefix,
 				) -> if prefix == USERS_PREFIX && binary::byte_size(path) > USERS_PREFIX_LEN {
 					handle_user_by_id(path, t)
 				} else {
-					json(404, '{"error":"not found"}')
+					json(404, "{\"error\":\"not found\"}")
 				}
 				// The path is shorter than the prefix.
-				Err(Nil) -> json(404, '{"error":"not found"}')
+				Err(Nil) -> json(404, "{\"error\":\"not found\"}")
 			}
 		}
 		http::Post -> match path {
-			<<'/login'>> -> handle_login(req, t)
-			<<'/logout'>> -> handle_logout()
-			_ -> json(404, '{"error":"not found"}')
+			<<"/login">> -> handle_login(req, t)
+			<<"/logout">> -> handle_logout()
+			_ -> json(404, "{\"error\":\"not found\"}")
 		}
 		http::Put | http::Delete | http::Patch | http::Head | http::Options | http::Other(_) ->
-			json(405, '{"error":"method not allowed"}')
+			json(405, "{\"error\":\"method not allowed\"}")
 	}
 }
 
@@ -317,12 +319,12 @@ pub fn main() {
 	tables = build_tables(0, USER_COUNT, Tables(by_name: map::new(), by_id: map::new()))
 	port = port_arg()
 
-	println('bench_service listening on http://127.0.0.1:${port} (${USER_COUNT} users)')
+	println("bench_service listening on http://127.0.0.1:${port} (${USER_COUNT} users)")
 
 	// Load generators hang up all the time, and logging each one would skew the
 	// numbers, so failed connections are ignored on purpose.
-	match http::serve('127.0.0.1', port, fn(req) route(req, tables), fn(_) Nil) {
+	match http::serve("127.0.0.1", port, fn(req) route(req, tables), fn(_) Nil) {
 		Ok(_) -> Nil
-		Err(e) -> println('serve failed: ${e}')
+		Err(e) -> println("serve failed: ${e}")
 	}
 }

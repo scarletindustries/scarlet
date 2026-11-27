@@ -37,7 +37,7 @@ const LIST: &str = "type L {\n\tCons(h Int, t L)\n\tEnd\n}\n\
 const STOPS: &str = "import scarlet/internal\n\
                      fn later() Int { internal::live_subjects() }\n\
                      pub fn main() {\n\
-                     \tprintln('before')\n\
+                     \tprintln(\"before\")\n\
                      \tprintln(later())\n\
                      }\n";
 

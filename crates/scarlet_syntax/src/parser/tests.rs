@@ -168,7 +168,7 @@ fn parses_every_corpus_program() {
 #[test]
 fn test_literals() {
     assert_no_errors("123");
-    assert_no_errors("'hello'");
+    assert_no_errors(r#""hello""#);
     assert_no_errors("true");
     assert_no_errors("false");
 }
@@ -268,7 +268,7 @@ fn every_binding_is_a_pattern() {
     assert_eq!(b.name().map(|n| n.name.as_str()), Some("x"));
     assert!(b.typ.is_some());
 
-    let b = binding("_ Nil = println('x')");
+    let b = binding(r#"_ Nil = println("x")"#);
     assert_eq!(b.name().map(|n| n.name.as_str()), Some("_"));
     assert!(b.typ.is_some());
 
@@ -277,7 +277,7 @@ fn every_binding_is_a_pattern() {
         ast::Pattern::Tuple { .. }
     ));
     assert!(matches!(
-        binding("Nil = println('x')").pattern,
+        binding(r#"Nil = println("x")"#).pattern,
         ast::Pattern::Constructor { .. }
     ));
 
@@ -564,14 +564,14 @@ fn test_if_expression() {
 
 #[test]
 fn test_match_expression() {
-    assert_no_errors("match x { 1 -> 'one'\n 2 -> 'two'\n _ -> 'other' }");
-    assert_no_errors("match x { 1 | 2 -> 'low'\n _ -> 'high' }");
+    assert_no_errors("match x { 1 -> \"one\"\n 2 -> \"two\"\n _ -> \"other\" }");
+    assert_no_errors("match x { 1 | 2 -> \"low\"\n _ -> \"high\" }");
     assert_no_errors("match x { Some(v) -> v\n None -> 0 }");
     assert_no_errors("match p { Point(x: a, y: b) -> a + b }");
     assert_no_errors("match p { Point(x: a, ..) -> a }");
     assert_no_errors("match xs { [a, b, ..rest] -> a\n [] -> 0 }");
     assert_no_errors("match t { (a, b) -> a + b }");
-    assert_no_errors("match n { 1..5 -> 'low'\n _ -> 'hi' }");
+    assert_no_errors("match n { 1..5 -> \"low\"\n _ -> \"hi\" }");
 }
 
 #[test]
@@ -974,4 +974,28 @@ fn test_binary_pattern() {
 #[test]
 fn test_binary_pattern_rest_must_be_last() {
     assert_has_error("match b { <<..r, 1>> -> r\n _ -> b }", "last segment");
+}
+
+/// The scanner has already said what is wrong with a token it couldn't read.
+#[test]
+fn an_apostrophe_in_code_is_one_error() {
+    for src in [
+        "x = don't\ny = 2\n",
+        "fn f() Int {\n\tg(don't)\n}\ny = 2\n",
+        "x = [1, don't]\n",
+        "x = 'a ${y} b\nz = 1\n",
+        "x = match y {\n\tdon't -> 1\n\t_ -> 2\n}\n",
+        "type T {\n\tA(don't)\n}\n",
+    ] {
+        let mut scanner = new_scanner(src.to_string());
+        let errors = new_parser(&mut scanner).parse_program().diagnostics;
+        assert_eq!(errors.len(), 1, "{src}: {errors:?}");
+        assert!(
+            matches!(
+                errors[0].problem,
+                SyntaxError::Scan(ScanError::UnclosedSingleQuote)
+            ),
+            "{src}: {errors:?}"
+        );
+    }
 }

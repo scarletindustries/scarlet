@@ -122,7 +122,7 @@ pub enum PatRest {
 /// One `<<..>>` segment in *pattern* position.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedBinPatSeg {
-    /// `<<'lit'>>` matches the literal's UTF-8 bytes as a prefix. `bits` is its
+    /// `<<"lit">>` matches the literal's UTF-8 bytes as a prefix. `bits` is its
     /// width, pooled at elaboration time because `lower` has no pool.
     Utf8Literal { bytes: ConstId, bits: ConstId },
     /// `v:utf8` reads one variable-width codepoint.

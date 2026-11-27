@@ -348,19 +348,17 @@ fn tm_language() -> String {
         "name": "variable.other.interpolation.sca",
         "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*",
     });
-    let string_body = |quote: &str| -> Value {
-        json!({
-            "name": format!("string.quoted.{}.sca", if quote == "'" { "single" } else { "double" }),
-            "begin": quote,
-            "end": format!("{quote}|$"),
-            "patterns": [
-                escape_rule,
-                bad_escape_rule,
-                interpolation_region,
-                interpolation_shorthand,
-            ]
-        })
-    };
+    let string = json!({
+        "name": "string.quoted.double.sca",
+        "begin": "\"",
+        "end": "\"|$",
+        "patterns": [
+            escape_rule,
+            bad_escape_rule,
+            interpolation_region,
+            interpolation_shorthand,
+        ]
+    });
 
     let sized_specs = BIN_SPEC_SIZED.join("|");
     let bare_specs = BIN_SPEC_BARE.join("|");
@@ -426,7 +424,7 @@ fn tm_language() -> String {
                 ]
             },
             "strings": {
-                "patterns": [string_body("'"), string_body("\"")]
+                "patterns": [string]
             },
             "numbers": {
                 "comment": "Mirrors Scanner::scan_number. Hex (`0x`) and binary (`0b`) come first so they aren't split into `0` and an identifier. `_` separates digits only when it sits between two digits of that radix.",

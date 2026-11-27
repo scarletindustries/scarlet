@@ -55,24 +55,24 @@ import scarlet/string
 import scarlet/time
 
 pub fn main() {{
-	match net::connect('127.0.0.1', {port}) {{
-		Ok(sock) -> match url::parse('http://127.0.0.1/') {{
-			Err(e) -> println('url failed: ${{string::inspect(e)}}')
+	match net::connect("127.0.0.1", {port}) {{
+		Ok(sock) -> match url::parse("http://127.0.0.1/") {{
+			Err(e) -> println("url failed: ${{string::inspect(e)}}")
 			Ok(u) -> {{
 				io = client::plain(sock)
-				req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+				req = client::Request(method: <<"GET">>, url: u, headers: [], body: <<>>)
 				match client::send_until(io, req, 1024, time::deadline_in_ms({deadline_ms})) {{
-					Ok(r) -> println('http-ok: ${{r.status}}')
+					Ok(r) -> println("http-ok: ${{r.status}}")
 					Err(e) -> match e {{
-						client::Transport(error::TimedOut) -> println('http-timeout: Transport(TimedOut)')
-						client::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | client::BadUrl(_) | client::BadRequestHeaders | client::Tls(_) | client::MalformedResponse(_) | client::BodyTooLarge(_) -> println('other: ${{string::inspect(e)}}')
+						client::Transport(error::TimedOut) -> println("http-timeout: Transport(TimedOut)")
+						client::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | client::BadUrl(_) | client::BadRequestHeaders | client::Tls(_) | client::MalformedResponse(_) | client::BodyTooLarge(_) -> println("other: ${{string::inspect(e)}}")
 					}}
 				}}
 				shut = io.close
 				_ = shut()
 			}}
 		}}
-		Err(e) -> println('connect failed: ${{e}}')
+		Err(e) -> println("connect failed: ${{e}}")
 	}}
 }}
 "#
@@ -91,7 +91,8 @@ fn run_bounded(tag: &str, src: &str, secs: u64) -> (Option<i32>, String) {
     std::fs::create_dir_all(&dir).expect("mkdir");
     let entry = dir.join("main.sca");
     std::fs::write(&entry, src).expect("write program");
-    std::fs::write(dir.join("package.sca"), "name = 'http_client_test'\n").expect("write package");
+    std::fs::write(dir.join("package.sca"), "name = \"http_client_test\"\n")
+        .expect("write package");
     let out = wait_or_kill(
         scarlet_run(&entry)
             .current_dir(&dir)

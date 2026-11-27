@@ -102,5 +102,5 @@ pub fn main() {
 	n = 9
 	done = run(iota(0, n, []), iota(0, n, []), 1, 0, 0, n)
 	println(done.sum)
-	println('Pfannkuchen(${n}) = ${done.maxflips}')
+	println("Pfannkuchen(${n}) = ${done.maxflips}")
 }

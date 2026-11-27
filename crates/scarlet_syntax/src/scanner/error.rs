@@ -34,6 +34,11 @@ pub enum ScanError {
     UnclosedString,
     /// The input ends inside an interpolated string's `${ }`.
     UnclosedInterpolation,
+    /// A string in single quotes, which scans as the string it spells.
+    SingleQuotedString,
+    /// A single quote that no string follows: the string it would open is
+    /// never closed, or it is an apostrophe in the code.
+    UnclosedSingleQuote,
     /// A backslash before something that isn't an escape: that something.
     UnknownEscape(String),
     /// `\u` with no `{` after it.
@@ -60,6 +65,8 @@ impl Problem for ScanError {
             | ScanError::NoDigits(_)
             | ScanError::BadDigit(_)
             | ScanError::UnclosedString
+            | ScanError::SingleQuotedString
+            | ScanError::UnclosedSingleQuote
             | ScanError::UnknownEscape(_)
             | ScanError::UnicodeEscapeWithoutBrace
             | ScanError::UnclosedUnicodeEscape { .. }
@@ -80,11 +87,16 @@ impl fmt::Display for ScanError {
                 write!(f, "This block comment is never closed. End it with `*/`")
             }
             ScanError::UnclosedString | ScanError::UnclosedInterpolation => {
-                write!(
-                    f,
-                    "This string is never closed. End it with a matching quote"
-                )
+                write!(f, "This string is never closed. End it with a double quote")
             }
+            ScanError::SingleQuotedString => write!(
+                f,
+                "Strings use double quotes. `scarlet fmt` changes single quotes to double"
+            ),
+            ScanError::UnclosedSingleQuote => write!(
+                f,
+                "Strings use double quotes, and this single quote is never closed"
+            ),
             ScanError::UnknownEscape(e) => write!(
                 f,
                 "Unknown escape sequence '\\{e}'. Write '\\\\' for a backslash"

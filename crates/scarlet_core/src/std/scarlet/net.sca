@@ -155,7 +155,7 @@ fn accept_failed(
 		| error::MessageTooLarge(_)
 		| error::UnalignedBinary
 		| error::InvalidPort -> {
-			println('accept failed: ${string::inspect(e)}')
+			println("accept failed: ${string::inspect(e)}")
 			process::kill(process::self())
 		}
 	}

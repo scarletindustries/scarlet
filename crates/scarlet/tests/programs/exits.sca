@@ -6,18 +6,18 @@ import scarlet/process
 
 fn check(name String, ok Bool) Nil {
 	if ok {
-		println('PASS ${name}')
+		println("PASS ${name}")
 	} else {
-		println('FAIL ${name}')
+		println("FAIL ${name}")
 	}
 }
 
 fn reason(d process::Down) String {
 	match d.reason {
-		process::Normal -> 'normal'
-		process::Killed -> 'killed'
-		process::NoProcess -> 'no process'
-		process::Crashed(_) -> 'crashed'
+		process::Normal -> "normal"
+		process::Killed -> "killed"
+		process::NoProcess -> "no process"
+		process::Crashed(_) -> "crashed"
 	}
 }
 
@@ -57,7 +57,7 @@ fn collect(inbox process::Subject(Tree), left Int, killed Int) Int {
 		killed
 	} else {
 		match process::receive(inbox) {
-			Ended(_, d) -> collect(inbox, left - 1, if reason(d) == 'killed' {
+			Ended(_, d) -> collect(inbox, left - 1, if reason(d) == "killed" {
 				killed + 1
 			} else {
 				killed
@@ -75,13 +75,13 @@ pub fn main() {
 	(victim, _) = parked(False)
 	_ = process::monitor(victim, downs, fn(d) d)
 	process::kill(victim)
-	check('a killed process reports Killed', reason(process::receive(downs)) == 'killed')
+	check("a killed process reports Killed", reason(process::receive(downs)) == "killed")
 
 	// --- killing what has already ended does nothing ---------------------------------------
 
 	process::kill(victim)
 	_ = process::monitor(victim, downs, fn(d) d)
-	check('killing an ended pid is a no-op', reason(process::receive(downs)) == 'no process')
+	check("killing an ended pid is a no-op", reason(process::receive(downs)) == "no process")
 
 	tree = process::subject()
 	_ = process::spawn_unlinked(fn() {
@@ -100,17 +100,17 @@ pub fn main() {
 
 	match process::receive(tree) {
 		Built(root, middle, leaf) -> {
-			_ = process::monitor(root, tree, fn(d) Ended('root', d))
-			_ = process::monitor(middle, tree, fn(d) Ended('middle', d))
-			_ = process::monitor(leaf, tree, fn(d) Ended('leaf', d))
+			_ = process::monitor(root, tree, fn(d) Ended("root", d))
+			_ = process::monitor(middle, tree, fn(d) Ended("middle", d))
+			_ = process::monitor(leaf, tree, fn(d) Ended("leaf", d))
 			process::kill(middle)
-			check('a kill takes the whole linked tree with it', collect(tree, 3, 0) == 3)
+			check("a kill takes the whole linked tree with it", collect(tree, 3, 0) == 3)
 		}
-		Ended(_, _) -> println('FAIL tree was never built')
+		Ended(_, _) -> println("FAIL tree was never built")
 	}
 	// Reaching this line is the check: root was unlinked, so the cascade
 	// stopped there and did not reach this process.
-	check('the cascade stopped at the unlinked boundary', True)
+	check("the cascade stopped at the unlinked boundary", True)
 
 	// --- a normal exit does not spread ----------------------------------------------------
 	// parent (unlinked from us) spawns a linked child, then returns. The child
@@ -124,12 +124,12 @@ pub fn main() {
 	// Monitored before it can have run: it starts only once this process parks.
 	_ = process::monitor(parent, downs, fn(d) d)
 	(child, gate) = process::receive(handoff)
-	check('the parent returned', reason(process::receive(downs)) == 'normal')
+	check("the parent returned", reason(process::receive(downs)) == "normal")
 	_ = process::monitor(child, downs, fn(d) d)
 	process::send(gate, Nil)
 	check(
-		'its linked child outlived it and ended normally',
-		reason(process::receive(downs)) == 'normal',
+		"its linked child outlived it and ended normally",
+		reason(process::receive(downs)) == "normal",
 	)
 
 	// --- a process may kill itself -----------------------------------------------------------
@@ -138,8 +138,8 @@ pub fn main() {
 	suicide = process::spawn_unlinked(fn() process::kill(process::self()))
 	_ = process::monitor(suicide, downs, fn(d) d)
 	check(
-		'self-kill reports Killed even though it returned',
-		reason(process::receive(downs)) == 'killed',
+		"self-kill reports Killed even though it returned",
+		reason(process::receive(downs)) == "killed",
 	)
-	println('done')
+	println("done")
 }

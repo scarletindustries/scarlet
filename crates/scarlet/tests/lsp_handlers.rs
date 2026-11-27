@@ -372,7 +372,7 @@ fn bug2_shadowed_binding_resolves_inner_then_outer() {
 // embedded `scarlet/*`, which has no file on disk. Every other token resolves
 // to nothing.
 
-const BUG3_HELPER: &str = "pub fn greet() String {\n\x20 'hi'\n}\n";
+const BUG3_HELPER: &str = "pub fn greet() String {\n\x20 \"hi\"\n}\n";
 const BUG3_MAIN: &str = "import ./helper\n\
 import scarlet/string\n\
 x = helper::greet()\n\
@@ -907,7 +907,7 @@ fn editing_a_dependency_republishes_its_open_importers() {
 #[test]
 fn an_imported_modules_error_is_published_on_its_own_file() {
     let p = Project::new("diag_owner");
-    let lib = "pub fn broken() Int {\n  'not an int'\n}\n";
+    let lib = "pub fn broken() Int {\n  \"not an int\"\n}\n";
     let main = "import ./lib\npub fn main() {\n  println(lib::broken())\n}\n";
     p.write("lib.sca", lib);
     p.write("main.sca", main);
@@ -1141,7 +1141,7 @@ fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
 
 #[test]
 fn hover_shows_a_functions_parameter_names() {
-    let src = "fn greet(name String, greeting String) String {\n\tgreeting + name\n}\n\nprintln(greet('al', 'hi '))\n";
+    let src = "fn greet(name String, greeting String) String {\n\tgreeting + name\n}\n\nprintln(greet(\"al\", \"hi \"))\n";
     let (_p, mut s, uri) = open_single("hover_params", src);
     let md = hover_md(&mut s, &uri, 0, 4); // the `greet` declaration
     assert!(
@@ -1153,7 +1153,7 @@ fn hover_shows_a_functions_parameter_names() {
 /// The parameter names of an embedded stdlib function reach hover too.
 #[test]
 fn hover_shows_parameter_names_across_the_stdlib_blob() {
-    let src = "import scarlet/io\n\nprintln(io::read_text('x') or e -> '')\n";
+    let src = "import scarlet/io\n\nprintln(io::read_text(\"x\") or e -> \"\")\n";
     let (_p, mut s, uri) = open_single("hover_blob", src);
     let md = hover_md(&mut s, &uri, 2, 12); // inside `read_text`
     assert!(
@@ -1165,7 +1165,7 @@ fn hover_shows_parameter_names_across_the_stdlib_blob() {
 /// A constructor's labels are its field labels.
 #[test]
 fn hover_shows_a_constructors_field_labels() {
-    let src = "import scarlet/io\n\nfn f(e io::IoError) String {\n\tmatch e {\n\t\tio::NotFound(p) -> p\n\t\t_ -> ''\n\t}\n}\nprintln(1)\n";
+    let src = "import scarlet/io\n\nfn f(e io::IoError) String {\n\tmatch e {\n\t\tio::NotFound(p) -> p\n\t\t_ -> \"\"\n\t}\n}\nprintln(1)\n";
     let (_p, mut s, uri) = open_single("hover_ctor", src);
     let md = hover_md(&mut s, &uri, 4, 6); // the `NotFound` of `io::NotFound(p)`
     assert!(
@@ -1180,9 +1180,9 @@ fn hover_shows_a_declaration_doc_from_another_module() {
     let p = Project::new("hover_xmod_doc");
     p.write(
         "lib.sca",
-        "/** Text helpers. */\n\n/** Join `parts` with `sep`. */\npub fn join(parts Array(String), sep String) String {\n\t'x'\n}\n",
+        "/** Text helpers. */\n\n/** Join `parts` with `sep`. */\npub fn join(parts Array(String), sep String) String {\n\t\"x\"\n}\n",
     );
-    let src = "import ./lib\n\nprintln(lib::join(['a'], ','))\n";
+    let src = "import ./lib\n\nprintln(lib::join([\"a\"], \",\"))\n";
     p.write("main.sca", src);
     let (mut s, uri) = open(&p, "main.sca", src);
     let md = hover_md(&mut s, &uri, 2, 14); // inside `join`
@@ -1225,7 +1225,7 @@ fn completion_after_stdlib_alias_dot_lists_exports() {
     );
 }
 
-const COMP_HELPER: &str = "pub fn greet() String {\n\x20 'hi'\n}\nfn hidden() Int { 1 }\n";
+const COMP_HELPER: &str = "pub fn greet() String {\n\x20 \"hi\"\n}\nfn hidden() Int { 1 }\n";
 const COMP_MAIN: &str = "import ./helper\nz = helper::\n";
 
 #[test]
@@ -1376,7 +1376,7 @@ fn a_file_moves_to_the_folder_that_now_owns_it() {
     let a = "pub fn main() {\n\tprintln(1)\n}\n";
     p.write("a.sca", a);
     std::fs::create_dir_all(p.dir.join("sub")).unwrap();
-    p.write("sub/lib.sca", "pub fn broken() Int { 'no' }\n");
+    p.write("sub/lib.sca", "pub fn broken() Int { \"no\" }\n");
     let (mut s, _) = open(&p, "a.sca", a);
     let lib = uri_of(&p, "sub/lib.sca");
     assert!(s.analysis_of(&lib).is_some(), "the scan checked lib");

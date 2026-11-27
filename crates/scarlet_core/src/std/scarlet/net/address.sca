@@ -57,7 +57,7 @@ pub fn is_v6(ip IpAddress) Bool {
 
 pub fn to_string(sa SocketAddress) String {
 	match sa.ip {
-		V4(a) -> '${a}:${sa.port}'
-		V6(a) -> '[${a}]:${sa.port}'
+		V4(a) -> "${a}:${sa.port}"
+		V6(a) -> "[${a}]:${sa.port}"
 	}
 }

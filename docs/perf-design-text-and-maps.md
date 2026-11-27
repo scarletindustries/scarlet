@@ -30,7 +30,7 @@ Every in-place write in this design (and `ArrayAppend`'s today) reads "this regi
 
 - Today it holds for every register, because every instruction that writes a register either makes a new cell or shares the one it read.
 - The loader is the one upholder. `moves_on_last_use` (code.rs:2052) sets every such flag, and it gains one input: the set of registers that own their reference. Today that set is all of them. When borrow inference lands, the pass that marks a register borrowed must pass that set in, and a borrowed value that reaches an owning operand is shared first. That is Lean's rule: its borrow inference marks a value owned when it is "subject to reset-reuse ... so their reference count accurately reflects the real amount of references".
-- A loader test marks a register borrowed and asserts that no instruction takes it. A VM test runs `match r { R(name, _) -> f(r, name + '!') }` and checks `r.name` afterwards.
+- A loader test marks a register borrowed and asserts that no instruction takes it. A VM test runs `match r { R(name, _) -> f(r, name + "!") }` and checks `r.name` afterwards.
 
 The hard case the critic gave is exactly that match: with a borrowed `name`, the cell's count is 1 (held by `r`), `name` is dead after the concat, and an append would rewrite `r.name`. S0 forbids the flag, so the concat copies.
 
@@ -46,7 +46,7 @@ word 1    length in bytes
 word 2..  the bytes, eight to a word, first byte lowest
 ```
 
-This is today's layout and today's size rule: a string cell has exactly `ceil(len / 8)` data words. `'aten'` is `[1 | String | 3][4]["aten" then four zero bytes]`. The four zero bytes are the only spare room a string has until the growth step, and they are what the in-place append writes into.
+This is today's layout and today's size rule: a string cell has exactly `ceil(len / 8)` data words. `"aten"` is `[1 | String | 3][4]["aten" then four zero bytes]`. The four zero bytes are the only spare room a string has until the growth step, and they are what the in-place append writes into.
 
 ### The frozen area and the frozen value
 
@@ -341,7 +341,7 @@ before                                              after
 JumpUnlessCmpImm %1 == 0             40             the same                                40
 IntImm Div, Sub, Rem                178             the same                               178
 GetGlobal %9 = letters               63             the same                                63
-Str %12 = ''        a new cell      185             Const %12 = ''   a frozen word    about 31
+Str %12 = ""        a new cell      185             Const %12 = ""   a frozen word    about 31
 ArrayIndexOr %13 = %9[%11] or %12   290             the same, less a share            about 270
 Concat %14 = [%2, %13]              840             Concat %14 = [%2!, %13]           about 250
 TailCallSelf (%6, %8, %14)          631             TailCallSelf, nothing to free     about 245
@@ -350,7 +350,7 @@ TailCallSelf (%6, %8, %14)          631             TailCallSelf, nothing to fre
 
 `%2!` marks `own_first`. The six letters in the `letters` array are literals, so they are frozen values: reading one shares nothing and dropping one releases nothing. A word goes like this, with the handler's measured costs:
 
-- The first letter meets `''`, which is empty, so the result is the letter itself. 130.
+- The first letter meets `""`, which is empty, so the result is the letter itself. 130.
 - The second letter meets a frozen value, which gives no `Sole`, so the two short parts go into one new cell. 372 with that cell's free at the end of the word (the model's free is about 90 cheaper than heap.rs's, so about 460 in the VM).
 - Every later letter fits in that cell's one data word and is ORed in. 221.
 
@@ -369,7 +369,7 @@ fn main.fn(%0, %1) =             before                           after
 
 Fifty rows cost 1.38 million today. With one exact copy a step they cost 43.0k in the kernel (50.5k on heap.rs's real free lists), plus the fold's own 50 steps. After the growth step they cost 23.6k (24.2k). So the byte-at-a-time copy is nearly all of today's cost, and growth is worth another half of what is left.
 
-`string::replace(row, '=', ': ')` is a split, an array walk and a fold of two concats a piece today. After, it is one built-in: count the matches, allocate once, copy the runs.
+`string::replace(row, "=", ": ")` is a split, an array walk and a fold of two concats a piece today. After, it is one built-in: count the matches, allocate once, copy the runs.
 
 ### map_churn: `churn`
 
@@ -399,17 +399,17 @@ match %3                             L: Drop %2;  GetGlobal; Ret
 
 | Operation | Today | Kernel | Handler or in the VM |
 |---|---:|---:|---:|
-| `''` literal, bound and dropped | 360 | 0 | 26 measured in the handler (an Int constant is 22) |
+| `""` literal, bound and dropped | 360 | 0 | 26 measured in the handler (an Int constant is 22) |
 | Concat, empty + short | about 840 | | 130 measured |
 | Concat, short + short, new cell, freed | about 950 | 362 (M) | 372 measured, about 460 in the VM |
 | Concat, short part in place | 840 and a free | 87 (M) | 221 measured |
 | Concat, average on string_keys' mix | about 840 and a free | | 231 measured, about 250 in the VM |
 | Concat 512+512 | about 11,400 | 728 (M), 906 on real free lists | about 1,000 |
-| `'  ' + row + ' '` as one concat | about 3,800 | 562 (M) | about 710 |
+| `"  " + row + " "` as one concat | about 3,800 | 562 (M) | about 710 |
 | `s == t`, 8 / 512 bytes | 857 / 5,583 | 88 / 347 (M) | about 150 / 410 |
 | Hash a 2 / 8 / 64 byte string | inside a 1,650 get | 116 / 127 / 232 (M) | the same |
 | `string::length`, 8 / 1,024 bytes | 641 / 6,803 | 56 / 624 (M) | about 240 / 810 |
-| `split('score=12345', '=')` | 4,297 | 518 (B), 635 (C) | about 900 and the array |
+| `split("score=12345", "=")` | 4,297 | 518 (B), 635 (C) | about 900 and the array |
 | Fold join of 50 rows, exact copy a step | 1.38M | 43.0k (M), 50.5k on real free lists | about 185k with the fold's own steps |
 | The same after growth | 1.38M | 23.6k (M), 24.2k | about 160k |
 | `replace`, 50 matches in 2.3 KB | 1.43M | 16.2k two passes, 11.0k with an offsets buffer | about 17k |
@@ -453,7 +453,7 @@ Multiplied step by step, the area's geomean factor is about 0.936. Added per ben
 
 **Changes.** crates/scarlet_vm/src/value.rs: `TAG_FROZEN`, `Value::frozen`, `View::Frozen(Lit)`; every match on `View` gains the arm (28 sites name `View::Cell`, and the no-wildcard lint finds them all). code.rs: `Frozen`, `Lit`, `Code.frozen`; the loader interns `Const::String` and `Const::Binary` on the whole constant (text or binary, bit length, bytes), writes each as a cell-shaped run of words, and loads it with `Instr::Const`; delete `Instr::Str` and `Instr::BinaryConst`; `JumpUnlessStr` and `JumpUnlessBinary` name a `Lit`. heap.rs: `Heap` holds `&Frozen`. New text.rs with `Text` and `of(heap, v)`; binary.rs `bits` takes a `Value` and `Bits.owner` is a value. Every reader that takes a cell and asks its kind today (`is_string`, `text_of`, `utf8_of`, eq.rs, hash.rs, show.rs, json.rs, http.rs, map key compare) goes through the two doors, still copying out where it copies today. Tests: two binary literals with the same bytes and different bit lengths stay distinct; a literal used as a map key finds a heap string with the same bytes; `cells_made` expectations for literals in loops move.
 
-**Expected gain.** Alone, today: a `''` bound and dropped goes from 360 to about 31 (26 against 22 for an Int constant, measured in the handler model). string_keys: 10.5M evaluations x 329 = 3.45G of 28.70G, 12.0%, and the six letters stop being counted on every read (about 70 a letter x 8.5M = 0.6G, 2.1%, from the handler model's 118 a letter less the literal's own 31); I take 13%. strings: about 24 literals a row x 329 = 7.9k of 255.3k, 3.1%. json: 1.6% (the json report's ablation). Geomean factor exp((ln 0.87 + ln 0.969 + ln 0.984) / 23) = 0.992. If alloc and free get cheap first (cause 4), the 360 shrinks to perhaps 150 to 200 and this step is worth about half.
+**Expected gain.** Alone, today: a `""` bound and dropped goes from 360 to about 31 (26 against 22 for an Int constant, measured in the handler model). string_keys: 10.5M evaluations x 329 = 3.45G of 28.70G, 12.0%, and the six letters stop being counted on every read (about 70 a letter x 8.5M = 0.6G, 2.1%, from the handler model's 118 a letter less the literal's own 31); I take 13%. strings: about 24 literals a row x 329 = 7.9k of 255.3k, 3.1%. json: 1.6% (the json report's ablation). Geomean factor exp((ln 0.87 + ln 0.969 + ln 0.984) / 23) = 0.992. If alloc and free get cheap first (cause 4), the 360 shrinks to perhaps 150 to 200 and this step is worth about half.
 
 **Risk.** Medium, because it is wide: a new value tag touches every match on `View`, and every string and binary reader must take both forms. The compiler finds the sites, and what each does is one line (go through the door). The tag 0xFFFE must be agreed with whoever else wants a value tag. Nothing can write a literal: the frozen area has no `&mut` after load.
 
@@ -491,7 +491,7 @@ Multiplied step by step, the area's geomean factor is about 0.936. Added per ben
 
 ### 6. 6. Append in place when the bytes fit the cell
 
-**Changes.** code.rs: `moves_on_last_use` takes the set of owning registers (all of them today), sets `own_first` on `Concat` and `moved` on a new `Instr::Move { dst, src, moved }`. text.rs: `Sole` and `sole`; the in-place case of the two-part order (OR one shifted word into the last data word) and of the general path. exec.rs: the `Concat` arm asks for a `Sole` only when `own_first` is set. `scarlet/internal` gains `strings_appended_in_place`. Tests: the loader never takes a register marked borrowed; `match r { R(name, _) -> f(r, name + '!') }` leaves `r.name` alone; a big Int as a `show` first part is never written; a literal first part is never written. No layout rule changes: a cell still has exactly `ceil(len / 8)` data words.
+**Changes.** code.rs: `moves_on_last_use` takes the set of owning registers (all of them today), sets `own_first` on `Concat` and `moved` on a new `Instr::Move { dst, src, moved }`. text.rs: `Sole` and `sole`; the in-place case of the two-part order (OR one shifted word into the last data word) and of the general path. exec.rs: the `Concat` arm asks for a `Sole` only when `own_first` is set. `scarlet/internal` gains `strings_appended_in_place`. Tests: the loader never takes a register marked borrowed; `match r { R(name, _) -> f(r, name + "!") }` leaves `r.name` alone; a big Int as a `show` first part is never written; a literal first part is never written. No layout rule changes: a cell still has exactly `ceil(len / 8)` data words.
 
 **Expected gain.** Alone (after step 5), measured in the handler model: a later letter of `spell` falls from 332 with an exact copy to 191 in place, 141 saved, or about 230 with heap.rs's dearer free. Over 4.5M letters that is 0.63G to 1.04G of 28.70G, 2.2% to 3.6%; I take 3.3%. strings: nothing, because its folds outgrow one word. Geomean factor exp(ln 0.967 / 23) = 0.9985. If alloc and free get cheap first this is nearer 2%.
 
@@ -501,7 +501,7 @@ Multiplied step by step, the area's geomean factor is about 0.936. Added per ben
 
 **Changes.** crates/scarlet_ir/src/intrinsic.rs: `StringReplace`, `StringJoin`, `StringConcat`, `BinaryConcat`. string.sca: `replace` becomes `@vm(string__replace)`; add `join(parts, sep)` and `concat(parts)`. binary.sca: `concat` becomes `@vm(binary__concat)`. int.sca: `from_string` is the built-in itself and returns `Result`, so `from_string_raw` and its wrapper go; the same for `binary::parse_int`. text.rs: `join` and `replace`, two passes each with one `memmem::Finder` and no buffer. exec.rs: the arms; code.rs `built` lists the arities. Stdlib call sites that fold to join (http/client.sca, oauth2.sca) call the built-ins.
 
-**Expected gain.** Alone (after steps 3 to 5), strings: `string::replace(row, '=', ': ')` is about 13.5k (a split, a five-element array walk at about 2.1k each, closure calls and concats) and becomes about 1,400 (1,186 in design C's kernel plus the built-in path and the second search), 12.1k a row, 4.7%; the batch replace loses its fold's 51 walk steps and 50 closure calls, (185k - 17k) / 50 = 3.4k a row, 1.3%; three `from_string` lose a wrapper call, 0.5%. Together 6.5%. Geomean factor exp(ln 0.935 / 23) = 0.997. About 5 of the 6.5 points are array walks and closure calls, so if the array and call areas land first this step is worth about 1.5%. The benchmark's own `join` is user code and is fixed by step 5, not this one.
+**Expected gain.** Alone (after steps 3 to 5), strings: `string::replace(row, "=", ": ")` is about 13.5k (a split, a five-element array walk at about 2.1k each, closure calls and concats) and becomes about 1,400 (1,186 in design C's kernel plus the built-in path and the second search), 12.1k a row, 4.7%; the batch replace loses its fold's 51 walk steps and 50 closure calls, (185k - 17k) / 50 = 3.4k a row, 1.3%; three `from_string` lose a wrapper call, 0.5%. Together 6.5%. Geomean factor exp(ln 0.935 / 23) = 0.997. About 5 of the 6.5 points are array walks and closure calls, so if the array and call areas land first this step is worth about 1.5%. The benchmark's own `join` is user code and is fixed by step 5, not this one.
 
 **Risk.** Low. `replace` with an empty pattern must still put the replacement between every two scalar values. Depends on step 3 for `write`.
 

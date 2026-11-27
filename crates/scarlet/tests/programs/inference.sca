@@ -25,7 +25,7 @@ fn as_int(x) Int {
 // The two halves of a signature are independent: annotate the parameters and
 // leave the return type off, and the body still decides what comes back.
 fn shout(s String) {
-	s + '!'
+	s + "!"
 }
 
 // Mutual recursion: both fns are in one SCC and generalise together.
@@ -46,8 +46,8 @@ fn is_odd(n) {
 
 // ...and it generalises inside a function body too, not just at module scope.
 fn describe_all() String {
-	show = fn(v) '<${v}>'
-	'${show(1)}${show('x')}${show(2.5)}'
+	show = fn(v) "<${v}>"
+	"${show(1)}${show("x")}${show(2.5)}"
 }
 
 // --- constrained type variables (addable / numeric) -------------------------
@@ -120,7 +120,7 @@ fn find(id Int) Option(Int) {
 
 fn risky(n Int) Result(Int, Failure) {
 	if n < 0 {
-		Err(Boom(why: 'negative'))
+		Err(Boom(why: "negative"))
 	} else {
 		Ok(n * 2)
 	}
@@ -129,11 +129,11 @@ fn risky(n Int) Result(Int, Failure) {
 // An if/else-if chain is one expression; every branch unifies to one type.
 fn grade(n Int) String {
 	if n >= 90 {
-		'A'
+		"A"
 	} else if n >= 80 {
-		'B'
+		"B"
 	} else {
-		'F'
+		"F"
 	}
 }
 
@@ -153,13 +153,13 @@ fn hold(h Handle) Option(Handle) {
 pub fn main() {
 	println(double(21))
 	println(concat(10, 5))
-	println(concat('Hello, ', 'World'))
+	println(concat("Hello, ", "World"))
 	println(is_positive(42))
-	println(identity('polymorphic'))
+	println(identity("polymorphic"))
 
 	println(as_int(3))
 
-	println(shout('half annotated'))
+	println(shout("half annotated"))
 
 	// --- recursion -------------------------------------------------------------
 
@@ -180,14 +180,14 @@ pub fn main() {
 	// A let-bound lambda generalises: three instantiations of one binding.
 	id = fn(v) v
 	println(id(1))
-	println(id('one'))
+	println(id("one"))
 	println(id(True))
 
 	println(describe_all())
 
 	println(twice_added(2))
 	println(twice_added(1.5))
-	println(twice_added('ab'))
+	println(twice_added("ab"))
 
 	println(square(7))
 	println(square(0.5))
@@ -197,29 +197,29 @@ pub fn main() {
 	println(call_with_seven(fn(n Int) n * 3))
 
 	inc = fn(n Int) n + 1
-	render = fn(n Int) '#${n}'
+	render = fn(n Int) "#${n}"
 	println(compose(render, inc)(41))
 
 	println(apply_twice(5, fn(n) n + 1))
-	println(apply_twice('a', fn(s) '${s}!'))
+	println(apply_twice("a", fn(s) "${s}!"))
 
 	(q, r) = divmod(17, 5)
-	println('${q} rem ${r}')
+	println("${q} rem ${r}")
 
-	println(firsts([(1, 'a'), (2, 'b')]))
+	println(firsts([(1, "a"), (2, "b")]))
 
 	println(fold([1, 2, 3], 0, fn(acc, x) acc + x))
-	println(fold(['a', 'b'], '', fn(acc, x) acc + x))
+	println(fold(["a", "b"], "", fn(acc, x) acc + x))
 
 	// --- rebinding retypes ------------------------------------------------------
 
 	// A rebinding is a fresh binding, so its type may differ from the old one.
 	v = 10
 	println(v)
-	v = 'ten'
+	v = "ten"
 	println(v)
 
-	println(wrap('ctor value'))
+	println(wrap("ctor value"))
 
 	// `or` unwraps Option and Result; its body must have the payload's type.
 	println(find(0) or origin)

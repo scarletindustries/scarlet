@@ -6,9 +6,9 @@ import scarlet/process
 
 fn check(name String, ok Bool) Nil {
 	if ok {
-		println('PASS ${name}')
+		println("PASS ${name}")
 	} else {
-		println('FAIL ${name}')
+		println("FAIL ${name}")
 	}
 }
 
@@ -39,8 +39,8 @@ fn drain(inbox process::Subject(Event), worker process::Pid, work Int) Int {
 	match process::receive(inbox) {
 		Work(n) -> drain(inbox, worker, work + n)
 		WorkerDown(slot, d) -> {
-			check('down tagged with the slot', slot == 7)
-			check('down carries the worker pid', d.pid == worker)
+			check("down tagged with the slot", slot == 7)
+			check("down carries the worker pid", d.pid == worker)
 			work
 		}
 	}
@@ -75,8 +75,8 @@ pub fn main() {
 	_ = process::monitor(child, downs, fn(d) d)
 	process::send(go, Nil)
 	first = process::receive(downs)
-	check('down names the process', first.pid == child)
-	check('a returned process ended normally', match first.reason {
+	check("down names the process", first.pid == child)
+	check("a returned process ended normally", match first.reason {
 		process::Normal -> True
 		process::NoProcess -> False
 		process::Killed -> False
@@ -94,8 +94,8 @@ pub fn main() {
 	process::sleep(20)
 	_ = process::monitor(gone, downs, fn(d) d)
 	late = process::receive(downs)
-	check('monitoring an ended pid still delivers', late.pid == gone)
-	check('and reports that it was already gone', match late.reason {
+	check("monitoring an ended pid still delivers", late.pid == gone)
+	check("and reports that it was already gone", match late.reason {
 		process::NoProcess -> True
 		process::Normal -> False
 		process::Killed -> False
@@ -109,7 +109,7 @@ pub fn main() {
 	process::send(events, Work(2))
 	process::send(release, Nil)
 
-	check('traffic before the down was seen first', drain(events, worker, 0) == 3)
+	check("traffic before the down was seen first", drain(events, worker, 0) == 3)
 
 	// --- two monitors, two notices ---------------------------------------------------
 
@@ -119,7 +119,7 @@ pub fn main() {
 	process::send(hold, Nil)
 	a = process::receive(downs)
 	b = process::receive(downs)
-	check('each monitor delivers its own notice', a.pid == twice && b.pid == twice)
+	check("each monitor delivers its own notice", a.pid == twice && b.pid == twice)
 
 	// --- a released monitor stays silent ---------------------------------------------
 
@@ -127,7 +127,7 @@ pub fn main() {
 	m = process::monitor(quiet, downs, fn(d) d)
 	process::demonitor(m)
 	process::send(hold2, Nil)
-	check('demonitor before the end delivers nothing', match process::receive_within(downs, 100) {
+	check("demonitor before the end delivers nothing", match process::receive_within(downs, 100) {
 		Ok(_) -> False
 		Err(Nil) -> True
 	})
@@ -139,11 +139,11 @@ pub fn main() {
 		process::send(process::receive(requests), Answer(42))
 	})
 	requests = process::receive(boot)
-	check('a live server answers', match call(requests, server) {
+	check("a live server answers", match call(requests, server) {
 		Answer(n) -> n == 42
 		ServerDown -> False
 	})
-	check('a dead server is reported as down', match call(requests, server) {
+	check("a dead server is reported as down", match call(requests, server) {
 		Answer(_) -> False
 		ServerDown -> True
 	})
@@ -162,5 +162,5 @@ pub fn main() {
 	process::receive(watcher_done)
 	process::sleep(20)
 	process::send(let_go, Nil)
-	println('done')
+	println("done")
 }

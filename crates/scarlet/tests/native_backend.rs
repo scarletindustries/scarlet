@@ -161,7 +161,7 @@ pub fn main() {
 \t\tprintln(kick(10) + spin(20000000, 0))
 \t})
 \t_ = process::spawn(fn() {
-\t\tprintln('sibling progressed')
+\t\tprintln(\"sibling progressed\")
 \t})
 }
 ";
@@ -521,7 +521,7 @@ fn dump(b Binary, i Int, size Int) {
 pub fn main() {
 \tmatch crypto::random_bytes(16) {
 \t\tOk(b) -> dump(b, 0, binary::byte_size(b))
-\t\tErr(Nil) -> println('FAIL')
+\t\tErr(Nil) -> println(\"FAIL\")
 \t}
 }
 ";
@@ -1146,7 +1146,7 @@ pub type Tag {
 }
 
 fn churn(n Int, acc Int) Int {
-\tbytes = wire::encode(Tag(n, 'x'))
+\tbytes = wire::encode(Tag(n, \"x\"))
 \tnext = match wire::decode(bytes) {
 \t\tOk(Tag(m, _)) -> acc + m
 \t\tErr(_) -> 0 - 1

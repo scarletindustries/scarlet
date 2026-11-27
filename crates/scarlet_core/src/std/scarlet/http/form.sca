@@ -64,7 +64,7 @@ pub fn pct_decode(b Binary) Binary {
  * through and the rest become `%XX`. It never fails, because a String is
  * always valid UTF-8. */
 pub fn pct_encode(s String) String {
-	binary::from_string(s) |> pct_encode_from(0, <<>>) |> binary::to_string or ''
+	binary::from_string(s) |> pct_encode_from(0, <<>>) |> binary::to_string or ""
 }
 
 fn pct_encode_from(b Binary, at Int, acc Binary) Binary {
@@ -122,7 +122,7 @@ fn decode_from(
 
 fn decode_pair(b Binary, from Int, to Int) Result((String, String), Nil) {
 	seg <- result::then(binary::slice_bytes(b, from, to - from))
-	(raw_name, raw_value) = match binary::index_of(seg, <<'='>>, 0) {
+	(raw_name, raw_value) = match binary::index_of(seg, <<"=">>, 0) {
 		Some(eq) -> {
 			(name, rest) = binary::split_at_bytes(seg, eq)
 			(name, binary::drop_bytes(rest, 1))

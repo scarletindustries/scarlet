@@ -31,7 +31,7 @@ const top = match steps {
 		h
 	}
 }
-const table = map::set(map::new(), top, if base == 4 { 'four' } else { 'other' })
+const table = map::set(map::new(), top, if base == 4 { "four" } else { "other" })
 
 fn id(v a) a {
 	v
@@ -67,19 +67,19 @@ fn nested(a Int, b Int, c Bool) String {
 		}
 	} {
 		y = if a > 10 {
-			if b > 10 { 'both' } else { 'a' }
+			if b > 10 { "both" } else { "a" }
 		} else {
-			'neither'
+			"neither"
 		}
-		'${y}, ${a}'
+		"${y}, ${a}"
 	} else {
 		match { if c { b } else { a } } {
-			0 -> 'none'
-			n if n > { if c { 5 } else { 1 } } -> 'many ${n}'
-			n -> 'few ${n}'
+			0 -> "none"
+			n if n > { if c { 5 } else { 1 } } -> "many ${n}"
+			n -> "few ${n}"
 		}
 	}
-	x + '.'
+	x + "."
 }
 
 // What one branch reads and the other does not, and what both read after.
@@ -155,7 +155,7 @@ fn logic(a Int, b Int, m map::Map(Int, String)) Bool {
 	p = a > 1 && { b > 1 || map::has(m, a) } && { if a == b { False } else { True } }
 	q = p ||
 		match map::get(m, b) {
-			Some(s) -> s == 'four'
+			Some(s) -> s == "four"
 			None -> a == 0
 		}
 	q && { p || b < 100 }
@@ -170,7 +170,7 @@ fn tally(words Array(String), m map::Map(String, Int)) map::Map(String, Int) {
 				Some(n) -> n + 1
 				None -> 1
 			}
-			tally(rest, map::set(m, w, n + { map::get(m, '') or 0 }))
+			tally(rest, map::set(m, w, n + { map::get(m, "") or 0 }))
 		}
 	}
 }
@@ -225,10 +225,10 @@ pub fn main() {
 	println(either(B(1), B(2), 3))
 	println(either(B(2), A(2), 1))
 	println(either(C, A(2), 3))
-	println(loose(Pair('a', 1), 'b', True))
+	println(loose(Pair("a", 1), "b", True))
 	println(loose(Pair(Leaf(1), Empty), Empty, False))
-	m = map::set(map::set(map::new(), 2, 'two'), 4, 'four')
+	m = map::set(map::set(map::new(), 2, "two"), 4, "four")
 	println([logic(2, 1, m), logic(1, 4, m), logic(0, 5, m), logic(3, 3, m), logic(9, 200, m)])
-	println(tally(['a', 'b', 'a', 'c', 'b', 'a'], map::new()))
+	println(tally(["a", "b", "a", "c", "b", "a"], map::new()))
 	println(turn(State([], 0, 0), 9))
 }

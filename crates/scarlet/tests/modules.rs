@@ -5,7 +5,7 @@ use common::graph::{GraphQueryExt, checked_with};
 use common::{Project, cursor, project_rejects, run_al, run_project_outputs};
 
 const UTIL_SRC: &str =
-    "pub fn quote(s String) String { '\"' + s + '\"' }\npub fn empty() String { '' }\n";
+    "pub fn quote(s String) String { \"\\\"\" + s + \"\\\"\" }\npub fn empty() String { \"\" }\n";
 
 #[test]
 fn relative_qualified() {
@@ -13,7 +13,7 @@ fn relative_qualified() {
     proj.write("util.sca", UTIL_SRC);
     proj.write(
         "main.sca",
-        "import ./util\n\npub fn main() {\n\tprintln(util::quote('hi'))\n}\n",
+        "import ./util\n\npub fn main() {\n\tprintln(util::quote(\"hi\"))\n}\n",
     );
     run_project_outputs(&proj, "run", "main.sca", "\"hi\"\n");
 }
@@ -55,7 +55,7 @@ fn aliased_module_type_unifies_with_canonical() {
 #[test]
 fn relative_import() {
     let proj = Project::new("rel_imp");
-    proj.write("helper.sca", "pub fn greet() String { 'hello' }\n");
+    proj.write("helper.sca", "pub fn greet() String { \"hello\" }\n");
     proj.write(
         "main.sca",
         "import ./helper\n\npub fn main() {\n\tprintln(helper::greet())\n}\n",
@@ -66,7 +66,10 @@ fn relative_import() {
 #[test]
 fn private_is_not_importable() {
     let proj = Project::new("priv");
-    proj.write("helper.sca", "fn secret() { 'x' }\npub fn ok() { 'y' }\n");
+    proj.write(
+        "helper.sca",
+        "fn secret() { \"x\" }\npub fn ok() { \"y\" }\n",
+    );
 
     proj.write(
         "main_qual.sca",
@@ -128,7 +131,7 @@ fn unknown_module() {
 
 run_case! {
     stdlib_net_socket_type: (
-        "import scarlet/net/socket\n\nfn id(s socket::Socket) socket::Socket { s }\n\npub fn main() {\n\tprintln('ok')\n}\n",
+        "import scarlet/net/socket\n\nfn id(s socket::Socket) socket::Socket { s }\n\npub fn main() {\n\tprintln(\"ok\")\n}\n",
         "ok\n",
     ),
 }
@@ -145,7 +148,7 @@ fn cycle_detection() {
 fn query_api_cross_module_goto_def_and_symbols() {
     let proj = Project::new("qapi_xmod");
     proj.write("util.sca", UTIL_SRC);
-    let entry = "import ./util\n\npub fn main() {\n\tprintln(util::quote('hi'))\n}\n";
+    let entry = "import ./util\n\npub fn main() {\n\tprintln(util::quote(\"hi\"))\n}\n";
     proj.write("main.sca", entry);
     let s = checked_with(&proj, entry);
 
@@ -185,7 +188,7 @@ fn query_api_cross_module_goto_def_and_symbols() {
 fn query_api_alias_imports_resolve() {
     let proj = Project::new("qapi_alias");
     proj.write("util.sca", UTIL_SRC);
-    let entry = "import ./util as u\n\npub fn main() {\n\tprintln(u::empty())\n\tprintln(u::quote('x'))\n}\n";
+    let entry = "import ./util as u\n\npub fn main() {\n\tprintln(u::empty())\n\tprintln(u::quote(\"x\"))\n}\n";
     proj.write("main.sca", entry);
     let s = checked_with(&proj, entry);
 
@@ -194,7 +197,7 @@ fn query_api_alias_imports_resolve() {
     assert_eq!(m.last().map(String::as_str), Some("util"));
 
     // A member reached through the alias points at its real declaration.
-    let (lq, cq) = cursor(entry, "quote('x')", 1, 0);
+    let (lq, cq) = cursor(entry, r#"quote("x")"#, 1, 0);
     let (mq, sq) = s.definition("main", lq, cq).expect("u::quote resolves");
     assert_eq!(mq.last().map(String::as_str), Some("util"));
     let quote_decl = cursor(UTIL_SRC, "quote", 1, 0);
@@ -300,8 +303,8 @@ fn colons_on_an_unknown_module_name_it() {
 fn same_named_modules_in_different_directories_are_distinct() {
     let proj = Project::new("mod_identity");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
-    proj.write("b.sca", "pub fn who() String {\n\t'ROOT'\n}\n");
-    proj.write("sub/b.sca", "pub fn who() String {\n\t'SUB'\n}\n");
+    proj.write("b.sca", "pub fn who() String {\n\t\"ROOT\"\n}\n");
+    proj.write("sub/b.sca", "pub fn who() String {\n\t\"SUB\"\n}\n");
     proj.write(
         "sub/mid.sca",
         "import ./b\n\npub fn go() String {\n\tb::who()\n}\n",
@@ -319,7 +322,7 @@ fn same_named_modules_in_different_directories_are_distinct() {
 fn one_file_reached_two_ways_is_one_module() {
     let proj = Project::new("mod_identity_alias");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
-    proj.write("b.sca", "pub fn who() String {\n\t'ROOT'\n}\n");
+    proj.write("b.sca", "pub fn who() String {\n\t\"ROOT\"\n}\n");
     proj.write(
         "sub/mid.sca",
         "import ../b\n\npub fn go() String {\n\tb::who()\n}\n",
@@ -337,7 +340,7 @@ fn one_file_reached_two_ways_is_one_module() {
 fn a_module_in_another_directory_does_not_satisfy_a_relative_import() {
     let proj = Project::new("mod_identity_missing");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
-    proj.write("sub/b.sca", "pub fn who() String {\n\t'SUB'\n}\n");
+    proj.write("sub/b.sca", "pub fn who() String {\n\t\"SUB\"\n}\n");
     // `sub/b.sca` must NOT satisfy `./b` from the root.
     proj.write(
         "main.sca",
@@ -358,7 +361,7 @@ fn same_named_modules_do_not_share_types() {
     );
     proj.write(
         "sub/b.sca",
-        "pub type T {\n\tT(s String)\n}\n\npub fn make() T {\n\tT('x')\n}\n\npub fn get(t T) String {\n\tt.s\n}\n",
+        "pub type T {\n\tT(s String)\n}\n\npub fn make() T {\n\tT(\"x\")\n}\n\npub fn get(t T) String {\n\tt.s\n}\n",
     );
     proj.write(
         "sub/mid.sca",

@@ -202,6 +202,11 @@ impl Parser {
     }
 
     fn add_error(&mut self, error: &ParseError) {
+        // The scanner has already reported an error token. What the parser
+        // makes of it says nothing new.
+        if matches!(self.cur().kind, Kind::Error(_)) {
+            return;
+        }
         // An error at EOF is an unexpected EOF by construction, so it says so
         // from the token rather than from the message text.
         let at_end = self.kind() == Kind::Eof;
@@ -1673,7 +1678,7 @@ impl Parser {
             let seg_start = self.current_span();
             let value = self.parse_pattern_atom()?;
             // A bare string segment matches its UTF-8 bytes as a prefix
-            // (`<<'GET ', ..rest>>`), not a single 8-bit Int.
+            // (`<<"GET ", ..rest>>`), not a single 8-bit Int.
             let spec = self.parse_bin_size_spec(matches!(
                 value,
                 ast::Pattern::Literal(ast::PatternLiteral::String(_))

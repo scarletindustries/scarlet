@@ -183,7 +183,7 @@ pub fn to_json(d Doc) Json {
 			}
 		}
 		FloatKind -> Real(float(d) |> option::unwrap(0.0))
-		StringKind -> Str(string(d) |> option::unwrap(''))
+		StringKind -> Str(string(d) |> option::unwrap(""))
 		ArrayKind -> List(array_map_to_json(elements(d)))
 		ObjectKind -> Object(entries_to_json(entries(d)))
 	}
@@ -215,16 +215,16 @@ pub fn reencode(d Doc) String {
 pub fn parse_error_message(e ParseError) String {
 	ParseError(offset, reason) = e
 	text = match reason {
-		UnexpectedEnd -> 'unexpected end of input'
-		UnexpectedByte -> 'unexpected character'
-		TrailingData -> 'trailing data after the value'
-		UnterminatedString -> 'unterminated string'
-		BadEscape -> 'invalid escape'
-		BadUnicode -> 'invalid unicode escape'
-		BadNumber -> 'invalid number'
-		NotUtf8 -> 'input is not utf-8'
-		NotWholeBytes -> 'input is not a whole number of bytes'
-		TooLarge -> 'document is too large to index'
+		UnexpectedEnd -> "unexpected end of input"
+		UnexpectedByte -> "unexpected character"
+		TrailingData -> "trailing data after the value"
+		UnterminatedString -> "unterminated string"
+		BadEscape -> "invalid escape"
+		BadUnicode -> "invalid unicode escape"
+		BadNumber -> "invalid number"
+		NotUtf8 -> "input is not utf-8"
+		NotWholeBytes -> "input is not a whole number of bytes"
+		TooLarge -> "document is too large to index"
 	}
-	'${text} (at byte ${offset})'
+	"${text} (at byte ${offset})"
 }

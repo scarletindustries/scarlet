@@ -197,8 +197,8 @@ fn beat(gateway process::Subject(Request), left Int, ok Int) Int {
 }
 
 fn call_one(gateway process::Subject(Request), ack process::Subject(Nil), i Int) Nil {
-	tag = 'job-${int::to_string(i)}'
-	_ = ask(gateway, fn(v) Ok('${tag}:${int::to_string(v)}'))
+	tag = "job-${int::to_string(i)}"
+	_ = ask(gateway, fn(v) Ok("${tag}:${int::to_string(v)}"))
 	process::send(ack, Nil)
 }
 
@@ -219,7 +219,7 @@ fn rounds(gateway process::Subject(Request), ack process::Subject(Nil), r Int, n
 		_ = process::spawn(fn() call_one(gateway, ack, r))
 		_ = process::spawn(fn() call_one(gateway, ack, r))
 		collect(ack, 3)
-		println('round ok, 3 back')
+		println("round ok, 3 back")
 		rounds(gateway, ack, r + 1, n)
 	}
 }
@@ -229,5 +229,5 @@ pub fn main() {
 	ack = process::subject()
 	rounds(a, ack, 1, 10)
 	stop(a)
-	println('survived every round')
+	println("survived every round")
 }

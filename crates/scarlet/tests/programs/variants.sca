@@ -38,15 +38,15 @@ fn area(s Shape) Int {
 
 fn kind(s Shape) String {
 	match s {
-		Rect(1, _) | Rect(_, 1) -> 'thin'
-		Circle(0) | Dot -> 'point'
-		Group([]) -> 'none'
-		Group([Rect(2, h), Circle(r)]) -> 'pair ${h} ${r}'
-		Circle(_) -> 'circle'
-		Line -> 'line'
-		Rect(_, _) -> 'rect'
-		Text(_) -> 'text'
-		Group([Dot | Circle(_) | Line | Rect(_, _) | Text(_) | Group(_), ..]) -> 'group'
+		Rect(1, _) | Rect(_, 1) -> "thin"
+		Circle(0) | Dot -> "point"
+		Group([]) -> "none"
+		Group([Rect(2, h), Circle(r)]) -> "pair ${h} ${r}"
+		Circle(_) -> "circle"
+		Line -> "line"
+		Rect(_, _) -> "rect"
+		Text(_) -> "text"
+		Group([Dot | Circle(_) | Line | Rect(_, _) | Text(_) | Group(_), ..]) -> "group"
 	}
 }
 
@@ -69,7 +69,7 @@ fn other(o Other) Int {
 fn next(s Shape) Shape {
 	match s {
 		Dot -> Circle(1)
-		Circle(r) -> Text('r${r}')
+		Circle(r) -> Text("r${r}")
 		Line -> Dot
 		Rect(w, h) -> Rect(h, w + 1)
 		Text(_) -> Line
@@ -93,11 +93,11 @@ pub fn main() {
 		Line,
 		Rect(1, 5),
 		Rect(5, 2),
-		Text('word'),
+		Text("word"),
 		Group([]),
 		Group([Dot, Line]),
 		Group([Rect(2, 9), Circle(4)]),
-		Group([Text('a'), Group([Circle(2)])]),
+		Group([Text("a"), Group([Circle(2)])]),
 	]
 	println(array::map(all, area))
 	println(array::map(all, kind))
@@ -113,9 +113,9 @@ pub fn main() {
 		json::encode(
 			json::List([
 				json::Null,
-				json::Number('12'),
+				json::Number("12"),
 				json::Boolean(True),
-				json::Object([('k', json::Str('v'))]),
+				json::Object([("k", json::Str("v"))]),
 			]),
 		),
 	)
@@ -136,5 +136,5 @@ pub fn main() {
 		i,
 	))
 	println(n)
-	println(map::set(map::set(map::new(), (List(1), One(2)), 'a'), (Null, Zero), 'b'))
+	println(map::set(map::set(map::new(), (List(1), One(2)), "a"), (Null, Zero), "b"))
 }

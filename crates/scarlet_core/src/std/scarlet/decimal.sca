@@ -200,9 +200,9 @@ pub fn normalize(d Decimal) Decimal {
 	}
 }
 
-// Parses an optional sign, digits and an optional fraction, like '42',
-// '-19.99' or '+0.05'. The scale is the number of fraction digits. Anything
-// else, like '.5' or '1.', gives `Err(Nil)`.
+// Parses an optional sign, digits and an optional fraction, like "42",
+// "-19.99" or "+0.05". The scale is the number of fraction digits. Anything
+// else, like ".5" or "1.", gives `Err(Nil)`.
 pub fn parse(s String) Result(Decimal, Nil) {
 	b = binary::from_string(s)
 	first = binary::byte_at(b, 0)
@@ -223,10 +223,10 @@ pub fn to_string(d Decimal) String {
 	if scale(d) == 0 {
 		int::to_string(units(d))
 	} else {
-		sign = if units(d) < 0 { '-' } else { '' }
+		sign = if units(d) < 0 { "-" } else { "" }
 		mag = int::abs(units(d))
 		p = pow10(scale(d))
-		'${sign}${mag / p}.${pad_zeros(int::to_string(mag % p), scale(d))}'
+		"${sign}${mag / p}.${pad_zeros(int::to_string(mag % p), scale(d))}"
 	}
 }
 
@@ -289,7 +289,7 @@ fn tail(b Binary) Binary {
 }
 
 fn parse_unsigned(b Binary) Option(Decimal) {
-	match binary::index_of(b, <<'.'>>, 0) {
+	match binary::index_of(b, <<".">>, 0) {
 		None -> match binary::parse_int(b, binary::Dec) {
 			Ok(n) -> Some(Decimal(n, 0))
 			Err(Nil) -> None
@@ -316,7 +316,7 @@ fn pad_zeros(s String, width Int) String {
 	if string::length(s) >= width {
 		s
 	} else {
-		pad_zeros('0${s}', width)
+		pad_zeros("0${s}", width)
 	}
 }
 

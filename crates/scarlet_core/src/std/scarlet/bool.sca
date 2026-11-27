@@ -3,5 +3,5 @@ pub fn negate(b Bool) Bool {
 }
 
 pub fn to_string(b Bool) String {
-	if b { 'True' } else { 'False' }
+	if b { "True" } else { "False" }
 }

@@ -15,10 +15,10 @@ import scarlet/result
 
 const MAX_BODY = 8192
 
-const NAME_CONTENT_TYPE = <<'Content-Type'>>
-const NAME_SERVER = <<'Server'>>
-const VAL_TEXT = <<'text/plain; charset=utf-8'>>
-const VAL_AL = <<'al'>>
+const NAME_CONTENT_TYPE = <<"Content-Type">>
+const NAME_SERVER = <<"Server">>
+const VAL_TEXT = <<"text/plain; charset=utf-8">>
+const VAL_AL = <<"al">>
 
 // Fixed(len, body) ties the Content-Length to the bytes actually sent.
 fn respond(code Int, s String) http::Response {
@@ -32,9 +32,9 @@ fn respond(code Int, s String) http::Response {
 
 fn hello(req http::Request) http::Response {
 	match req |> http::query |> binary::to_string {
-		Ok('') -> respond(200, 'hello, stranger\n')
-		Ok(q) -> respond(200, 'hello, ${q}\n')
-		Err(Nil) -> respond(400, 'query is not utf-8\n')
+		Ok("") -> respond(200, "hello, stranger\n")
+		Ok(q) -> respond(200, "hello, ${q}\n")
+		Err(Nil) -> respond(400, "query is not utf-8\n")
 	}
 }
 
@@ -46,9 +46,9 @@ type EchoError {
 
 fn echo(req http::Request) http::Response {
 	match echo_text(req) {
-		Ok(text) -> respond(200, 'echo: ${text}\n')
-		Err(ReadFailed(e)) -> respond(400, 'read failed: ${e}\n')
-		Err(NotUtf8) -> respond(400, 'body is not utf-8\n')
+		Ok(text) -> respond(200, "echo: ${text}\n")
+		Err(ReadFailed(e)) -> respond(400, "read failed: ${e}\n")
+		Err(NotUtf8) -> respond(400, "body is not utf-8\n")
 	}
 }
 
@@ -59,24 +59,24 @@ fn echo_text(req http::Request) Result(String, EchoError) {
 
 fn route(req http::Request) http::Response {
 	response = match (req.method, http::path(req)) {
-		(http::Get, <<'/'>>) -> respond(200, 'al http server\n')
-		(http::Get, <<'/hello'>>) -> hello(req)
-		(http::Post, <<'/echo'>>) -> echo(req)
+		(http::Get, <<"/">>) -> respond(200, "al http server\n")
+		(http::Get, <<"/hello">>) -> hello(req)
+		(http::Post, <<"/echo">>) -> echo(req)
 		(http::Get, _) | (http::Post, _) -> http::not_found()
 		(http::Put | http::Delete | http::Patch | http::Head | http::Options | http::Other(_), _) ->
-			respond(405, 'method not allowed\n')
+			respond(405, "method not allowed\n")
 	}
 	http::with_header(response, NAME_SERVER, VAL_AL)
 }
 
 fn log_failed(e net::ConnectionError) Nil {
-	println('connection from ${address::to_string(e.peer)} failed: ${e.error}')
+	println("connection from ${address::to_string(e.peer)} failed: ${e.error}")
 }
 
 pub fn main() {
 	// One acceptor per core. They keep the program alive after main returns.
-	match http::serve('0.0.0.0', 8080, route, log_failed) {
-		Ok(_) -> println('Listening on http://localhost:8080')
-		Err(e) -> println('serve failed: ${e}')
+	match http::serve("0.0.0.0", 8080, route, log_failed) {
+		Ok(_) -> println("Listening on http://localhost:8080")
+		Err(e) -> println("serve failed: ${e}")
 	}
 }

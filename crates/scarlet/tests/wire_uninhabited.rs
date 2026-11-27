@@ -40,7 +40,7 @@ fn a_record_with_a_phantom_bodiless_argument_round_trips() {
          \t\t\tprintln(back == t)\n\
          \t\t\tprintln(back.value)\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "12\nTrue\nTrue\n7\n",
@@ -66,8 +66,8 @@ fn an_empty_array_of_a_bodiless_type_round_trips_and_forged_counts_are_malformed
          fn report(r Result(Array(Native), wire::DecodeError), xs Array(Native)) {\n\
          \tmatch r {\n\
          \t\tOk(back) -> println(back == xs)\n\
-         \t\tErr(wire::Malformed(at, what)) -> println('${at} ${string::inspect(what)}')\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
+         \t\tErr(wire::Malformed(at, what)) -> println(\"${at} ${string::inspect(what)}\")\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -101,8 +101,8 @@ fn none_of_a_bodiless_type_round_trips_and_a_forged_some_is_malformed() {
          fn report(r Result(Option(Native), wire::DecodeError), n Option(Native)) {\n\
          \tmatch r {\n\
          \t\tOk(back) -> println(back == n)\n\
-         \t\tErr(wire::Malformed(at, what)) -> println('${at} ${string::inspect(what)}')\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
+         \t\tErr(wire::Malformed(at, what)) -> println(\"${at} ${string::inspect(what)}\")\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -135,10 +135,10 @@ fn decode_at_a_bodiless_type_is_malformed_rather_than_a_value_or_a_panic() {
          \twire::decode(b)\n\
          }\n\
          pub fn main() {\n\
-         \tmatch read(<<'SW', 3, 255, 196, 235, 248, 135, 151, 201, 245>>) {\n\
-         \t\tOk(_) -> println('a value of a type that has none')\n\
-         \t\tErr(wire::Malformed(at, what)) -> println('${at} ${string::inspect(what)}')\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
+         \tmatch read(<<\"SW\", 3, 255, 196, 235, 248, 135, 151, 201, 245>>) {\n\
+         \t\tOk(_) -> println(\"a value of a type that has none\")\n\
+         \t\tErr(wire::Malformed(at, what)) -> println(\"${at} ${string::inspect(what)}\")\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n",
         "11 Uninhabited\n",

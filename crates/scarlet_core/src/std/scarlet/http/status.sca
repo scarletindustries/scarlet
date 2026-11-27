@@ -1,75 +1,75 @@
 // Reason phrases for HTTP status codes, from the IANA registry and RFC 9110.
 
 // 1xx informational
-const rp_continue = <<'Continue'>>
-const rp_switching_protocols = <<'Switching Protocols'>>
-const rp_processing = <<'Processing'>>
-const rp_early_hints = <<'Early Hints'>>
+const rp_continue = <<"Continue">>
+const rp_switching_protocols = <<"Switching Protocols">>
+const rp_processing = <<"Processing">>
+const rp_early_hints = <<"Early Hints">>
 
 // 2xx success
-const rp_ok = <<'OK'>>
-const rp_created = <<'Created'>>
-const rp_accepted = <<'Accepted'>>
-const rp_non_authoritative = <<'Non-Authoritative Information'>>
-const rp_no_content = <<'No Content'>>
-const rp_reset_content = <<'Reset Content'>>
-const rp_partial_content = <<'Partial Content'>>
-const rp_multi_status = <<'Multi-Status'>>
-const rp_already_reported = <<'Already Reported'>>
-const rp_im_used = <<'IM Used'>>
+const rp_ok = <<"OK">>
+const rp_created = <<"Created">>
+const rp_accepted = <<"Accepted">>
+const rp_non_authoritative = <<"Non-Authoritative Information">>
+const rp_no_content = <<"No Content">>
+const rp_reset_content = <<"Reset Content">>
+const rp_partial_content = <<"Partial Content">>
+const rp_multi_status = <<"Multi-Status">>
+const rp_already_reported = <<"Already Reported">>
+const rp_im_used = <<"IM Used">>
 
 // 3xx redirection
-const rp_multiple_choices = <<'Multiple Choices'>>
-const rp_moved_permanently = <<'Moved Permanently'>>
-const rp_found = <<'Found'>>
-const rp_see_other = <<'See Other'>>
-const rp_not_modified = <<'Not Modified'>>
-const rp_use_proxy = <<'Use Proxy'>>
-const rp_temporary_redirect = <<'Temporary Redirect'>>
-const rp_permanent_redirect = <<'Permanent Redirect'>>
+const rp_multiple_choices = <<"Multiple Choices">>
+const rp_moved_permanently = <<"Moved Permanently">>
+const rp_found = <<"Found">>
+const rp_see_other = <<"See Other">>
+const rp_not_modified = <<"Not Modified">>
+const rp_use_proxy = <<"Use Proxy">>
+const rp_temporary_redirect = <<"Temporary Redirect">>
+const rp_permanent_redirect = <<"Permanent Redirect">>
 
 // 4xx client error
-const rp_bad_request = <<'Bad Request'>>
-const rp_unauthorized = <<'Unauthorized'>>
-const rp_payment_required = <<'Payment Required'>>
-const rp_forbidden = <<'Forbidden'>>
-const rp_not_found = <<'Not Found'>>
-const rp_method_not_allowed = <<'Method Not Allowed'>>
-const rp_not_acceptable = <<'Not Acceptable'>>
-const rp_proxy_auth_required = <<'Proxy Authentication Required'>>
-const rp_request_timeout = <<'Request Timeout'>>
-const rp_conflict = <<'Conflict'>>
-const rp_gone = <<'Gone'>>
-const rp_length_required = <<'Length Required'>>
-const rp_precondition_failed = <<'Precondition Failed'>>
-const rp_content_too_large = <<'Content Too Large'>>
-const rp_uri_too_long = <<'URI Too Long'>>
-const rp_unsupported_media_type = <<'Unsupported Media Type'>>
-const rp_range_not_satisfiable = <<'Range Not Satisfiable'>>
-const rp_expectation_failed = <<'Expectation Failed'>>
-const rp_misdirected_request = <<'Misdirected Request'>>
-const rp_unprocessable_content = <<'Unprocessable Content'>>
-const rp_locked = <<'Locked'>>
-const rp_failed_dependency = <<'Failed Dependency'>>
-const rp_too_early = <<'Too Early'>>
-const rp_upgrade_required = <<'Upgrade Required'>>
-const rp_precondition_required = <<'Precondition Required'>>
-const rp_too_many_requests = <<'Too Many Requests'>>
-const rp_header_fields_too_large = <<'Request Header Fields Too Large'>>
-const rp_unavailable_legal = <<'Unavailable For Legal Reasons'>>
+const rp_bad_request = <<"Bad Request">>
+const rp_unauthorized = <<"Unauthorized">>
+const rp_payment_required = <<"Payment Required">>
+const rp_forbidden = <<"Forbidden">>
+const rp_not_found = <<"Not Found">>
+const rp_method_not_allowed = <<"Method Not Allowed">>
+const rp_not_acceptable = <<"Not Acceptable">>
+const rp_proxy_auth_required = <<"Proxy Authentication Required">>
+const rp_request_timeout = <<"Request Timeout">>
+const rp_conflict = <<"Conflict">>
+const rp_gone = <<"Gone">>
+const rp_length_required = <<"Length Required">>
+const rp_precondition_failed = <<"Precondition Failed">>
+const rp_content_too_large = <<"Content Too Large">>
+const rp_uri_too_long = <<"URI Too Long">>
+const rp_unsupported_media_type = <<"Unsupported Media Type">>
+const rp_range_not_satisfiable = <<"Range Not Satisfiable">>
+const rp_expectation_failed = <<"Expectation Failed">>
+const rp_misdirected_request = <<"Misdirected Request">>
+const rp_unprocessable_content = <<"Unprocessable Content">>
+const rp_locked = <<"Locked">>
+const rp_failed_dependency = <<"Failed Dependency">>
+const rp_too_early = <<"Too Early">>
+const rp_upgrade_required = <<"Upgrade Required">>
+const rp_precondition_required = <<"Precondition Required">>
+const rp_too_many_requests = <<"Too Many Requests">>
+const rp_header_fields_too_large = <<"Request Header Fields Too Large">>
+const rp_unavailable_legal = <<"Unavailable For Legal Reasons">>
 
 // 5xx server error
-const rp_internal_server_error = <<'Internal Server Error'>>
-const rp_not_implemented = <<'Not Implemented'>>
-const rp_bad_gateway = <<'Bad Gateway'>>
-const rp_service_unavailable = <<'Service Unavailable'>>
-const rp_gateway_timeout = <<'Gateway Timeout'>>
-const rp_http_version_not_supported = <<'HTTP Version Not Supported'>>
-const rp_variant_also_negotiates = <<'Variant Also Negotiates'>>
-const rp_insufficient_storage = <<'Insufficient Storage'>>
-const rp_loop_detected = <<'Loop Detected'>>
-const rp_not_extended = <<'Not Extended'>>
-const rp_network_auth_required = <<'Network Authentication Required'>>
+const rp_internal_server_error = <<"Internal Server Error">>
+const rp_not_implemented = <<"Not Implemented">>
+const rp_bad_gateway = <<"Bad Gateway">>
+const rp_service_unavailable = <<"Service Unavailable">>
+const rp_gateway_timeout = <<"Gateway Timeout">>
+const rp_http_version_not_supported = <<"HTTP Version Not Supported">>
+const rp_variant_also_negotiates = <<"Variant Also Negotiates">>
+const rp_insufficient_storage = <<"Insufficient Storage">>
+const rp_loop_detected = <<"Loop Detected">>
+const rp_not_extended = <<"Not Extended">>
+const rp_network_auth_required = <<"Network Authentication Required">>
 
 // Unknown codes get an empty reason phrase, which RFC 9110 §15 allows.
 const rp_unknown = <<>>

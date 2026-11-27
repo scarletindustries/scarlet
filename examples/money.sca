@@ -25,7 +25,7 @@ fn times(u Usd, n Int) Usd {
 }
 
 fn show(u Usd) String {
-	'\$${decimal::to_string(amount(u))}'
+	"\$${decimal::to_string(amount(u))}"
 }
 
 fn d(s String) decimal::Decimal {
@@ -71,99 +71,99 @@ fn line_total(i Item) Usd {
 }
 
 pub fn main() {
-	println('0.1 + 0.2 = ${decimal::to_string(decimal::add(d('0.1'), d('0.2')))}')
-	println('')
+	println("0.1 + 0.2 = ${decimal::to_string(decimal::add(d("0.1"), d("0.2")))}")
+	println("")
 
 	items = [
-		Item(name: 'coffee', price: cents(450), qty: 2),
-		Item(name: 'bagel', price: cents(325), qty: 1),
-		Item(name: 'orange juice', price: cents(599), qty: 3),
+		Item(name: "coffee", price: cents(450), qty: 2),
+		Item(name: "bagel", price: cents(325), qty: 1),
+		Item(name: "orange juice", price: cents(599), qty: 3),
 	]
 
 	array::each(
 		items,
-		fn(i) println('${i.qty} x ${i.name} @ ${show(i.price)} = ${show(line_total(i))}'),
+		fn(i) println("${i.qty} x ${i.name} @ ${show(i.price)} = ${show(line_total(i))}"),
 	)
 
 	subtotal = array::fold(items, cents(0), fn(acc, i) add(acc, line_total(i)))
-	sales_tax = tax(subtotal, d('0.08875'))
+	sales_tax = tax(subtotal, d("0.08875"))
 	total = add(subtotal, sales_tax)
 
-	println('')
-	println('subtotal ${show(subtotal)}')
-	println('tax      ${show(sales_tax)}')
-	println('total    ${show(total)}')
+	println("")
+	println("subtotal ${show(subtotal)}")
+	println("tax      ${show(sales_tax)}")
+	println("total    ${show(total)}")
 
-	println('')
-	println('split 3 ways:')
-	array::each(split(total, 3), fn(share) println('  ${show(share)}'))
+	println("")
+	println("split 3 ways:")
+	array::each(split(total, 3), fn(share) println("  ${show(share)}"))
 	check = array::fold(split(total, 3), cents(0), fn(acc, s) add(acc, s))
-	println('shares sum back to ${show(check)}')
-	println('')
+	println("shares sum back to ${show(check)}")
+	println("")
 
 	// == compares representation, not value. Use decimal::eq.
-	println('1.50 == 1.5      ${d('1.50') == d('1.5')}')
-	println('decimal::eq       ${decimal::eq(d('1.50'), d('1.5'))}')
-	println('decimal::compare  ${decimal::compare(d('1.50'), d('1.5'))}')
-	println('')
+	println("1.50 == 1.5      ${d("1.50") == d("1.5")}")
+	println("decimal::eq       ${decimal::eq(d("1.50"), d("1.5"))}")
+	println("decimal::compare  ${decimal::compare(d("1.50"), d("1.5"))}")
+	println("")
 
-	a = d('19.99')
-	b = d('5.00')
+	a = d("19.99")
+	b = d("5.00")
 	str = decimal::to_string
-	println('lt lte           ${decimal::lt(a, b)} ${decimal::lte(a, b)}')
-	println('gt gte           ${decimal::gt(a, b)} ${decimal::gte(a, b)}')
-	println('min max          ${str(decimal::min(a, b))} ${str(decimal::max(a, b))}')
-	println('neg abs          ${str(decimal::neg(a))} ${a |> decimal::neg |> decimal::abs |> str}')
+	println("lt lte           ${decimal::lt(a, b)} ${decimal::lte(a, b)}")
+	println("gt gte           ${decimal::gt(a, b)} ${decimal::gte(a, b)}")
+	println("min max          ${str(decimal::min(a, b))} ${str(decimal::max(a, b))}")
+	println("neg abs          ${str(decimal::neg(a))} ${a |> decimal::neg |> decimal::abs |> str}")
 
 	zero = decimal::new(0, 2)
-	println('is_zero          ${decimal::is_zero(zero)} ${decimal::is_zero(a)}')
-	println('is_negative      ${decimal::is_negative(decimal::neg(a))} ${decimal::is_negative(a)}')
-	println('is_positive      ${decimal::is_positive(a)} ${decimal::is_positive(decimal::neg(a))}')
-	println('')
+	println("is_zero          ${decimal::is_zero(zero)} ${decimal::is_zero(a)}")
+	println("is_negative      ${decimal::is_negative(decimal::neg(a))} ${decimal::is_negative(a)}")
+	println("is_positive      ${decimal::is_positive(a)} ${decimal::is_positive(decimal::neg(a))}")
+	println("")
 
-	stored = d('12.3400')
-	println('units, scale     ${decimal::units(stored)} @ ${decimal::scale(stored)}')
+	stored = d("12.3400")
+	println("units, scale     ${decimal::units(stored)} @ ${decimal::scale(stored)}")
 	rebuilt = decimal::new(decimal::units(stored), decimal::scale(stored))
-	println('rebuilt          ${str(rebuilt)}')
-	println('normalize        ${str(decimal::normalize(stored))}')
+	println("rebuilt          ${str(rebuilt)}")
+	println("normalize        ${str(decimal::normalize(stored))}")
 
-	println('new(5, -3)       ${str(decimal::new(5, -3))}')
-	println('from_int         ${str(decimal::from_int(7))}')
-	println('')
+	println("new(5, -3)       ${str(decimal::new(5, -3))}")
+	println("from_int         ${str(decimal::from_int(7))}")
+	println("")
 
-	println('to_float         ${decimal::to_float(d('19.99'))}')
-	println('from_float       ${str(decimal::from_float(0.1 + 0.2, 2))}')
-	println('from_float 20dp  ${str(decimal::from_float(0.1, 20))}')
-	println('')
+	println("to_float         ${decimal::to_float(d("19.99"))}")
+	println("from_float       ${str(decimal::from_float(0.1 + 0.2, 2))}")
+	println("from_float 20dp  ${str(decimal::from_float(0.1, 20))}")
+	println("")
 
-	third = decimal::div(d('10'), d('3'), 4) or zero
-	println('10 / 3 @ 4       ${str(third)}')
+	third = decimal::div(d("10"), d("3"), 4) or zero
+	println("10 / 3 @ 4       ${str(third)}")
 
-	match decimal::div(d('10'), zero, 2) {
-		Ok(q) -> println('divided by zero? ${decimal::to_string(q)}')
-		Err(Nil) -> println('div by zero      Err(Nil)')
+	match decimal::div(d("10"), zero, 2) {
+		Ok(q) -> println("divided by zero? ${decimal::to_string(q)}")
+		Err(Nil) -> println("div by zero      Err(Nil)")
 	}
 
-	println('10 / 3 @ 30      ${str(decimal::div(d('10'), d('3'), 30) or zero)}')
+	println("10 / 3 @ 30      ${str(decimal::div(d("10"), d("3"), 30) or zero)}")
 
-	println('')
+	println("")
 
 	// Every rounding mode on the same tie.
-	tie = d('2.345')
+	tie = d("2.345")
 	modes = [
-		('HalfEven', decimal::HalfEven),
-		('HalfUp', decimal::HalfUp),
-		('Down', decimal::Down),
-		('Up', decimal::Up),
-		('Floor', decimal::Floor),
-		('Ceiling', decimal::Ceiling),
+		("HalfEven", decimal::HalfEven),
+		("HalfUp", decimal::HalfUp),
+		("Down", decimal::Down),
+		("Up", decimal::Up),
+		("Floor", decimal::Floor),
+		("Ceiling", decimal::Ceiling),
 	]
 
 	array::each(modes, fn(m) match m {
 		(name, mode) -> {
 			up = tie |> decimal::round_with(2, mode) |> decimal::to_string
 			down = tie |> decimal::neg |> decimal::round_with(2, mode) |> decimal::to_string
-			println('${name}\t 2.345 -> ${up}\t-2.345 -> ${down}')
+			println("${name}\t 2.345 -> ${up}\t-2.345 -> ${down}")
 		}
 	})
 }

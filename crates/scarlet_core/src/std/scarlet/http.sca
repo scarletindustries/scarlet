@@ -89,27 +89,27 @@ const HEAD_TIMEOUT_MS = 30000
 // Like HEAD_TIMEOUT_MS, one deadline covers the whole request body.
 const BODY_TIMEOUT_MS = 30000
 const EMPTY = <<>>
-const QUESTION = <<'?'>>
+const QUESTION = <<"?">>
 
-const NAME_CONTENT_TYPE = <<'Content-Type'>>
-const NAME_CONTENT_LENGTH = <<'Content-Length'>>
-const NAME_CONNECTION = <<'Connection'>>
-const VAL_TEXT_PLAIN = <<'text/plain; charset=utf-8'>>
-const VAL_CLOSE = <<'close'>>
-const VAL_KEEP_ALIVE = <<'keep-alive'>>
-const ZERO = <<'0'>>
-const NAME_TRANSFER_ENCODING = <<'Transfer-Encoding'>>
-const VAL_CHUNKED = <<'chunked'>>
+const NAME_CONTENT_TYPE = <<"Content-Type">>
+const NAME_CONTENT_LENGTH = <<"Content-Length">>
+const NAME_CONNECTION = <<"Connection">>
+const VAL_TEXT_PLAIN = <<"text/plain; charset=utf-8">>
+const VAL_CLOSE = <<"close">>
+const VAL_KEEP_ALIVE = <<"keep-alive">>
+const ZERO = <<"0">>
+const NAME_TRANSFER_ENCODING = <<"Transfer-Encoding">>
+const VAL_CHUNKED = <<"chunked">>
 
 fn to_method(m Binary) Method {
 	match m {
-		<<'GET'>> -> Get
-		<<'POST'>> -> Post
-		<<'PUT'>> -> Put
-		<<'DELETE'>> -> Delete
-		<<'PATCH'>> -> Patch
-		<<'HEAD'>> -> Head
-		<<'OPTIONS'>> -> Options
+		<<"GET">> -> Get
+		<<"POST">> -> Post
+		<<"PUT">> -> Put
+		<<"DELETE">> -> Delete
+		<<"PATCH">> -> Patch
+		<<"HEAD">> -> Head
+		<<"OPTIONS">> -> Options
 		_ -> Other(m)
 	}
 }
@@ -142,7 +142,7 @@ pub fn ok(b body::Body) Response {
 }
 
 pub fn not_found() Response {
-	text_response(404, 'Not Found')
+	text_response(404, "Not Found")
 }
 
 // Makes a 200 text/plain response with its length known.

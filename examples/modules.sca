@@ -11,7 +11,7 @@ fn conversions(t units::Celsius) Array(String) {
 	// Kelvin is opaque: its constructor stays inside units, so to_kelvin is
 	// the only way in, and it can fail.
 	kelvin = units::to_kelvin(t)
-		|> result::map(units::show_kelvin) or why -> 'no Kelvin (${units::show_error(why)})'
+		|> result::map(units::show_kelvin) or why -> "no Kelvin (${units::show_error(why)})"
 	[fahrenheit, kelvin]
 }
 
@@ -26,7 +26,7 @@ pub fn main() {
 		units::celsius(-300.0),
 	]
 
-	println('absolute zero: ${units::ABSOLUTE_ZERO_C}C')
+	println("absolute zero: ${units::ABSOLUTE_ZERO_C}C")
 
 	// units::round1 is not exported, so the caller cannot reach past the API.
 	array::each(readings, fn(t) println(report::row(t, conversions(t))))

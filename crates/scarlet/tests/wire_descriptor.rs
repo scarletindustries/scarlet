@@ -33,7 +33,7 @@ const HANDLER: &str = "import scarlet/wire\n\
                        \tHandler(name String, run fn(Int) Int)\n\
                        }\n\
                        pub fn main() {\n\
-                       \tprintln(wire::encode(Handler('h', fn(x) { x + 1 })))\n\
+                       \tprintln(wire::encode(Handler(\"h\", fn(x) { x + 1 })))\n\
                        }\n";
 
 /// A record over a user-declared bodiless type, which no VM table backs. A type
@@ -83,7 +83,7 @@ const EVENT: &str = "import scarlet/wire\n\
                      \tLeft(who String)\n\
                      }\n\
                      pub fn main() {\n\
-                     \tprintln(wire::encode(Left('a')))\n\
+                     \tprintln(wire::encode(Left(\"a\")))\n\
                      }\n";
 
 fn messages(r: &Compiled) -> String {

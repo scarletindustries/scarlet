@@ -50,13 +50,13 @@ fn a_short_pipeline_stays_on_one_line() {
 fn a_long_pipeline_breaks_at_every_stage() {
     let stage = "array::filter(fn(word) string::length(word) > 0)";
     let src = format!(
-        "fn f(line String) Array(String) {{\n\twords = line |> string::trim |> string::split(' ') |> {stage}\n\tline |> string::trim |> string::split(' ') |> {stage} |> array::reverse\n}}\n"
+        "fn f(line String) Array(String) {{\n\twords = line |> string::trim |> string::split(\" \") |> {stage}\n\tline |> string::trim |> string::split(\" \") |> {stage} |> array::reverse\n}}\n"
     );
     let out = fmt(&src);
     assert_eq!(
         out,
         format!(
-            "fn f(line String) Array(String) {{\n\twords =\n\t\tline\n\t\t|> string::trim\n\t\t|> string::split(' ')\n\t\t|> {stage}\n\tline\n\t|> string::trim\n\t|> string::split(' ')\n\t|> {stage}\n\t|> array::reverse\n}}\n"
+            "fn f(line String) Array(String) {{\n\twords =\n\t\tline\n\t\t|> string::trim\n\t\t|> string::split(\" \")\n\t\t|> {stage}\n\tline\n\t|> string::trim\n\t|> string::split(\" \")\n\t|> {stage}\n\t|> array::reverse\n}}\n"
         )
     );
     assert_round_trips(&out);
@@ -82,11 +82,11 @@ fn a_long_pipeline_after_a_label_moves_down_a_level() {
 /// lambda body, indents its `|>` lines so they don't sit under the binding.
 #[test]
 fn a_pipeline_mid_line_indents_its_stages() {
-    let src = "fn f() Int {\n\tport = { os::get_env('PORT_NUMBER_FOR_THIS_SERVER') or '8080' } |> binary::from_string |> binary::parse_int(binary::Dec) or 8080\n\tport\n}\n";
+    let src = "fn f() Int {\n\tport = { os::get_env(\"PORT_NUMBER_FOR_THIS_SERVER\") or \"8080\" } |> binary::from_string |> binary::parse_int(binary::Dec) or 8080\n\tport\n}\n";
     let out = fmt(src);
     assert_eq!(
         out,
-        "fn f() Int {\n\tport = { os::get_env('PORT_NUMBER_FOR_THIS_SERVER') or '8080' }\n\t\t|> binary::from_string\n\t\t|> binary::parse_int(binary::Dec) or 8080\n\tport\n}\n"
+        "fn f() Int {\n\tport = { os::get_env(\"PORT_NUMBER_FOR_THIS_SERVER\") or \"8080\" }\n\t\t|> binary::from_string\n\t\t|> binary::parse_int(binary::Dec) or 8080\n\tport\n}\n"
     );
     assert_round_trips(&out);
 }
@@ -220,8 +220,8 @@ fn simple_cases() {
              "fn fu(id Int) Option { if id == 0 { None } else { Some(id) } }\n",
              "fn fu(id Int) Option {\n\tif id == 0 {\n\t\tNone\n\t} else {\n\t\tSome(id)\n\t}\n}\n"),
             ("if_chain_breaks_even_when_branches_trivial",
-             "fn c(n Int) String { if n < 0 { 'neg' } else if n == 0 { 'zero' } else { 'pos' } }\n",
-             "fn c(n Int) String {\n\tif n < 0 {\n\t\t'neg'\n\t} else if n == 0 {\n\t\t'zero'\n\t} else {\n\t\t'pos'\n\t}\n}\n"),
+             "fn c(n Int) String { if n < 0 { \"neg\" } else if n == 0 { \"zero\" } else { \"pos\" } }\n",
+             "fn c(n Int) String {\n\tif n < 0 {\n\t\t\"neg\"\n\t} else if n == 0 {\n\t\t\"zero\"\n\t} else {\n\t\t\"pos\"\n\t}\n}\n"),
             ("fn_body_braced",
              "fn perimeter(a Int, b Int, c Int) Int { a + b + c }\n",
              "fn perimeter(a Int, b Int, c Int) Int {\n\ta + b + c\n}\n"),
@@ -240,18 +240,18 @@ fn simple_cases() {
             ("type_multi_variant_explicit",
              "type Maybe(a) {\n\tJust(value A)\n\tNothing\n}\n",
              "type Maybe(a) {\n\tJust(value A)\n\tNothing\n}\n"),
-            ("double_quotes_normalise_to_single",
-             "x = \"hello\"\n",
-             "x = 'hello'\n"),
-            ("single_quote_in_content_uses_double",
-             "x = \"it's fine\"\n",
-             "x = \"it's fine\"\n"),
-            ("single_quote_escaped_uses_double",
-             "x = 'it\\'s fine'\n",
-             "x = \"it's fine\"\n"),
-            ("both_quotes_prefers_single_with_escape",
+            ("single_quotes_become_double",
+             "x = 'hello'\n",
+             "x = \"hello\"\n"),
+            ("double_quotes_stay",
              "x = \"it's \\\"ok\\\"\"\n",
-             "x = 'it\\'s \"ok\"'\n"),
+             "x = \"it's \\\"ok\\\"\"\n"),
+            ("an_escaped_apostrophe_needs_no_escape",
+             "x = 'it\\'s ' + \"it\\'s\"\n",
+             "x = \"it's \" + \"it's\"\n"),
+            ("a_double_quote_is_escaped",
+             "x = 'say \"hi\"'\n",
+             "x = \"say \\\"hi\\\"\"\n"),
             ("vm_attribute_on_own_line",
              "@vm(tcp_listen) pub fn listen(p Int) Result(Server, String)\n",
              "@vm(tcp_listen)\npub fn listen(p Int) Result(Server, String)\n"),
@@ -313,14 +313,14 @@ fn simple_cases() {
 
 #[test]
 fn long_if_breaks() {
-    let src = "fn f(a Int, b Int, c Int) String { if !g(a, b, c) { 'Invalid' } else if a == b && b == c { 'Equilateral' } else if a == b || b == c || a == c { 'Isosceles' } else { 'Scalene' } }\n";
+    let src = "fn f(a Int, b Int, c Int) String { if !g(a, b, c) { \"Invalid\" } else if a == b && b == c { \"Equilateral\" } else if a == b || b == c || a == c { \"Isosceles\" } else { \"Scalene\" } }\n";
     let out = fmt(src);
     assert!(
-        out.contains("\t} else if a == b && b == c {\n\t\t'Equilateral'\n"),
+        out.contains("\t} else if a == b && b == c {\n\t\t\"Equilateral\"\n"),
         "got:\n{out}"
     );
     assert!(
-        out.contains("\t} else {\n\t\t'Scalene'\n\t}\n"),
+        out.contains("\t} else {\n\t\t\"Scalene\"\n\t}\n"),
         "got:\n{out}"
     );
 }
@@ -371,21 +371,24 @@ fn a_long_then_chain_puts_each_else_on_its_own_line() {
 
 #[test]
 fn a_final_list_hugs_the_parens() {
-    let src = "x = Object([('resource', Str(resource_uri)), ('authorization_servers', List([Str(auth_server)])), ('scopes', texts(scopes))])\n";
+    let src = "x = Object([(\"resource\", Str(resource_uri)), (\"authorization_servers\", List([Str(auth_server)])), (\"scopes\", texts(scopes))])\n";
     let out = fmt(src);
     assert_eq!(
         out,
-        "x = Object([\n\t('resource', Str(resource_uri)),\n\t('authorization_servers', List([Str(auth_server)])),\n\t('scopes', texts(scopes)),\n])\n"
+        "x = Object([\n\t(\"resource\", Str(resource_uri)),\n\t(\"authorization_servers\", List([Str(auth_server)])),\n\t(\"scopes\", texts(scopes)),\n])\n"
     );
     assert_round_trips(&out);
-    assert_eq!(fmt("x = Object([('a', 1)])\n"), "x = Object([('a', 1)])\n");
+    assert_eq!(
+        fmt("x = Object([(\"a\", 1)])\n"),
+        "x = Object([(\"a\", 1)])\n"
+    );
     let out = fmt(&format!(
-        "x = f('{}', [{}])\n",
+        "x = f(\"{}\", [{}])\n",
         "a".repeat(40),
         "b, ".repeat(30)
     ));
     assert!(
-        out.starts_with(&format!("x = f('{}', [\n\tb,\n", "a".repeat(40))),
+        out.starts_with(&format!("x = f(\"{}\", [\n\tb,\n", "a".repeat(40))),
         "{out}"
     );
     assert_round_trips(&out);
@@ -448,10 +451,10 @@ fn a_list_does_not_hug_after_another_list() {
 #[test]
 fn a_call_around_a_hugging_call_breaks_as_it_does_for_a_lambda() {
     let out = fmt(&format!(
-        "x = Ok(Object([('{}', 1), ('b', 2)]))\n",
+        "x = Ok(Object([(\"{}\", 1), (\"b\", 2)]))\n",
         "a".repeat(80)
     ));
-    assert!(out.starts_with("x = Ok(\n\tObject([\n\t\t('"), "{out}");
+    assert!(out.starts_with("x = Ok(\n\tObject([\n\t\t(\""), "{out}");
     assert_round_trips(&out);
 }
 
@@ -478,11 +481,11 @@ fn an_operator_chain_breaks_every_operand() {
 
 #[test]
 fn match_wildcard_arms_format_as_written() {
-    let out = fmt("fn f(x Int) String { match x { 1 -> 'one'\n _ -> 'other' } }\n");
-    assert!(out.contains("_ -> 'other'\n"), "got: {out}");
-    let out2 = fmt("fn g(o Option(Int)) String { match o { Some(_) -> 'y'\n _ -> 'n' } }\n");
-    assert!(out2.contains("Some(_) -> 'y'"), "nested _: {out2}");
-    assert!(out2.contains("_ -> 'n'\n"), "top _: {out2}");
+    let out = fmt("fn f(x Int) String { match x { 1 -> \"one\"\n _ -> \"other\" } }\n");
+    assert!(out.contains("_ -> \"other\"\n"), "got: {out}");
+    let out2 = fmt("fn g(o Option(Int)) String { match o { Some(_) -> \"y\"\n _ -> \"n\" } }\n");
+    assert!(out2.contains("Some(_) -> \"y\""), "nested _: {out2}");
+    assert!(out2.contains("_ -> \"n\"\n"), "top _: {out2}");
 }
 
 #[test]
@@ -490,11 +493,11 @@ fn or_handler_overflow_breaks_subject_args() {
     // When `subject(...) or e -> handler(...)` overflows, the subject's
     // arguments break and the handler stays intact, not the reverse.
     let out = fmt(
-        "http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from scarlet/http!')) or e -> println('serve failed: ${e}')\n",
+        "http.serve(\"0.0.0.0\", 8080, fn(_req) http.text(\"Hello from scarlet/http!\")) or e -> println(\"serve failed: ${e}\")\n",
     );
     assert_eq!(
         out,
-        "http.serve(\n\t'0.0.0.0',\n\t8080,\n\tfn(_req) http.text('Hello from scarlet/http!'),\n) or e -> println('serve failed: ${e}')\n"
+        "http.serve(\n\t\"0.0.0.0\",\n\t8080,\n\tfn(_req) http.text(\"Hello from scarlet/http!\"),\n) or e -> println(\"serve failed: ${e}\")\n"
     );
 }
 
@@ -502,7 +505,7 @@ fn or_handler_overflow_breaks_subject_args() {
 fn or_block_handler_keeps_subject_flat() {
     // A `{ … }` handler is the natural break point, so the subject stays
     // flat and the block body breaks.
-    let src = "http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from scarlet/http!')) or e -> {\n\tprintln('serve failed: ${e}')\n}\n";
+    let src = "http.serve(\"0.0.0.0\", 8080, fn(_req) http.text(\"Hello from scarlet/http!\")) or e -> {\n\tprintln(\"serve failed: ${e}\")\n}\n";
     assert_eq!(fmt(src), src);
 }
 
@@ -519,20 +522,20 @@ fn long_call_breaks_per_arg() {
 #[test]
 fn block_lambda_arg_hugs_call_parens() {
     // A lone multi-statement lambda hugs the parentheses.
-    let src = "scheduler.spawn(fn() {\n\tprintln('Hello!')\n\tprintln('Hello!')\n})\n";
+    let src = "scheduler.spawn(fn() {\n\tprintln(\"Hello!\")\n\tprintln(\"Hello!\")\n})\n";
     assert_eq!(fmt(src), src);
 }
 
 #[test]
 fn match_arg_hugs_call_parens() {
-    let src = "println(match 10 {\n\t0 -> 'zero'\n\t_ -> 'else'\n})\n";
+    let src = "println(match 10 {\n\t0 -> \"zero\"\n\t_ -> \"else\"\n})\n";
     assert_eq!(fmt(src), src);
 }
 
 #[test]
 fn block_lambda_after_leading_args_hugs() {
     // Leading arguments stay on the call head line; the lambda hugs.
-    let src = "scheduler.run_after(1000, fn() {\n\tprintln('a')\n\tprintln('b')\n})\n";
+    let src = "scheduler.run_after(1000, fn() {\n\tprintln(\"a\")\n\tprintln(\"b\")\n})\n";
     assert_eq!(fmt(src), src);
 }
 
@@ -540,14 +543,14 @@ fn block_lambda_after_leading_args_hugs() {
 fn hug_falls_back_when_head_does_not_fit() {
     // The head line is over the limit, so every argument gets its own.
     let out = fmt(&format!(
-        "serve('{}', '{}', fn(request) {{\n\thandle(request)\n\thandle(request)\n}})\n",
+        "serve(\"{}\", \"{}\", fn(request) {{\n\thandle(request)\n\thandle(request)\n}})\n",
         "a".repeat(40),
         "b".repeat(40),
     ));
     assert_eq!(
         out,
         format!(
-            "serve(\n\t'{}',\n\t'{}',\n\tfn(request) {{\n\t\thandle(request)\n\t\thandle(request)\n\t}},\n)\n",
+            "serve(\n\t\"{}\",\n\t\"{}\",\n\tfn(request) {{\n\t\thandle(request)\n\t\thandle(request)\n\t}},\n)\n",
             "a".repeat(40),
             "b".repeat(40),
         )
@@ -579,8 +582,9 @@ fn hugged_lambda_body_still_wraps_wide_statements() {
     // Statements inside a hugged lambda still re-probe their own width.
     let a = "a".repeat(45);
     let b = "b".repeat(45);
-    let src = format!("go(fn() {{\n\tfirst()\n\tprocess('{a}', '{b}')\n}})\n");
-    let expected = format!("go(fn() {{\n\tfirst()\n\tprocess(\n\t\t'{a}',\n\t\t'{b}',\n\t)\n}})\n");
+    let src = format!("go(fn() {{\n\tfirst()\n\tprocess(\"{a}\", \"{b}\")\n}})\n");
+    let expected =
+        format!("go(fn() {{\n\tfirst()\n\tprocess(\n\t\t\"{a}\",\n\t\t\"{b}\",\n\t)\n}})\n");
     assert_eq!(fmt(&src), expected);
 }
 
@@ -657,7 +661,7 @@ fn long_guarded_match_arm_breaks_after_arrow() {
 #[test]
 fn match_arm_block_body_hugs_arrow() {
     // A body that ends the line itself keeps hugging the arrow.
-    let src = "match x {\n\tSome(v) -> match v {\n\t\t0 -> 'zero'\n\t\t_ -> 'more'\n\t}\n\t_ -> 'none'\n}\n";
+    let src = "match x {\n\tSome(v) -> match v {\n\t\t0 -> \"zero\"\n\t\t_ -> \"more\"\n\t}\n\t_ -> \"none\"\n}\n";
     assert_eq!(fmt(src), src);
 }
 
@@ -665,10 +669,10 @@ fn match_arm_block_body_hugs_arrow() {
 fn if_chain_and_struct_call_break() {
     // Inlined rather than read from examples/: an over-long if-chain and
     // struct call must each break one clause or argument per line.
-    let src = "type TriangleInfo {\n\tsides String\n\ttriangle_type String\n\tperimeter Int\n\tvalid Bool\n}\n\nfn classify_triangle(a, b, c) String {\n\tif a + b <= c {\n\t\t'Invalid'\n\t} else if a == b && b == c {\n\t\t'Equilateral'\n\t} else {\n\t\t'Scalene'\n\t}\n}\n\nfn analyze_triangle(a, b, c) {\n\tTriangleInfo(sides: '${a}, ${b}, ${c}', triangle_type: classify_triangle(a, b, c), perimeter: a + b + c, valid: a + b > c)\n}\n";
+    let src = "type TriangleInfo {\n\tsides String\n\ttriangle_type String\n\tperimeter Int\n\tvalid Bool\n}\n\nfn classify_triangle(a, b, c) String {\n\tif a + b <= c {\n\t\t\"Invalid\"\n\t} else if a == b && b == c {\n\t\t\"Equilateral\"\n\t} else {\n\t\t\"Scalene\"\n\t}\n}\n\nfn analyze_triangle(a, b, c) {\n\tTriangleInfo(sides: \"${a}, ${b}, ${c}\", triangle_type: classify_triangle(a, b, c), perimeter: a + b + c, valid: a + b > c)\n}\n";
     let out = fmt(src);
     assert!(
-        out.contains("\t} else if a == b && b == c {\n\t\t'Equilateral'\n"),
+        out.contains("\t} else if a == b && b == c {\n\t\t\"Equilateral\"\n"),
         "if-chain should break per-clause:\n{out}"
     );
     assert!(
@@ -740,7 +744,7 @@ fn deeply_nested_unary_minus_keeps_spaces() {
 /// resolves through the module, `NotFound` needs an import.
 #[test]
 fn a_qualified_constructor_pattern_keeps_its_qualifier() {
-    let src = "match e {\n\tio::NotFound(path) -> path\n\tio::Denied -> 'no'\n\t_ -> ''\n}\n";
+    let src = "match e {\n\tio::NotFound(path) -> path\n\tio::Denied -> \"no\"\n\t_ -> \"\"\n}\n";
     let out = fmt(src);
     assert!(out.contains("io::NotFound(path)"), "{out}");
     assert!(out.contains("io::Denied"), "{out}");
@@ -800,9 +804,9 @@ fn spelled_out_argument_is_not_collapsed_into_a_pun() {
 /// labelled argument and a record-update spread in the same call.
 #[test]
 fn punning_mixes_with_labeled_and_spread_arguments() {
-    let out = fmt("Segment(..s, from:, label: 'up')\n");
+    let out = fmt("Segment(..s, from:, label: \"up\")\n");
     assert!(
-        out.contains("Segment(..s, from:, label: 'up')"),
+        out.contains("Segment(..s, from:, label: \"up\")"),
         "mixed call argument shapes not preserved:\n{out}"
     );
     assert_round_trips(&out);
@@ -951,8 +955,8 @@ fn double_not_stays_adjacent() {
 
 #[test]
 fn interpolation_stays_flat_when_it_fits() {
-    let out = fmt("x = 'value: ${a + b}'\n");
-    assert_eq!(out, "x = 'value: ${a + b}'\n");
+    let out = fmt("x = \"value: ${a + b}\"\n");
+    assert_eq!(out, "x = \"value: ${a + b}\"\n");
     assert_round_trips(&out);
 }
 
@@ -960,11 +964,12 @@ fn interpolation_stays_flat_when_it_fits() {
 fn hard_breaking_match_inside_interpolation_gets_real_layout() {
     // A `match` inside `${…}` must lay out at the enclosing indent, not be
     // spliced in as text pre-rendered at indent 0.
-    let src = "fn f(y Int) String {\n\t'value: ${match y { 0 -> 'zero'\n _ -> 'other' }}'\n}\n";
+    let src =
+        "fn f(y Int) String {\n\t\"value: ${match y { 0 -> \"zero\"\n _ -> \"other\" }}\"\n}\n";
     let out = fmt(src);
     assert_eq!(
         out,
-        "fn f(y Int) String {\n\t'value: ${match y {\n\t\t0 -> 'zero'\n\t\t_ -> 'other'\n\t}}'\n}\n"
+        "fn f(y Int) String {\n\t\"value: ${match y {\n\t\t0 -> \"zero\"\n\t\t_ -> \"other\"\n\t}}\"\n}\n"
     );
     assert_round_trips(&out);
 }
@@ -973,7 +978,7 @@ fn hard_breaking_match_inside_interpolation_gets_real_layout() {
 fn wide_interpolated_expression_breaks_at_enclosing_indent() {
     // The sub-expression joins the enclosing layout, so an overflow breaks
     // with real indentation instead of being measured at infinite width.
-    let src = "fn f() String {\n\t'r: ${wwwwwwwwwwwwwwwwwwwwwwwwwwwwww(aaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbb, cccccc)}'\n}\n";
+    let src = "fn f() String {\n\t\"r: ${wwwwwwwwwwwwwwwwwwwwwwwwwwwwww(aaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbb, cccccc)}\"\n}\n";
     let out = fmt(src);
     assert!(
         out.contains("(\n\t\taaaaaaaaaaaaaaaaaaaaaaaaaa,\n"),
@@ -988,7 +993,7 @@ fn lambda_inside_interpolation_is_idempotent() {
     // itself an interpolated string. Pass 1 used to emit a broken `read(`
     // and a hard-broken `fn(\n d,\n)`; pass 2 then hugged the call because
     // those HardLines made the lambda hug-eligible. fmt(fmt(x)) != fmt(x).
-    let src = "println('b.1 is null   ${read(sample, fn(d) '${option.unwrap(option.map(option.then(json.field(d, 'b'), fn(b) json.index(b, 1)), json.is_null), False)}')}')\n";
+    let src = "println(\"b.1 is null   ${read(sample, fn(d) \"${option.unwrap(option.map(option.then(json.field(d, \"b\"), fn(b) json.index(b, 1)), json.is_null), False)}\")}\")\n";
     let out = fmt(src);
     assert_round_trips(&out);
 }
@@ -1053,4 +1058,104 @@ fn long_pipe_chain_breaks_one_stage_per_line() {
         "expected a broken pipe chain, got:\n{out}"
     );
     assert_round_trips(&out);
+}
+
+/// `src` formats to `want`, which has no error and formats to itself.
+#[track_caller]
+fn rewrites(src: &str, want: &str) {
+    let out = fmt(src);
+    assert_eq!(out, want);
+    assert_round_trips(&out);
+    let mut scanner = scanner::new_scanner(out);
+    let parsed = parser::new_parser(&mut scanner).parse_program();
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+}
+
+#[test]
+fn single_quoted_strings_become_double_quoted() {
+    rewrites("x = 'a'\n", "x = \"a\"\n");
+    rewrites("x = ''\n", "x = \"\"\n");
+    rewrites("x = 'it\\'s'\n", "x = \"it's\"\n");
+    rewrites("x = 'say \"hi\"'\n", "x = \"say \\\"hi\\\"\"\n");
+    rewrites("x = 'a \\\"b\\\"'\n", "x = \"a \\\"b\\\"\"\n");
+    rewrites("x = '\\\\\\n\\t\\$y'\n", "x = \"\\\\\\n\\t\\$y\"\n");
+    rewrites("x = '\\\\\"'\n", "x = \"\\\\\\\"\"\n");
+}
+
+#[test]
+fn a_double_quoted_string_needs_no_escaped_apostrophe() {
+    rewrites("x = \"it\\'s\"\n", "x = \"it's\"\n");
+    rewrites("x = \"it's\"\n", "x = \"it's\"\n");
+}
+
+#[test]
+fn single_quoted_interpolations_become_double_quoted() {
+    rewrites("x = 'a ${b} c'\n", "x = \"a ${b} c\"\n");
+    rewrites("x = 'a $b'\n", "x = \"a ${b}\"\n");
+    rewrites(
+        "x = 'it\\'s \"${b}\" \\${c}'\n",
+        "x = \"it's \\\"${b}\\\" \\${c}\"\n",
+    );
+    rewrites("x = 'a ${'b'} c'\n", "x = \"a ${\"b\"} c\"\n");
+    rewrites("x = \"a ${'b'} c\"\n", "x = \"a ${\"b\"} c\"\n");
+    rewrites("x = 'a ${\"b\"} c'\n", "x = \"a ${\"b\"} c\"\n");
+    rewrites(
+        "x = '${f('${'it\\'s'}', \"\\\"\")}'\n",
+        "x = \"${f(\"${\"it's\"}\", \"\\\"\")}\"\n",
+    );
+}
+
+#[test]
+fn single_quoted_patterns_become_double_quoted() {
+    rewrites(
+        "fn f(x) {\n\tmatch x {\n\t\t'a' -> 1\n\t\t'\"' -> 2\n\t\t_ -> 3\n\t}\n}\n",
+        "fn f(x) {\n\tmatch x {\n\t\t\"a\" -> 1\n\t\t\"\\\"\" -> 2\n\t\t_ -> 3\n\t}\n}\n",
+    );
+    rewrites(
+        "fn f(x) {\n\tmatch x {\n\t\t<<'GET ', ..r>> -> r\n\t\tr -> r\n\t}\n}\n",
+        "fn f(x) {\n\tmatch x {\n\t\t<<\"GET \", ..r>> -> r\n\t\tr -> r\n\t}\n}\n",
+    );
+}
+
+#[test]
+fn a_comment_keeps_its_quotes() {
+    rewrites(
+        "// don't 'quote' \"me\"\nx = 'a'\n// it's 'b'\n\n/** 'c' isn't */\nfn f() {\n\t'd'\n}\n",
+        "// don't 'quote' \"me\"\nx = \"a\"\n// it's 'b'\n\n/** 'c' isn't */\nfn f() {\n\t\"d\"\n}\n",
+    );
+    rewrites("x = '// no'\n", "x = \"// no\"\n");
+}
+
+/// A string grows when its quotes need an escape, and then a line may break.
+#[test]
+fn a_line_made_too_long_by_escapes_breaks() {
+    let word = "a".repeat(45);
+    rewrites(
+        &format!("x = f('{word}\"', '{word}')\n"),
+        &format!("x = f(\n\t\"{word}\\\"\",\n\t\"{word}\",\n)\n"),
+    );
+}
+
+/// Only a whole string in single quotes is the formatter's to mend.
+#[test]
+fn single_quotes_beside_another_error_are_refused() {
+    for src in [
+        "x = 'a'\ny = )\n",
+        "x = 'a'\ny = 'b\n",
+        "x = 'a'\ny = \"b\n",
+        "x = 'a\\q'\n",
+        "x = 'a ${b'\n",
+        "x = don't\n",
+    ] {
+        match format(src) {
+            FormatResult::ParseFailed { errors } => assert!(
+                errors.iter().all(|d| !d.problem.is_single_quoted_string()),
+                "{src}: {errors:?}"
+            ),
+            FormatResult::Formatted { output } => panic!("formatted {src} to {output}"),
+            FormatResult::CommentsLost { .. } | FormatResult::OutputInvalid(_) => {
+                panic!("a formatter bug on {src}")
+            }
+        }
+    }
 }

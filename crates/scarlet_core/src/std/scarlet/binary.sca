@@ -114,7 +114,7 @@ pub fn to_ascii_lower(b Binary) Binary
 pub fn from_int_ascii(n Int, radix Radix) Binary
 
 // Returns two uppercase hex digits for the low 8 bits of `n`, so
-// `hex_byte(13)` is `<<'0D'>>`. It's for `%XX` escapes, which RFC 3986 §2.1
+// `hex_byte(13)` is `<<"0D">>`. It's for `%XX` escapes, which RFC 3986 §2.1
 // prefers in uppercase.
 pub fn hex_byte(n Int) Binary {
 	b = int::bitwise_and(n, 255)

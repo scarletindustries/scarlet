@@ -364,7 +364,7 @@ fn turn20(w W20) W20 {
 
 fn rebuild(t Tree) Tree {
 	match t {
-		Node(l, n, s, r) -> Node(rebuild(r), n + 1, s + '.', rebuild(l))
+		Node(l, n, s, r) -> Node(rebuild(r), n + 1, s + ".", rebuild(l))
 		Leaf -> Leaf
 	}
 }
@@ -373,7 +373,7 @@ fn grow(depth Int) Tree {
 	if depth == 0 {
 		Leaf
 	} else {
-		Node(grow(depth - 1), depth, '${depth}', grow(depth - 1))
+		Node(grow(depth - 1), depth, "${depth}", grow(depth - 1))
 	}
 }
 
@@ -421,85 +421,85 @@ fn around(a Tree, b Tree, n Int) Tree {
 		a
 	} else {
 		match a {
-			Node(l, _, _, r) -> around(b, Node(r, n, 'around', l), n - 1)
+			Node(l, _, _, r) -> around(b, Node(r, n, "around", l), n - 1)
 			Leaf -> around(b, a, n - 1)
 		}
 	}
 }
 
 pub fn main() {
-	w1 = A1('v0')
+	w1 = A1("v0")
 	println(string::inspect(turn1(w1)))
 	println(string::inspect(turn1(turn1(w1))))
-	println(string::inspect(turn1(turn1(turn1(A1('v0'))))))
+	println(string::inspect(turn1(turn1(turn1(A1("v0"))))))
 	println(string::inspect((turn1(None1), w1)))
-	w2 = A2('v0', 'v1')
+	w2 = A2("v0", "v1")
 	println(string::inspect(turn2(w2)))
 	println(string::inspect(turn2(turn2(w2))))
-	println(string::inspect(turn2(turn2(turn2(A2('v0', 'v1'))))))
+	println(string::inspect(turn2(turn2(turn2(A2("v0", "v1"))))))
 	println(string::inspect((turn2(None2), w2)))
-	w3 = A3('v0', 'v1', 'v2')
+	w3 = A3("v0", "v1", "v2")
 	println(string::inspect(turn3(w3)))
 	println(string::inspect(turn3(turn3(w3))))
-	println(string::inspect(turn3(turn3(turn3(A3('v0', 'v1', 'v2'))))))
+	println(string::inspect(turn3(turn3(turn3(A3("v0", "v1", "v2"))))))
 	println(string::inspect((turn3(None3), w3)))
-	w4 = A4('v0', 'v1', 'v2', 'v3')
+	w4 = A4("v0", "v1", "v2", "v3")
 	println(string::inspect(turn4(w4)))
 	println(string::inspect(turn4(turn4(w4))))
-	println(string::inspect(turn4(turn4(turn4(A4('v0', 'v1', 'v2', 'v3'))))))
+	println(string::inspect(turn4(turn4(turn4(A4("v0", "v1", "v2", "v3"))))))
 	println(string::inspect((turn4(None4), w4)))
-	w5 = A5('v0', 'v1', 'v2', 'v3', 'v4')
+	w5 = A5("v0", "v1", "v2", "v3", "v4")
 	println(string::inspect(turn5(w5)))
 	println(string::inspect(turn5(turn5(w5))))
-	println(string::inspect(turn5(turn5(turn5(A5('v0', 'v1', 'v2', 'v3', 'v4'))))))
+	println(string::inspect(turn5(turn5(turn5(A5("v0", "v1", "v2", "v3", "v4"))))))
 	println(string::inspect((turn5(None5), w5)))
-	w6 = A6('v0', 'v1', 'v2', 'v3', 'v4', 'v5')
+	w6 = A6("v0", "v1", "v2", "v3", "v4", "v5")
 	println(string::inspect(turn6(w6)))
 	println(string::inspect(turn6(turn6(w6))))
-	println(string::inspect(turn6(turn6(turn6(A6('v0', 'v1', 'v2', 'v3', 'v4', 'v5'))))))
+	println(string::inspect(turn6(turn6(turn6(A6("v0", "v1", "v2", "v3", "v4", "v5"))))))
 	println(string::inspect((turn6(None6), w6)))
-	w7 = A7('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6')
+	w7 = A7("v0", "v1", "v2", "v3", "v4", "v5", "v6")
 	println(string::inspect(turn7(w7)))
 	println(string::inspect(turn7(turn7(w7))))
-	println(string::inspect(turn7(turn7(turn7(A7('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6'))))))
+	println(string::inspect(turn7(turn7(turn7(A7("v0", "v1", "v2", "v3", "v4", "v5", "v6"))))))
 	println(string::inspect((turn7(None7), w7)))
-	w8 = A8('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7')
+	w8 = A8("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7")
 	println(string::inspect(turn8(w8)))
 	println(string::inspect(turn8(turn8(w8))))
 	println(
-		string::inspect(turn8(turn8(turn8(A8('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'))))),
+		string::inspect(turn8(turn8(turn8(A8("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"))))),
 	)
 	println(string::inspect((turn8(None8), w8)))
-	w9 = A9('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8')
+	w9 = A9("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8")
 	println(string::inspect(turn9(w9)))
 	println(string::inspect(turn9(turn9(w9))))
 	println(
 		string::inspect(
-			turn9(turn9(turn9(A9('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8')))),
+			turn9(turn9(turn9(A9("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8")))),
 		),
 	)
 	println(string::inspect((turn9(None9), w9)))
 	w20 = A20(
-		'v0',
-		'v1',
-		'v2',
-		'v3',
-		'v4',
-		'v5',
-		'v6',
-		'v7',
-		'v8',
-		'v9',
-		'v10',
-		'v11',
-		'v12',
-		'v13',
-		'v14',
-		'v15',
-		'v16',
-		'v17',
-		'v18',
-		'v19',
+		"v0",
+		"v1",
+		"v2",
+		"v3",
+		"v4",
+		"v5",
+		"v6",
+		"v7",
+		"v8",
+		"v9",
+		"v10",
+		"v11",
+		"v12",
+		"v13",
+		"v14",
+		"v15",
+		"v16",
+		"v17",
+		"v18",
+		"v19",
 	)
 	println(string::inspect(turn20(w20)))
 	println(string::inspect(turn20(turn20(w20))))
@@ -509,26 +509,26 @@ pub fn main() {
 				turn20(
 					turn20(
 						A20(
-							'v0',
-							'v1',
-							'v2',
-							'v3',
-							'v4',
-							'v5',
-							'v6',
-							'v7',
-							'v8',
-							'v9',
-							'v10',
-							'v11',
-							'v12',
-							'v13',
-							'v14',
-							'v15',
-							'v16',
-							'v17',
-							'v18',
-							'v19',
+							"v0",
+							"v1",
+							"v2",
+							"v3",
+							"v4",
+							"v5",
+							"v6",
+							"v7",
+							"v8",
+							"v9",
+							"v10",
+							"v11",
+							"v12",
+							"v13",
+							"v14",
+							"v15",
+							"v16",
+							"v17",
+							"v18",
+							"v19",
 						),
 					),
 				),
@@ -544,9 +544,9 @@ pub fn main() {
 	println(string::inspect(rotate(rotate(t)) == t))
 	println(string::inspect(twice(grow(3))))
 	println(string::inspect(twice(grow(2))))
-	r = Rec(1, 'r', [])
+	r = Rec(1, "r", [])
 	println(name(bump(r, 5)))
-	println(name(bump(Rec(1, 'r', []), 5)))
+	println(name(bump(Rec(1, "r", []), 5)))
 	println(name(r))
 	println(string::inspect(around(grow(2), grow(2), 5)))
 	println(sum(around(t, t, 9)))

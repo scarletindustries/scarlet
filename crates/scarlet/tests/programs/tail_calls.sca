@@ -50,7 +50,7 @@ fn gcd(a Int, b Int) Int {
 // Places traded, turned round and turned the other way, of every kind of value.
 fn traded(n Int, a String, b String) String {
 	if n == 0 {
-		'${a}${b}'
+		"${a}${b}"
 	} else {
 		traded(n - 1, b, a)
 	}
@@ -58,7 +58,7 @@ fn traded(n Int, a String, b String) String {
 
 fn turned(n Int, a String, b String, c String) String {
 	if n == 0 {
-		'${a}${b}${c}'
+		"${a}${b}${c}"
 	} else {
 		turned(n - 1, c, a, b)
 	}
@@ -66,7 +66,7 @@ fn turned(n Int, a String, b String, c String) String {
 
 fn turned_five(n Int, a Array(Int), b Array(Int), c Array(Int), d Array(Int), e Array(Int)) String {
 	if n == 0 {
-		'${a}${b}${c}${d}${e}'
+		"${a}${b}${c}${d}${e}"
 	} else {
 		turned_five(n - 1, b, c, d, e, [..a, n])
 	}
@@ -74,7 +74,7 @@ fn turned_five(n Int, a Array(Int), b Array(Int), c Array(Int), d Array(Int), e 
 
 fn two_rings(n Int, a Int, b String, c Int, d String, e Int) String {
 	if n == 0 {
-		'${a} ${b} ${c} ${d} ${e}'
+		"${a} ${b} ${c} ${d} ${e}"
 	} else {
 		two_rings(n - 1, c, d, e, b, a)
 	}
@@ -83,17 +83,17 @@ fn two_rings(n Int, a Int, b String, c Int, d String, e Int) String {
 // One value to several parameters, and constants.
 fn spread(n Int, a String, b String, c String) String {
 	if n == 0 {
-		'${a}${b}${c}'
+		"${a}${b}${c}"
 	} else {
-		spread(n - 1, '${n}${c}', a, a)
+		spread(n - 1, "${n}${c}", a, a)
 	}
 }
 
 fn reset(n Int, a Array(Int), b String, c Int) String {
 	if n == 0 {
-		'${a} ${b} ${c}'
+		"${a} ${b} ${c}"
 	} else {
-		reset(n - 1, [], 'fixed', 7)
+		reset(n - 1, [], "fixed", 7)
 	}
 }
 
@@ -111,7 +111,7 @@ fn scratch(n Int, acc Int) Int {
 		acc
 	} else {
 		big = n * 1_000_000_000_000_000_000
-		shown = '${big}${n}'
+		shown = "${big}${n}"
 		scratch(n - 1, acc + string::length(shown) + big % 7)
 	}
 }
@@ -171,7 +171,7 @@ fn steps(n Int, s Step) Step {
 fn walk(s Step, acc Int) String {
 	match s {
 		Step(to, by) -> walk(to, acc + by)
-		Last(name) -> '${name} ${acc}'
+		Last(name) -> "${name} ${acc}"
 	}
 }
 
@@ -236,12 +236,12 @@ fn first(n Int, a String) String {
 	if n == 0 {
 		a
 	} else {
-		second(n - 1, a, 'b', n)
+		second(n - 1, a, "b", n)
 	}
 }
 
 fn second(n Int, a String, b String, m Int) String {
-	long = '${a}${b}${m}'
+	long = "${a}${b}${m}"
 	if n == 0 {
 		long
 	} else {
@@ -253,7 +253,7 @@ fn third(a String) String {
 	if string::length(a) > 12 {
 		a
 	} else {
-		first(string::length(a), '${a}-')
+		first(string::length(a), "${a}-")
 	}
 }
 
@@ -262,11 +262,11 @@ fn narrow(k Int) Int {
 }
 
 fn wide(n Int) Int {
-	a = '${n}a'
+	a = "${n}a"
 	b = [n, n]
 	c = n * 1_000_000_000_000_000_000
 	d = (a, b, c)
-	k = string::length('${a}${b}${c}${d}')
+	k = string::length("${a}${b}${c}${d}")
 	narrow(k)
 }
 
@@ -318,24 +318,24 @@ pub fn main() {
 	println(fib(130, 0, 1))
 	println(crossed(40, 1, 1))
 	println(gcd(1_071, 462))
-	println(traded(7, 'a', 'b'))
-	println(turned(8, 'a', 'b', 'c'))
+	println(traded(7, "a", "b"))
+	println(turned(8, "a", "b", "c"))
 	println(turned_five(7, [1], [2], [], [4], [5]))
-	println(two_rings(5, 1, 'x', 3, 'y', 5))
-	println(spread(4, 'a', 'b', 'c'))
-	println(reset(2, [1, 2], 'text', 3))
-	println(reset(0, [1, 2], 'text', 3))
+	println(two_rings(5, 1, "x", 3, "y", 5))
+	println(spread(4, "a", "b", "c"))
+	println(reset(2, [1, 2], "text", 3))
+	println(reset(0, [1, 2], "text", 3))
 	println(mixed(9, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11))
 	println(scratch(12, 0))
 	println(generic(9, [1], [2], 0))
-	println(generic(9, 'a', 'b', 0))
-	println(same(int::to_string(4), '4'))
+	println(generic(9, "a", "b", 0))
+	println(same(int::to_string(4), "4"))
 	tree = grow(20, Leaf)
 	println(smallest(tree, 99))
 	println(smallest(Leaf, 99))
-	line = steps(6, Last('end'))
+	line = steps(6, Last("end"))
 	println(walk(line, 0))
-	println(flip(line, Last('start')))
+	println(flip(line, Last("start")))
 	println(walk(line, 1))
 	println(total([1, 2, 3, 4], 0))
 	println(total(1..50, 0))
@@ -343,21 +343,21 @@ pub fn main() {
 	held = [0, 0, 0, 0, 0]
 	println(fill(held, 0))
 	println(held)
-	counts = tally(['a', 'b', 'a', 'c', 'a'], map::new())
-	println(map::get(counts, 'a'))
+	counts = tally(["a", "b", "a", "c", "a"], map::new())
+	println(map::get(counts, "a"))
 	println(map::size(counts))
 	println(even(31))
 	println(odd(31))
-	println(first(1, 'x'))
-	println(first(0, 'x'))
+	println(first(1, "x"))
+	println(first(0, "x"))
 	println(wide(5))
 	println(widen(0))
 	println(widen(3))
-	kept = 'kept'
+	kept = "kept"
 	println(apply0(fn() kept))
-	println(apply0(fn() 'plain'))
-	println(apply3(fn(a, b, c) '${a}${b}${c}${kept}', 1, 'two', [3]))
-	println(apply3(fn(a, b, c) '${c}${b}${a}', 1, 'two', [3]))
+	println(apply0(fn() "plain"))
+	println(apply3(fn(a, b, c) "${a}${b}${c}${kept}", 1, "two", [3]))
+	println(apply3(fn(a, b, c) "${c}${b}${a}", 1, "two", [3]))
 	weigh = fn(a, b, c, d, e, f, g, h, i, j, k, l) a +
 		b * 2 +
 		c * 3 +
@@ -373,7 +373,7 @@ pub fn main() {
 	println(apply12(weigh, 1, 2))
 	println(bounce(fn(x) x + string::length(kept), 20))
 	again = fn(n, acc) if n == 0 {
-		'${acc}${kept}'
+		"${acc}${kept}"
 	} else {
 		again(n - 1, acc + n)
 	}

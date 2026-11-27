@@ -3,7 +3,7 @@
 //!
 //! Completion and validation both read the language through the real scanner
 //! and parser, so "is this entry finished" is the parser's answer rather than
-//! a bracket count that would disagree with it about `'{'`.
+//! a bracket count that would disagree with it about `"{"`.
 
 use std::borrow::Cow;
 use std::cell::RefCell;

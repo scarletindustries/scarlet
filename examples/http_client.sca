@@ -22,13 +22,13 @@ const MAX_BODY = 8192
 
 fn route(req http::Request) http::Response {
 	match (req.method, http::path(req)) {
-		(_, <<'/'>>) -> http::text('root')
+		(_, <<"/">>) -> http::text("root")
 		// http::ok has no known length, so it goes out chunked.
-		(_, <<'/stream'>>) -> http::ok(body::from_binary(<<'streamed'>>))
-		(http::Post, <<'/echo'>>) -> match body::collect(req.body, MAX_BODY) {
+		(_, <<"/stream">>) -> http::ok(body::from_binary(<<"streamed">>))
+		(http::Post, <<"/echo">>) -> match body::collect(req.body, MAX_BODY) {
 			Ok(bytes) -> echo_reply(bytes)
 			// The client sent a body the server couldn't read, so it gets a 400.
-			Err(_) -> http::Response(..http::text('could not read the body'), status: 400)
+			Err(_) -> http::Response(..http::text("could not read the body"), status: 400)
 		}
 		(
 			http::Get
@@ -46,8 +46,8 @@ fn route(req http::Request) http::Response {
 
 fn echo_reply(bytes Binary) http::Response {
 	match binary::to_string(bytes) {
-		Ok(text) -> http::text('echo: ${text}')
-		Err(Nil) -> http::text('echo: <not utf-8>')
+		Ok(text) -> http::text("echo: ${text}")
+		Err(Nil) -> http::text("echo: <not utf-8>")
 	}
 }
 
@@ -70,17 +70,17 @@ fn request(
 ) Result(String, error::NetError) {
 	bytes = binary::from_string(payload)
 	length = binary::byte_size(bytes)
-	head = '${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: ${length}\r\n\r\n'
-	conn <- result::then(net::connect('127.0.0.1', port))
+	head = "${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: ${length}\r\n\r\n"
+	conn <- result::then(net::connect("127.0.0.1", port))
 	Nil <- result::then(socket::write(conn, head |> binary::from_string |> binary::append(bytes)))
 	response <- result::then(read_to_close(conn, <<>>))
 	Nil <- result::then(socket::close(conn))
-	Ok(binary::to_string(response) or '<not utf-8>')
+	Ok(binary::to_string(response) or "<not utf-8>")
 }
 
 fn show(label String, response String) Nil {
 	println(label)
-	response |> string::split('\r\n') |> array::each(fn(line) println('  | ${line}'))
+	response |> string::split("\r\n") |> array::each(fn(line) println("  | ${line}"))
 }
 
 // A second server that writes responses by hand, one target per drain style.
@@ -89,9 +89,9 @@ fn show(label String, response String) Nil {
 const HEAD_READ = 128
 const DEADLINE_MS = 5000
 
-const NAME_LENGTH = <<'Content-Length'>>
-const NAME_TE = <<'Transfer-Encoding'>>
-const VAL_CHUNKED = <<'chunked'>>
+const NAME_LENGTH = <<"Content-Length">>
+const NAME_TE = <<"Transfer-Encoding">>
+const VAL_CHUNKED = <<"chunked">>
 
 fn fixed_head(n Int) Binary {
 	length = headers::Header(name: NAME_LENGTH, value: binary::from_int_ascii(n, binary::Dec))
@@ -104,11 +104,11 @@ fn chunked_head() Binary {
 
 // A Body is a thunk that yields one chunk and the rest.
 fn two_chunks() body::Body {
-	fn() Ok(body::Chunk(<<'first '>>, body::from_binary(<<'second'>>)))
+	fn() Ok(body::Chunk(<<"first ">>, body::from_binary(<<"second">>)))
 }
 
 fn budget_body() body::Body {
-	fn() Ok(body::Chunk(<<'five!'>>, body::from_binary(<<'more'>>)))
+	fn() Ok(body::Chunk(<<"five!">>, body::from_binary(<<"more">>)))
 }
 
 /** Why the hand-written server gave up on a connection. */
@@ -120,8 +120,8 @@ type ServeError {
 fn describe_serve(e ServeError) String {
 	match e {
 		NetFailed(err) -> string::inspect(err)
-		DrainFailed(body::SourceFailed(err)) -> 'source failed: ${string::inspect(err)}'
-		DrainFailed(body::SinkFailed(err)) -> 'sink failed: ${string::inspect(err)}'
+		DrainFailed(body::SourceFailed(err)) -> "source failed: ${string::inspect(err)}"
+		DrainFailed(body::SinkFailed(err)) -> "sink failed: ${string::inspect(err)}"
 	}
 }
 
@@ -137,9 +137,9 @@ fn drain_failed(r Result(a, body::DrainError)) Result(a, ServeError) {
 // different on the wire.
 fn counted(what String, d body::Drained) Nil {
 	match d {
-		body::Complete -> println('${what}: Complete')
-		body::Short(written) -> println('${what}: Short(${written})')
-		body::Overran(written) -> println('${what}: Overran(${written})')
+		body::Complete -> println("${what}: Complete")
+		body::Short(written) -> println("${what}: Short(${written})")
+		body::Overran(written) -> println("${what}: Overran(${written})")
 	}
 }
 
@@ -176,38 +176,38 @@ fn read_length(
 
 fn respond(sock socket::Socket, target Binary, payload Binary) Result(Nil, ServeError) {
 	match target {
-		<<'/pump'>> -> {
-			bin = binary::from_string('pumped ${binary::byte_size(payload)} bytes')
+		<<"/pump">> -> {
+			bin = binary::from_string("pumped ${binary::byte_size(payload)} bytes")
 			head = fixed_head(binary::byte_size(bin))
 			body::drain_with_head(head, body::from_binary(bin), sock) |> drain_failed
 		}
-		<<'/bare'>> -> {
-			bin = <<'drained bare'>>
+		<<"/bare">> -> {
+			bin = <<"drained bare">>
 			Nil <- result::then(
 				socket::write(sock, fixed_head(binary::byte_size(bin))) |> net_failed,
 			)
 			body::drain(body::from_binary(bin), sock) |> drain_failed
 		}
-		<<'/chunked'>> -> {
+		<<"/chunked">> -> {
 			Nil <- result::then(socket::write(sock, chunked_head()) |> net_failed)
 			body::drain_chunked(two_chunks(), sock) |> drain_failed
 		}
-		<<'/streamed'>> ->
+		<<"/streamed">> ->
 			body::drain_chunked_with_head(chunked_head(), two_chunks(), sock) |> drain_failed
-		<<'/counted'>> -> {
-			bin = <<'counted body'>>
+		<<"/counted">> -> {
+			bin = <<"counted body">>
 			n = binary::byte_size(bin)
 			Nil <- result::then(socket::write(sock, fixed_head(n)) |> net_failed)
 			body::drain_counted(body::from_binary(bin), sock, n)
 			|> drain_failed
-			|> result::map(fn(d) counted('counted', d))
+			|> result::map(fn(d) counted("counted", d))
 		}
 		// The head promises 5 bytes, so the second chunk is dropped.
-		<<'/overrun'>> -> {
+		<<"/overrun">> -> {
 			Nil <- result::then(socket::write(sock, fixed_head(5)) |> net_failed)
 			body::drain_counted(budget_body(), sock, 5)
 			|> drain_failed
-			|> result::map(fn(d) counted('overrun', d))
+			|> result::map(fn(d) counted("overrun", d))
 		}
 		_ -> socket::write(sock, h1::serialize_head(404, [])) |> net_failed
 	}
@@ -252,12 +252,12 @@ fn accept_loop(server net::Server) Nil {
 	match net::accept(server) {
 		Ok(Some(sock)) -> {
 			_ = process::spawn(
-				fn() serve_raw(sock) or e -> println('raw server: ${describe_serve(e)}'),
+				fn() serve_raw(sock) or e -> println("raw server: ${describe_serve(e)}"),
 			)
 			accept_loop(server)
 		}
 		Ok(None) -> Nil
-		Err(e) -> println('raw server: accept failed: ${string::inspect(e)}')
+		Err(e) -> println("raw server: accept failed: ${string::inspect(e)}")
 	}
 }
 
@@ -277,10 +277,10 @@ type Step {
 
 fn describe(e DemoError) String {
 	match e {
-		StepFailed(Listen, err) -> 'listen failed: ${string::inspect(err)}'
-		StepFailed(LocalAddr, err) -> 'local_addr failed: ${string::inspect(err)}'
-		StepFailed(Request(label), err) -> '${label} failed: ${string::inspect(err)}'
-		StepFailed(Close, err) -> 'close failed: ${string::inspect(err)}'
+		StepFailed(Listen, err) -> "listen failed: ${string::inspect(err)}"
+		StepFailed(LocalAddr, err) -> "local_addr failed: ${string::inspect(err)}"
+		StepFailed(Request(label), err) -> "${label} failed: ${string::inspect(err)}"
+		StepFailed(Close, err) -> "close failed: ${string::inspect(err)}"
 	}
 }
 
@@ -290,32 +290,32 @@ fn step(r Result(a, error::NetError), s Step) Result(a, DemoError) {
 
 // Listens on a spare loopback port.
 fn loopback() Result((Int, net::Server), DemoError) {
-	server <- result::then(net::listen('127.0.0.1', 0) |> step(Listen))
+	server <- result::then(net::listen("127.0.0.1", 0) |> step(Listen))
 	addr <- result::then(net::local_addr(server) |> step(LocalAddr))
 	Ok((address::port(addr), server))
 }
 
 // Sends one request and prints the response.
 fn fetch(port Int, method String, target String, payload String) Result(Nil, DemoError) {
-	label = '${method} ${target}'
+	label = "${method} ${target}"
 	response <- result::then(request(port, method, target, payload) |> step(Request(label)))
 	Ok(show(label, response))
 }
 
 fn pump_payload() String {
-	array::fold(1..129, '', fn(acc, _i) '${acc}0123456789abcdef')
+	array::fold(1..129, "", fn(acc, _i) "${acc}0123456789abcdef")
 }
 
 fn by_hand() Result(Nil, DemoError) {
 	(port, server) <- result::then(loopback())
 	_ = process::spawn(fn() accept_loop(server))
 
-	Nil <- result::then(fetch(port, 'POST', '/pump', pump_payload()))
-	Nil <- result::then(fetch(port, 'GET', '/bare', ''))
-	Nil <- result::then(fetch(port, 'GET', '/chunked', ''))
-	Nil <- result::then(fetch(port, 'GET', '/streamed', ''))
-	Nil <- result::then(fetch(port, 'GET', '/counted', ''))
-	Nil <- result::then(fetch(port, 'GET', '/overrun', ''))
+	Nil <- result::then(fetch(port, "POST", "/pump", pump_payload()))
+	Nil <- result::then(fetch(port, "GET", "/bare", ""))
+	Nil <- result::then(fetch(port, "GET", "/chunked", ""))
+	Nil <- result::then(fetch(port, "GET", "/streamed", ""))
+	Nil <- result::then(fetch(port, "GET", "/counted", ""))
+	Nil <- result::then(fetch(port, "GET", "/overrun", ""))
 	net::close(server) |> step(Close)
 }
 
@@ -324,13 +324,13 @@ fn run() Result(Nil, DemoError) {
 	_ = http::serve_on(
 		server,
 		route,
-		fn(e) println('client ${address::to_string(e.peer)} failed: ${string::inspect(e.error)}'),
+		fn(e) println("client ${address::to_string(e.peer)} failed: ${string::inspect(e.error)}"),
 	)
 
-	Nil <- result::then(fetch(port, 'GET', '/', ''))
-	Nil <- result::then(fetch(port, 'POST', '/echo', 'hello'))
-	Nil <- result::then(fetch(port, 'GET', '/stream', ''))
-	Nil <- result::then(fetch(port, 'GET', '/nope', ''))
+	Nil <- result::then(fetch(port, "GET", "/", ""))
+	Nil <- result::then(fetch(port, "POST", "/echo", "hello"))
+	Nil <- result::then(fetch(port, "GET", "/stream", ""))
+	Nil <- result::then(fetch(port, "GET", "/nope", ""))
 
 	// Wakes the acceptors with Ok(None), so the program can end.
 	Nil <- result::then(net::close(server) |> step(Close))
@@ -338,5 +338,5 @@ fn run() Result(Nil, DemoError) {
 }
 
 pub fn main() {
-	run() or e -> println('demo stopped: ${describe(e)}')
+	run() or e -> println("demo stopped: ${describe(e)}")
 }

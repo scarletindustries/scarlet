@@ -8,8 +8,8 @@ import scarlet/json/field as presence
 // and gives an `a`, or every failure with the path where it happened.
 //
 //     fn user() Decoder(User) {
-//         id <- decode.take('id', decode.int_string())
-//         nick <- decode.take_optional('nickname', decode.string_value())
+//         id <- decode.take("id", decode.int_string())
+//         nick <- decode.take_optional("nickname", decode.string_value())
 //         decode.succeed(User(id: id, nickname: nick))
 //     }
 //
@@ -78,22 +78,22 @@ fn recovery(dec Decoder(a)) Recovery(a) {
 // Formats a path like `.field.list[3].name`, or `<root>` for the top level.
 pub fn path_to_string(path Array(Segment)) String {
 	match path {
-		[] -> '<root>'
-		[head, ..tail] -> '${segment_to_string(head)}${path_to_string_rest(tail)}'
+		[] -> "<root>"
+		[head, ..tail] -> "${segment_to_string(head)}${path_to_string_rest(tail)}"
 	}
 }
 
 fn path_to_string_rest(path Array(Segment)) String {
 	match path {
-		[] -> ''
-		[head, ..tail] -> '${segment_to_string(head)}${path_to_string_rest(tail)}'
+		[] -> ""
+		[head, ..tail] -> "${segment_to_string(head)}${path_to_string_rest(tail)}"
 	}
 }
 
 fn segment_to_string(s Segment) String {
 	match s {
-		Key(k) -> '.${k}'
-		At(i) -> '[${i}]'
+		Key(k) -> ".${k}"
+		At(i) -> "[${i}]"
 	}
 }
 
@@ -101,15 +101,15 @@ fn segment_to_string(s Segment) String {
 // what was there.
 pub fn failure_to_string(f Failure) String {
 	Failure(path, expected, found) = f
-	'${path_to_string(path)}: expected ${expected}, found ${found_to_string(found)}'
+	"${path_to_string(path)}: expected ${expected}, found ${found_to_string(found)}"
 }
 
 pub fn failures_to_string(fs Array(Failure)) String {
 	match fs {
-		[] -> ''
+		[] -> ""
 		[head, ..tail] -> match tail {
 			[] -> failure_to_string(head)
-			_ -> '${failure_to_string(head)}\n${failures_to_string(tail)}'
+			_ -> "${failure_to_string(head)}\n${failures_to_string(tail)}"
 		}
 	}
 }
@@ -117,20 +117,20 @@ pub fn failures_to_string(fs Array(Failure)) String {
 pub fn found_to_string(f Found) String {
 	match f {
 		FoundKind(k) -> kind_to_string(k)
-		FoundAbsent -> 'no such member'
+		FoundAbsent -> "no such member"
 		FoundText(t) -> t
 	}
 }
 
 fn kind_to_string(k json::Kind) String {
 	match k {
-		json::NullKind -> 'null'
-		json::BoolKind -> 'a boolean'
-		json::IntKind -> 'an integer'
-		json::FloatKind -> 'a float'
-		json::StringKind -> 'a string'
-		json::ArrayKind -> 'an array'
-		json::ObjectKind -> 'an object'
+		json::NullKind -> "null"
+		json::BoolKind -> "a boolean"
+		json::IntKind -> "an integer"
+		json::FloatKind -> "a float"
+		json::StringKind -> "a string"
+		json::ArrayKind -> "an array"
+		json::ObjectKind -> "an object"
 	}
 }
 
@@ -160,20 +160,20 @@ fn scalar(expected String, resume_with a, read fn(json::Doc) Option(a)) Decoder(
 }
 
 pub fn string_value() Decoder(String) {
-	scalar('a string', '', json::string)
+	scalar("a string", "", json::string)
 }
 
 // A float fails here, even one with no fraction.
 pub fn int() Decoder(Int) {
-	scalar('an integer', 0, json::int)
+	scalar("an integer", 0, json::int)
 }
 
 pub fn float() Decoder(Float) {
-	scalar('a number', 0.0, json::float)
+	scalar("a number", 0.0, json::float)
 }
 
 pub fn bool() Decoder(Bool) {
-	scalar('a boolean', False, json::bool)
+	scalar("a boolean", False, json::bool)
 }
 
 // Decodes an integer sent as a JSON string. Protocols do this for 64-bit ids,
@@ -182,10 +182,10 @@ pub fn bool() Decoder(Bool) {
 pub fn int_string() Decoder(Int) {
 	Decoder(
 		step: fn(doc) match json::string(doc) {
-			None -> Err(one_failure('a quoted integer', doc))
+			None -> Err(one_failure("a quoted integer", doc))
 			Some(s) -> match parse_signed(s) {
 				Ok(n) -> Ok(n)
-				Err(Nil) -> Err([Failure([], 'a quoted integer', FoundText('the string "${s}"'))])
+				Err(Nil) -> Err([Failure([], "a quoted integer", FoundText("the string \"${s}\""))])
 			}
 		},
 		resume: fn() Resume(0),
@@ -208,7 +208,7 @@ pub fn null_as(value a) Decoder(a) {
 		step: fn(doc) if json::is_null(doc) {
 			Ok(value)
 		} else {
-			Err(one_failure('null', doc))
+			Err(one_failure("null", doc))
 		},
 		resume: fn() Resume(value),
 	)
@@ -330,7 +330,7 @@ pub fn field(name String, inner Decoder(a)) Decoder(a) {
 				Ok(v) -> Ok(v)
 				Err(e) -> Err(prefix_path(e, Key(name)))
 			}
-			Ok(None) -> Err([Failure([Key(name)], 'a member named "${name}"', FoundAbsent)])
+			Ok(None) -> Err([Failure([Key(name)], "a member named \"${name}\"", FoundAbsent)])
 		},
 		resume: resume,
 	)
@@ -351,7 +351,7 @@ fn member(doc json::Doc, name String) Result(Option(json::Doc), Array(Failure)) 
 				| json::FloatKind
 				| json::StringKind
 				| json::ArrayKind ->
-					Err([Failure([Key(name)], 'a member named "${name}"', FoundKind(kind))])
+					Err([Failure([Key(name)], "a member named \"${name}\"", FoundKind(kind))])
 			}
 		}
 	}
@@ -389,7 +389,7 @@ pub fn list(inner Decoder(a)) Decoder(Array(a)) {
 			| json::IntKind
 			| json::FloatKind
 			| json::StringKind
-			| json::ObjectKind -> Err(one_failure('an array', doc))
+			| json::ObjectKind -> Err(one_failure("an array", doc))
 		},
 		resume: fn() Resume([]),
 	)
@@ -426,7 +426,7 @@ pub fn dict(inner Decoder(a)) Decoder(Array((String, a))) {
 			| json::IntKind
 			| json::FloatKind
 			| json::StringKind
-			| json::ArrayKind -> Err(one_failure('an object', doc))
+			| json::ArrayKind -> Err(one_failure("an object", doc))
 		},
 		resume: fn() Resume([]),
 	)
@@ -482,7 +482,7 @@ pub fn tagged(tag String, pick fn(String) Result(Decoder(a), Nil)) Decoder(a) {
 	field(tag, string_value())
 	|> then(fn(t) match pick(t) {
 		Ok(dec) -> dec
-		Err(Nil) -> unknown_tag(tag, 'the tag "${t}"')
+		Err(Nil) -> unknown_tag(tag, "the tag \"${t}\"")
 	})
 }
 
@@ -490,13 +490,13 @@ pub fn tagged_int(tag String, pick fn(Int) Result(Decoder(a), Nil)) Decoder(a) {
 	field(tag, int())
 	|> then(fn(t) match pick(t) {
 		Ok(dec) -> dec
-		Err(Nil) -> unknown_tag(tag, 'the tag ${t}')
+		Err(Nil) -> unknown_tag(tag, "the tag ${t}")
 	})
 }
 
 fn unknown_tag(tag String, found String) Decoder(a) {
 	Decoder(
-		step: fn(_doc) Err([Failure([Key(tag)], 'a known tag', FoundText(found))]),
+		step: fn(_doc) Err([Failure([Key(tag)], "a known tag", FoundText(found))]),
 		resume: fn() Halt,
 	)
 }

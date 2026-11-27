@@ -341,7 +341,7 @@ fn run_bounded(tag: &str, src: &str, trust: Option<&str>, secs: u64) -> (Option<
     let dir = project_dir(tag);
     let entry = dir.join("main.sca");
     std::fs::write(&entry, src).expect("write program");
-    std::fs::write(dir.join("package.sca"), "name = 'tls_test'\n").expect("write package");
+    std::fs::write(dir.join("package.sca"), "name = \"tls_test\"\n").expect("write package");
 
     let mut cmd = scarlet_run(&entry);
     cmd.current_dir(&dir)
@@ -385,7 +385,7 @@ fn run_program(tag: &str, src: &str, trust: Option<&str>) -> String {
 /// verified against `localhost`. That split isn't a workaround for the test. It
 /// is the reason `handshake` takes the name as its own argument. Connecting
 /// by address and verifying by name is what a connection pool does, and what a
-/// client behind a proxy does. Using `tls.connect('localhost', …)` here would
+/// client behind a proxy does. Using `tls.connect("localhost", …)` here would
 /// instead resolve `localhost` to `::1` on this host, where nothing is bound,
 /// and every assertion below would pass on `ConnectionRefused` without a
 /// certificate ever being examined.
@@ -396,15 +396,15 @@ import scarlet/net/tls
 import scarlet/string
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake(sock, '{name}') {{
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake(sock, "{name}") {{
             Ok(conn) -> {{
-                println('connected')
+                println("connected")
                 _ = tls::close(conn)
             }}
-            Err(e) -> println('failed: ${{string::inspect(e)}}')
+            Err(e) -> println("failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -599,20 +599,20 @@ import scarlet/binary
 import scarlet/string
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake(sock, 'localhost') {{
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake(sock, "localhost") {{
             Ok(conn) -> {{
-                _ = tls::write(conn, <<'ping'>>)
+                _ = tls::write(conn, <<"ping">>)
                 match tls::read(conn, 1024) {{
-                    Ok(socket::Data(b)) -> println('read: ${{binary::to_string(b) or "<not utf-8>"}}')
-                    Ok(socket::Closed) -> println('closed')
-                    Err(e) -> println('read failed: ${{string::inspect(e)}}')
+                    Ok(socket::Data(b)) -> println("read: ${{binary::to_string(b) or "<not utf-8>"}}")
+                    Ok(socket::Closed) -> println("closed")
+                    Err(e) -> println("read failed: ${{string::inspect(e)}}")
                 }}
                 _ = tls::close(conn)
             }}
-            Err(e) -> println('failed: ${{string::inspect(e)}}')
+            Err(e) -> println("failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -652,21 +652,21 @@ import scarlet/net/error
 import scarlet/string
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake(sock, 'localhost') {{
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake(sock, "localhost") {{
             Ok(conn) -> {{
                 match tls::read_within(conn, 4096, 100) {{
-                    Ok(_) -> println('unexpected-data')
+                    Ok(_) -> println("unexpected-data")
                     Err(e) -> match e {{
-                        tls::Transport(error::TimedOut) -> println('timed-out: Transport(TimedOut)')
-                        tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
+                        tls::Transport(error::TimedOut) -> println("timed-out: Transport(TimedOut)")
+                        tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println("other-error: ${{string::inspect(e)}}")
                     }}
                 }}
                 _ = tls::close(conn)
             }}
-            Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
+            Err(e) -> println("handshake failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -716,15 +716,15 @@ import scarlet/net/error
 import scarlet/string
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake_within(sock, 'localhost', 200) {{
-            Ok(_) -> println('connected')
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake_within(sock, "localhost", 200) {{
+            Ok(_) -> println("connected")
             Err(e) -> match e {{
-                tls::Transport(error::TimedOut) -> println('timed-out: Transport(TimedOut)')
-                tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
+                tls::Transport(error::TimedOut) -> println("timed-out: Transport(TimedOut)")
+                tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println("other-error: ${{string::inspect(e)}}")
             }}
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -767,20 +767,20 @@ import scarlet/binary
 import scarlet/string
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake_within(sock, 'localhost', 10000) {{
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake_within(sock, "localhost", 10000) {{
             Ok(conn) -> {{
-                _ = tls::write(conn, <<'ping'>>)
+                _ = tls::write(conn, <<"ping">>)
                 match tls::read(conn, 1024) {{
-                    Ok(socket::Data(b)) -> println('read: ${{binary::to_string(b) or "<not utf-8>"}}')
-                    Ok(socket::Closed) -> println('closed')
-                    Err(e) -> println('read failed: ${{string::inspect(e)}}')
+                    Ok(socket::Data(b)) -> println("read: ${{binary::to_string(b) or "<not utf-8>"}}")
+                    Ok(socket::Closed) -> println("closed")
+                    Err(e) -> println("read failed: ${{string::inspect(e)}}")
                 }}
                 _ = tls::close(conn)
             }}
-            Err(e) -> println('failed: ${{string::inspect(e)}}')
+            Err(e) -> println("failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -831,13 +831,13 @@ import scarlet/string
 
 pub fn main() {{
     started = time::monotonic()
-    outcome = tls::connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
+    outcome = tls::connect_within("127.0.0.1", {port}, {CONNECT_DEADLINE_MS})
     ms = time::since_ms(time::monotonic(), started)
     match outcome {{
-        Ok(_) -> println('connected ${{ms}}')
+        Ok(_) -> println("connected ${{ms}}")
         Err(e) -> match e {{
-            tls::Transport(error::TimedOut) -> println('timed-out ${{ms}}')
-            tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
+            tls::Transport(error::TimedOut) -> println("timed-out ${{ms}}")
+            tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println("other-error: ${{string::inspect(e)}}")
         }}
     }}
 }}
@@ -891,13 +891,13 @@ import scarlet/string
 
 pub fn main() {{
     started = time::monotonic()
-    outcome = tls::connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
+    outcome = tls::connect_within("127.0.0.1", {port}, {CONNECT_DEADLINE_MS})
     ms = time::since_ms(time::monotonic(), started)
     match outcome {{
-        Ok(_) -> println('connected ${{ms}}')
+        Ok(_) -> println("connected ${{ms}}")
         Err(e) -> match e {{
-            tls::Transport(error::TimedOut) -> println('timed-out ${{ms}}')
-            tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
+            tls::Transport(error::TimedOut) -> println("timed-out ${{ms}}")
+            tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println("other-error: ${{string::inspect(e)}}")
         }}
     }}
 }}
@@ -952,17 +952,17 @@ import scarlet/string
 
 pub fn main() {{
     deadline = time::add_ms(time::monotonic(), 10000)
-    match tls::connect_until('127.0.0.1', {port}, deadline) {{
+    match tls::connect_until("127.0.0.1", {port}, deadline) {{
         Ok(conn) -> {{
-            _ = tls::write(conn, <<'ping'>>)
+            _ = tls::write(conn, <<"ping">>)
             match tls::read(conn, 1024) {{
-                Ok(socket::Data(b)) -> println('read: ${{binary::to_string(b) or "<not utf-8>"}}')
-                Ok(socket::Closed) -> println('closed')
-                Err(e) -> println('read failed: ${{string::inspect(e)}}')
+                Ok(socket::Data(b)) -> println("read: ${{binary::to_string(b) or "<not utf-8>"}}")
+                Ok(socket::Closed) -> println("closed")
+                Err(e) -> println("read failed: ${{string::inspect(e)}}")
             }}
             _ = tls::close(conn)
         }}
-        Err(e) -> println('failed: ${{string::inspect(e)}}')
+        Err(e) -> println("failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -998,29 +998,29 @@ import scarlet/string
 import scarlet/time
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake(sock, 'localhost') {{
-            Ok(conn) -> match url::parse('https://localhost/') {{
-                Err(e) -> println('url failed: ${{string::inspect(e)}}')
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake(sock, "localhost") {{
+            Ok(conn) -> match url::parse("https://localhost/") {{
+                Err(e) -> println("url failed: ${{string::inspect(e)}}")
                 Ok(u) -> {{
                     io = client::secure(conn)
-                    req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+                    req = client::Request(method: <<"GET">>, url: u, headers: [], body: <<>>)
                     match client::send_until(io, req, 1024, time::deadline_in_ms(200)) {{
-                        Ok(r) -> println('https-ok: ${{r.status}}')
+                        Ok(r) -> println("https-ok: ${{r.status}}")
                         Err(e) -> match e {{
-                            client::Tls(tls::Transport(error::TimedOut)) -> println('https-timeout: Tls(Transport(TimedOut))')
+                            client::Tls(tls::Transport(error::TimedOut)) -> println("https-timeout: Tls(Transport(TimedOut))")
                             client::Tls(tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(..) | error::UnalignedBinary | error::InvalidPort | error::Errno(..)))
                             | client::Tls(tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName)
-                            | client::BadUrl(..) | client::BadRequestHeaders | client::Transport(..) | client::MalformedResponse(..) | client::BodyTooLarge(..) -> println('other: ${{string::inspect(e)}}')
+                            | client::BadUrl(..) | client::BadRequestHeaders | client::Transport(..) | client::MalformedResponse(..) | client::BodyTooLarge(..) -> println("other: ${{string::inspect(e)}}")
                         }}
                     }}
                     shut = io.close
                     _ = shut()
                 }}
             }}
-            Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
+            Err(e) -> println("handshake failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -1061,29 +1061,29 @@ import scarlet/string
 import scarlet/time
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake(sock, 'localhost') {{
-            Ok(conn) -> match url::parse('https://localhost/') {{
-                Err(e) -> println('url failed: ${{string::inspect(e)}}')
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake(sock, "localhost") {{
+            Ok(conn) -> match url::parse("https://localhost/") {{
+                Err(e) -> println("url failed: ${{string::inspect(e)}}")
                 Ok(u) -> {{
                     io = client::secure(conn)
-                    req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+                    req = client::Request(method: <<"GET">>, url: u, headers: [], body: <<>>)
                     match client::send_until(io, req, 1024, time::deadline_in_ms(5000)) {{
-                        Ok(r) -> println('https-ok: ${{r.status}}')
+                        Ok(r) -> println("https-ok: ${{r.status}}")
                         Err(e) -> match e {{
-                            client::Tls(tls::Transport(error::TimedOut)) -> println('https-timeout: Tls(Transport(TimedOut))')
+                            client::Tls(tls::Transport(error::TimedOut)) -> println("https-timeout: Tls(Transport(TimedOut))")
                             client::Tls(tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(..) | error::UnalignedBinary | error::InvalidPort | error::Errno(..)))
                             | client::Tls(tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName)
-                            | client::BadUrl(..) | client::BadRequestHeaders | client::Transport(..) | client::MalformedResponse(..) | client::BodyTooLarge(..) -> println('other: ${{string::inspect(e)}}')
+                            | client::BadUrl(..) | client::BadRequestHeaders | client::Transport(..) | client::MalformedResponse(..) | client::BodyTooLarge(..) -> println("other: ${{string::inspect(e)}}")
                         }}
                     }}
                     shut = io.close
                     _ = shut()
                 }}
             }}
-            Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
+            Err(e) -> println("handshake failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -1115,20 +1115,20 @@ import scarlet/binary
 import scarlet/string
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake(sock, 'localhost') {{
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake(sock, "localhost") {{
             Ok(conn) -> {{
-                _ = tls::write(conn, <<'ping'>>)
+                _ = tls::write(conn, <<"ping">>)
                 match tls::read_within(conn, 1024, 5000) {{
-                    Ok(socket::Data(b)) -> println('read: ${{binary::to_string(b) or "<not utf-8>"}}')
-                    Ok(socket::Closed) -> println('closed')
-                    Err(e) -> println('read failed: ${{string::inspect(e)}}')
+                    Ok(socket::Data(b)) -> println("read: ${{binary::to_string(b) or "<not utf-8>"}}")
+                    Ok(socket::Closed) -> println("closed")
+                    Err(e) -> println("read failed: ${{string::inspect(e)}}")
                 }}
                 _ = tls::close(conn)
             }}
-            Err(e) -> println('failed: ${{string::inspect(e)}}')
+            Err(e) -> println("failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -1161,20 +1161,20 @@ import scarlet/net/socket
 import scarlet/string
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(plain) -> match tls::handshake(plain, 'localhost') {{
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(plain) -> match tls::handshake(plain, "localhost") {{
             Ok(secure) -> {{
                 // The same connection, named by the handle that predates the
                 // upgrade. It must not reach the wire.
-                match socket::write(plain, <<'cleartext'>>) {{
-                    Ok(Nil) -> println('LEAKED: cleartext write succeeded')
-                    Err(e) -> println('cleartext refused: ${{string::inspect(e)}}')
+                match socket::write(plain, <<"cleartext">>) {{
+                    Ok(Nil) -> println("LEAKED: cleartext write succeeded")
+                    Err(e) -> println("cleartext refused: ${{string::inspect(e)}}")
                 }}
                 _ = tls::close(secure)
             }}
-            Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
+            Err(e) -> println("handshake failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -1284,8 +1284,8 @@ fn shake_n(n Int, acc Int) Int {{
     if n <= 0 {{
         acc
     }} else {{
-        match net::connect('127.0.0.1', {dead}) {{
-            Ok(s) -> match tls::handshake(s, 'localhost') {{
+        match net::connect("127.0.0.1", {dead}) {{
+            Ok(s) -> match tls::handshake(s, "localhost") {{
                 Ok(_) -> shake_n(n - 1, acc)
                 Err(_) -> shake_n(n - 1, acc + 1)
             }}
@@ -1295,23 +1295,23 @@ fn shake_n(n Int, acc Int) Int {{
 }}
 
 pub fn main() {{
-    println('handshakes refused ${{shake_n({REPS}, 0)}}')
+    println("handshakes refused ${{shake_n({REPS}, 0)}}")
 
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake(sock, 'localhost') {{
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake(sock, "localhost") {{
             Ok(conn) -> {{
-                println('timeouts ${{timeout_n(conn, {REPS}, 0)}}')
-                match send_n(conn, <<'{PATTERN}'>>, {REPS}) {{
-                    Ok(Nil) -> println('wrote {REPS}')
-                    Err(e) -> println('write failed: ${{string::inspect(e)}}')
+                println("timeouts ${{timeout_n(conn, {REPS}, 0)}}")
+                match send_n(conn, <<"{PATTERN}">>, {REPS}) {{
+                    Ok(Nil) -> println("wrote {REPS}")
+                    Err(e) -> println("write failed: ${{string::inspect(e)}}")
                 }}
-                println('read back ${{recv_n(conn, {REPS}, 0)}}')
+                println("read back ${{recv_n(conn, {REPS}, 0)}}")
                 close_n(conn, {REPS})
-                println('closed {REPS}')
+                println("closed {REPS}")
             }}
-            Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
+            Err(e) -> println("handshake failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -1420,25 +1420,25 @@ fn send_n(c tls::TlsSocket, b Binary, n Int) Result(Nil, tls::TlsError) {{
 }}
 
 pub fn main() {{
-    payload = grow(<<'{PATTERN}'>>, {DOUBLINGS})
+    payload = grow(<<"{PATTERN}">>, {DOUBLINGS})
 
-    match net::connect('127.0.0.1', {port}) {{
-        Ok(sock) -> match tls::handshake(sock, 'localhost') {{
+    match net::connect("127.0.0.1", {port}) {{
+        Ok(sock) -> match tls::handshake(sock, "localhost") {{
             Ok(conn) -> {{
-                println('sending ${{binary::byte_size(payload)}} x {WRITES}')
+                println("sending ${{binary::byte_size(payload)}} x {WRITES}")
                 match send_n(conn, payload, {WRITES}) {{
                     Ok(Nil) -> match tls::read(conn, 1024) {{
-                        Ok(socket::Data(b)) -> println('reply: ${{binary::to_string(b) or "<not utf-8>"}}')
-                        Ok(socket::Closed) -> println('reply: closed')
-                        Err(e) -> println('read failed: ${{string::inspect(e)}}')
+                        Ok(socket::Data(b)) -> println("reply: ${{binary::to_string(b) or "<not utf-8>"}}")
+                        Ok(socket::Closed) -> println("reply: closed")
+                        Err(e) -> println("read failed: ${{string::inspect(e)}}")
                     }}
-                    Err(e) -> println('write failed: ${{string::inspect(e)}}')
+                    Err(e) -> println("write failed: ${{string::inspect(e)}}")
                 }}
                 _ = tls::close(conn)
             }}
-            Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
+            Err(e) -> println("handshake failed: ${{string::inspect(e)}}")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#
@@ -1499,29 +1499,29 @@ import scarlet/process
 import scarlet/string
 
 pub fn main() {{
-    match net::connect('127.0.0.1', {port}) {{
+    match net::connect("127.0.0.1", {port}) {{
         Ok(sock) -> {{
             _ = process::spawn(fn() {{
-                println('sibling: parking in socket::read')
+                println("sibling: parking in socket::read")
                 match socket::read(sock, 16) {{
-                    Ok(r) -> println('sibling: read ${{string::inspect(r)}}')
-                    Err(e) -> println('sibling: err ${{string::inspect(e)}}')
+                    Ok(r) -> println("sibling: read ${{string::inspect(r)}}")
+                    Err(e) -> println("sibling: err ${{string::inspect(e)}}")
                 }}
             }})
             // Nothing is on the wire until the ClientHello, so the sibling has
             // nothing to read and is parked well before the upgrade re-keys it.
             process::sleep(500)
-            println('parent: upgrading')
-            match tls::handshake(sock, 'localhost') {{
+            println("parent: upgrading")
+            match tls::handshake(sock, "localhost") {{
                 Ok(conn) -> {{
-                    println('parent: handshake ok')
+                    println("parent: handshake ok")
                     _ = tls::close(conn)
                 }}
-                Err(e) -> println('parent: handshake err ${{string::inspect(e)}}')
+                Err(e) -> println("parent: handshake err ${{string::inspect(e)}}")
             }}
-            println('parent: done')
+            println("parent: done")
         }}
-        Err(e) -> println('connect failed: ${{string::inspect(e)}}')
+        Err(e) -> println("connect failed: ${{string::inspect(e)}}")
     }}
 }}
 "#

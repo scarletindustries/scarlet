@@ -4,7 +4,7 @@
 
 import scarlet/map
 
-const letters = ['a', 'e', 'i', 'n', 'r', 't']
+const letters = ["a", "e", "i", "n", "r", "t"]
 
 fn next(seed Int) Int {
 	seed * 16807 % 2147483647
@@ -14,13 +14,13 @@ fn spell(r Int, n Int, acc String) String {
 	if n == 0 {
 		acc
 	} else {
-		spell(r / 6, n - 1, acc + { letters[r % 6] or '' })
+		spell(r / 6, n - 1, acc + { letters[r % 6] or "" })
 	}
 }
 
 // A word of 2 to `lengths + 1` letters, all of it decided by `r`.
 fn word(r Int, lengths Int) String {
-	spell(r / lengths, 2 + r % lengths, '')
+	spell(r / lengths, 2 + r % lengths, "")
 }
 
 fn count(m map::Map(String, Int), seed Int, i Int) map::Map(String, Int) {

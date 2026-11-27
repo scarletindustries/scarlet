@@ -28,7 +28,7 @@ const frame_ms = 70
 // thought of as settled and seeded again.
 const patience = 40
 
-const escape = '['
+const escape = "["
 
 // The two ways the program can fail to start, or to start over.
 type LifeError {
@@ -107,12 +107,12 @@ fn colour(age Int) Int {
 }
 
 fn render_row(board Board, y Int) String {
-	array::fold(0..board.width, '', fn(line, x) {
+	array::fold(0..board.width, "", fn(line, x) {
 		age = age_at(board, x, y)
 		if age == 0 {
-			line + ' '
+			line + " "
 		} else {
-			line + '${escape}38;5;${colour(age)}m█'
+			line + "${escape}38;5;${colour(age)}m█"
 		}
 	})
 }
@@ -120,11 +120,11 @@ fn render_row(board Board, y Int) String {
 fn render(board Board, generation Int, alive Int) String {
 	rows = array::fold(
 		0..board.height,
-		'',
-		fn(text, y) text + render_row(board, y) + '${escape}0m\n',
+		"",
+		fn(text, y) text + render_row(board, y) + "${escape}0m\n",
 	)
-	status = 'generation ${generation}  ·  ${alive} alive  ·  Ctrl-C to stop'
-	'${escape}H' + rows + '${escape}2m' + status + '${escape}0m${escape}K'
+	status = "generation ${generation}  ·  ${alive} alive  ·  Ctrl-C to stop"
+	"${escape}H" + rows + "${escape}2m" + status + "${escape}0m${escape}K"
 }
 
 fn wait_until(deadline time::Instant) Nil {
@@ -173,17 +173,17 @@ fn start() Result(Nil, LifeError) {
 	(width, lines) <- result::then(size())
 	// One line is kept for the status bar.
 	board <- result::then(seed(width, int::max(lines - 1, 1)))
-	println('${escape}2J')
+	println("${escape}2J")
 	run(board, 0, -1, 0)
 }
 
 pub fn main() {
 	match start() {
 		Ok(Nil) -> Nil
-		Err(NoRandomness) -> println('life: the OS gave no random bytes to seed the board')
+		Err(NoRandomness) -> println("life: the OS gave no random bytes to seed the board")
 		Err(BadSize(text)) ->
-			println('life: "${text}" is not a size. Pass a width and a height, like: 80 24')
+			println("life: \"${text}\" is not a size. Pass a width and a height, like: 80 24")
 		Err(NoTerminal) ->
-			println('life: this is not a terminal, so pass a width and a height, like: 80 24')
+			println("life: this is not a terminal, so pass a width and a height, like: 80 24")
 	}
 }

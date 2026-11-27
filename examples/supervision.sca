@@ -73,23 +73,23 @@ fn room_named(
 	rooms process::Factory(RoomMsg, String),
 	req http::Request,
 ) process::Subject(RoomMsg) {
-	q = req |> http::query |> binary::to_string or ''
-	name = match string::split(q, '=') {
-		['room', n] -> string::trim(n)
-		_ -> 'lobby'
+	q = req |> http::query |> binary::to_string or ""
+	name = match string::split(q, "=") {
+		["room", n] -> string::trim(n)
+		_ -> "lobby"
 	}
-	process::lookup_or_start(rooms, if name == '' { 'lobby' } else { name })
+	process::lookup_or_start(rooms, if name == "" { "lobby" } else { name })
 }
 
 fn request_text(req http::Request) String {
 	match body::collect(req.body, 4096) {
-		Ok(bytes) -> binary::to_string(bytes) or ''
-		Err(_) -> ''
+		Ok(bytes) -> binary::to_string(bytes) or ""
+		Err(_) -> ""
 	}
 }
 
 fn lines(xs Array(String)) String {
-	array::fold(xs, '', fn(out, x) out + x + '\n')
+	array::fold(xs, "", fn(out, x) out + x + "\n")
 }
 
 fn handle(
@@ -100,23 +100,23 @@ fn handle(
 ) http::Response {
 	process::send(counter, Served)
 	match http::path(req) {
-		<<'/say'>> -> {
+		<<"/say">> -> {
 			process::send(room_named(rooms, req), Say(request_text(req)))
-			http::text('said\n')
+			http::text("said\n")
 		}
-		<<'/history'>> -> match ask(room_named(rooms, req), History) {
+		<<"/history">> -> match ask(room_named(rooms, req), History) {
 			Ok(history) -> http::text(lines(history))
-			Err(Nil) -> http::text('room is restarting, try again\n')
+			Err(Nil) -> http::text("room is restarting, try again\n")
 		}
-		<<'/crash'>> -> {
+		<<"/crash">> -> {
 			process::send(room_named(rooms, req), Crash)
-			http::text('crashed it\n')
+			http::text("crashed it\n")
 		}
-		<<'/stats'>> -> match ask(counter, Report) {
-			Ok(n) -> http::text('${n} requests served by this incarnation\n')
-			Err(Nil) -> http::text('stats is restarting\n')
+		<<"/stats">> -> match ask(counter, Report) {
+			Ok(n) -> http::text("${n} requests served by this incarnation\n")
+			Err(Nil) -> http::text("stats is restarting\n")
 		}
-		<<'/tree'>> -> http::text(render(app, ''))
+		<<"/tree">> -> http::text(render(app, ""))
 		_ -> http::not_found()
 	}
 }
@@ -124,18 +124,18 @@ fn handle(
 fn render(node process::Supervised, indent String) String {
 	info = process::info(node)
 	line = match info.kind {
-		process::Process -> '${indent}process\n'
+		process::Process -> "${indent}process\n"
 		process::Worker(policy) ->
-			'${indent}worker ${string::inspect(policy)}, restarted ${info.restarts} times\n'
-		process::SupervisorOf(strategy) -> '${indent}supervisor ${string::inspect(strategy)}\n'
+			"${indent}worker ${string::inspect(policy)}, restarted ${info.restarts} times\n"
+		process::SupervisorOf(strategy) -> "${indent}supervisor ${string::inspect(strategy)}\n"
 		process::FactoryOf(members) ->
-			'${indent}factory ${string::inspect(members)}, ${process::count(node)} live\n'
+			"${indent}factory ${string::inspect(members)}, ${process::count(node)} live\n"
 	}
-	process::children(node) |> array::fold(line, fn(out, child) out + render(child, indent + '  '))
+	process::children(node) |> array::fold(line, fn(out, child) out + render(child, indent + "  "))
 }
 
 fn log_failed(e net::ConnectionError) Nil {
-	println('connection from ${address::to_string(e.peer)} failed: ${e.error}')
+	println("connection from ${address::to_string(e.peer)} failed: ${e.error}")
 }
 
 pub fn main() Nil {
@@ -144,13 +144,13 @@ pub fn main() Nil {
 	rooms = process::factory(app, process::Restarted(restarts: 20, within_ms: 60_000), room)
 	match http::serve_in(
 		app,
-		'0.0.0.0',
+		"0.0.0.0",
 		8080,
 		fn(req) handle(req, rooms, counter, app.supervised),
 		log_failed,
 	) {
-		Ok(_) -> println('chat is up on http://localhost:8080')
-		Err(e) -> println('cannot serve: ${e}')
+		Ok(_) -> println("chat is up on http://localhost:8080")
+		Err(e) -> println("cannot serve: ${e}")
 	}
 	// `root` now parks this process, and the tree above is the program.
 }

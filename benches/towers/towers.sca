@@ -92,7 +92,7 @@ fn run(n Int, moves Int, weight Int, errors Int) Nil {
 			println(moves)
 			println(weight)
 		} else {
-			println('${errors} bad moves')
+			println("${errors} bad moves")
 		}
 	} else {
 		t = benchmark()

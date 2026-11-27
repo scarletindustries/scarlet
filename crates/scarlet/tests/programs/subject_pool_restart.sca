@@ -197,9 +197,9 @@ pub fn main() {
 	_ = ask(a, fn(v) Ok(v))
 	_ = ask(a, fn(v) Ok(v))
 	stop(a)
-	println('first pool stopped')
+	println("first pool stopped")
 	b = start()
-	println('second pool: ${ask(b, fn(v) Ok(v))}')
+	println("second pool: ${ask(b, fn(v) Ok(v))}")
 	stop(b)
-	println('done')
+	println("done")
 }

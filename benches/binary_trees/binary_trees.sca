@@ -39,7 +39,7 @@ fn run_depths(depth Int, min_depth Int, max_depth Int) Nil {
 	if depth <= max_depth {
 		iterations = int::bitwise_shift_left(1, max_depth - depth + min_depth)
 		check = check_trees(iterations, depth, 0)
-		println('${iterations}\t trees of depth ${depth}\t check: ${check}')
+		println("${iterations}\t trees of depth ${depth}\t check: ${check}")
 		run_depths(depth + 2, min_depth, max_depth)
 	} else {
 		Nil
@@ -52,8 +52,8 @@ pub fn main() {
 	max_depth = int::max(min_depth + 2, n)
 	stretch_depth = max_depth + 1
 	stretch_check = item_check(bottom_up_tree(stretch_depth))
-	println('stretch tree of depth ${stretch_depth}\t check: ${stretch_check}')
+	println("stretch tree of depth ${stretch_depth}\t check: ${stretch_check}")
 	long_lived_tree = bottom_up_tree(max_depth)
 	run_depths(min_depth, min_depth, max_depth)
-	println('long lived tree of depth ${max_depth}\t check: ${item_check(long_lived_tree)}')
+	println("long lived tree of depth ${max_depth}\t check: ${item_check(long_lived_tree)}")
 }

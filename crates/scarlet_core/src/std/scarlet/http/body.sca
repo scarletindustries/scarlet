@@ -8,11 +8,11 @@ import scarlet/time
 // With this size a whole body takes few pulls, and a slow reader pins only one
 // chunk.
 const READ_SIZE = 65536
-const CRLF = <<'\r\n'>>
-const ZERO = <<'0'>>
+const CRLF = <<"\r\n">>
+const ZERO = <<"0">>
 // A zero-size chunk and an empty trailer block, which together end a body with
 // no trailers.
-const LAST_CHUNK = <<'0\r\n\r\n'>>
+const LAST_CHUNK = <<"0\r\n\r\n">>
 
 // A body is a pull thunk. Each call gives the next chunk and the rest of the
 // body, or Done with any trailers. `Pull` and `Body` refer to each other, so

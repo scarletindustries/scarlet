@@ -138,7 +138,7 @@ fn format_at(input: &str, width: isize) -> FormatResult {
     let errors: Vec<Diagnostic<SyntaxError>> = result
         .diagnostics
         .into_iter()
-        .filter(|d| d.severity() == Severity::Error)
+        .filter(|d| d.severity() == Severity::Error && !d.problem.is_single_quoted_string())
         .collect();
 
     if !errors.is_empty() {
@@ -640,21 +640,10 @@ impl Formatter {
         Ok(match e {
             E::StringLiteral(s) => text(quoted(&s.value)),
             E::InterpolatedString(s) => {
-                let literal: String = s
-                    .parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        ast::InterpPart::Literal(sl) => Some(sl.value.as_str()),
-                        ast::InterpPart::Expr(_) => None,
-                    })
-                    .collect();
-                let q = pick_quote(&literal);
-                let mut parts: Vec<Doc> = vec![text(q.to_string())];
+                let mut parts: Vec<Doc> = vec![text("\"")];
                 for part in &s.parts {
                     match part {
-                        ast::InterpPart::Literal(sl) => {
-                            parts.push(text(escape_string(&sl.value, q)))
-                        }
+                        ast::InterpPart::Literal(sl) => parts.push(text(escape_string(&sl.value))),
                         // A real Doc, not a pre-rendered string, so hard breaks
                         // carry the enclosing indent. Newlines inside `${…}` are
                         // ordinary tokens and never change the string's value.
@@ -665,7 +654,7 @@ impl Formatter {
                         }
                     }
                 }
-                parts.push(text(q.to_string()));
+                parts.push(text("\""));
                 doc::concat(parts)
             }
             E::NumberLiteral(n) => text(n.value.clone()),
@@ -1289,22 +1278,11 @@ impl Formatter {
     }
 }
 
-/// Prefer single quotes; switch to double only when the content has a single
-/// quote and no double quote (so the switch saves an escape).
-fn pick_quote(s: &str) -> char {
-    if s.contains('\'') && !s.contains('"') {
-        '"'
-    } else {
-        '\''
-    }
-}
-
 fn quoted(s: &str) -> String {
-    let q = pick_quote(s);
-    format!("{q}{}{q}", escape_string(s, q))
+    format!("\"{}\"", escape_string(s))
 }
 
-fn escape_string(s: &str, quote: char) -> String {
+fn escape_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -1314,10 +1292,7 @@ fn escape_string(s: &str, quote: char) -> String {
             '\\' => result.push_str("\\\\"),
             '\0' => result.push_str("\\0"),
             '$' => result.push_str("\\$"),
-            c if c == quote => {
-                result.push('\\');
-                result.push(c);
-            }
+            '"' => result.push_str("\\\""),
             other => result.push(other),
         }
     }

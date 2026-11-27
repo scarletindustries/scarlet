@@ -109,9 +109,9 @@ type ClientData {
 fn parse_client_data(bytes Binary) Result(ClientData, ClientDataError) {
 	hash <- result::then(crypto::sha256(bytes) |> result::replace_err(NotWholeBytes))
 	doc <- result::then(json::parse_binary(bytes) |> result::map_err(NotJson))
-	kind <- result::then(field(doc, 'type'))
-	challenge <- result::then(field(doc, 'challenge'))
-	origin <- result::then(field(doc, 'origin'))
+	kind <- result::then(field(doc, "type"))
+	challenge <- result::then(field(doc, "challenge"))
+	origin <- result::then(field(doc, "origin"))
 	Ok(ClientData(kind: kind, challenge: challenge, origin: origin, hash: hash))
 }
 
@@ -309,12 +309,12 @@ pub fn verify_registration(
 	origin String,
 ) Result(Credential, Error) {
 	cd <- result::then(parse_client_data(client_data_json) |> result::map_err(BadClientData))
-	Nil <- result::then(check_client(cd, 'webauthn.create', challenge, origin))
+	Nil <- result::then(check_client(cd, "webauthn.create", challenge, origin))
 	att <- result::then(
 		cbor::decode(attestation_object) |> result::map_err(fn(e) BadAttestation(NotCbor(e))),
 	)
 	auth_bytes <- result::then(
-		match cbor::text_map_get(att, 'authData') |> option::then(cbor::as_bytes) {
+		match cbor::text_map_get(att, "authData") |> option::then(cbor::as_bytes) {
 			Some(b) -> Ok(b)
 			None -> Err(BadAttestation(MissingAuthData))
 		},
@@ -346,7 +346,7 @@ pub fn verify_authentication(
 	cred Credential,
 ) Result(Int, Error) {
 	cd <- result::then(parse_client_data(client_data_json) |> result::map_err(BadClientData))
-	Nil <- result::then(check_client(cd, 'webauthn.get', challenge, origin))
+	Nil <- result::then(check_client(cd, "webauthn.get", challenge, origin))
 	ad <- result::then(parse_auth_data(authenticator_data) |> result::map_err(BadAuthData))
 	Nil <- result::then(check_auth_data(ad, rp_id))
 	// The signature is over authenticatorData || sha256(clientDataJSON).

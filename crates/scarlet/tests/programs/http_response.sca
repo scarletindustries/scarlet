@@ -27,12 +27,12 @@ import scarlet/result
 import scarlet/string
 
 fn str(b Binary) String {
-	binary::to_string(b) or '<not utf8>'
+	binary::to_string(b) or "<not utf8>"
 }
 
 // Escape control bytes so a CRLF-bearing blob stays on ONE golden line.
 fn vis(b Binary) String {
-	vis_from(b, 0, binary::byte_size(b), '')
+	vis_from(b, 0, binary::byte_size(b), "")
 }
 
 fn vis_from(b Binary, i Int, len Int, acc String) String {
@@ -40,24 +40,24 @@ fn vis_from(b Binary, i Int, len Int, acc String) String {
 		acc
 	} else {
 		piece = match binary::byte_at(b, i) {
-			13 -> '\\r'
-			10 -> '\\n'
-			9 -> '\\t'
-			0 -> '\\0'
-			_ -> result::then(binary::slice_bytes(b, i, 1), binary::to_string) or '?'
+			13 -> "\\r"
+			10 -> "\\n"
+			9 -> "\\t"
+			0 -> "\\0"
+			_ -> result::then(binary::slice_bytes(b, i, 1), binary::to_string) or "?"
 		}
-		vis_from(b, i + 1, len, '${acc}${piece}')
+		vis_from(b, i + 1, len, "${acc}${piece}")
 	}
 }
 
 fn q(b Binary) String {
-	'"${vis(b)}"'
+	"\"${vis(b)}\""
 }
 
 fn list(parts Array(String)) String {
 	match parts {
-		[] -> '[]'
-		[head, ..rest] -> '[${array::fold(rest, head, fn(acc, p) '${acc}, ${p}')}]'
+		[] -> "[]"
+		[head, ..rest] -> "[${array::fold(rest, head, fn(acc, p) "${acc}, ${p}")}]"
 	}
 }
 
@@ -76,13 +76,13 @@ fn grow(b Binary, n Int) Binary {
 fn show_response(label String, input Binary) Nil {
 	out = match h1::parse_response(input, 0) {
 		h1::ResponseDone(version, code, reason, hdrs, _, consumed) ->
-			'Done version=${version} code=${code} reason=${q(
+			"Done version=${version} code=${code} reason=${q(
 				reason,
-			)} headers=${array::length(hdrs)} consumed=${consumed}'
-		h1::ResponseNeedMore -> 'NeedMore'
-		h1::ResponseBad(err) -> 'Bad ${err}'
+			)} headers=${array::length(hdrs)} consumed=${consumed}"
+		h1::ResponseNeedMore -> "NeedMore"
+		h1::ResponseBad(err) -> "Bad ${err}"
 	}
-	println('${label}: ${out}')
+	println("${label}: ${out}")
 }
 
 // ---------------------------------------------------------------------------
@@ -92,16 +92,16 @@ fn show_response(label String, input Binary) Nil {
 fn show_response_framing(label String, code Int, input Binary) Nil {
 	out = match h1::parse_response(input, 0) {
 		h1::ResponseDone(_, _, _, hdrs, _, _) -> match h1::response_framing(hdrs, code) {
-			h1::BodyNone -> 'BodyNone'
-			h1::BodyLength(n) -> 'BodyLength ${n}'
-			h1::BodyChunked -> 'BodyChunked'
-			h1::BodyUntilClose -> 'BodyUntilClose'
-			h1::BodyInvalid(err) -> 'BodyInvalid ${err}'
+			h1::BodyNone -> "BodyNone"
+			h1::BodyLength(n) -> "BodyLength ${n}"
+			h1::BodyChunked -> "BodyChunked"
+			h1::BodyUntilClose -> "BodyUntilClose"
+			h1::BodyInvalid(err) -> "BodyInvalid ${err}"
 		}
-		h1::ResponseNeedMore -> 'parse: NeedMore'
-		h1::ResponseBad(err) -> 'parse: Bad ${err}'
+		h1::ResponseNeedMore -> "parse: NeedMore"
+		h1::ResponseBad(err) -> "parse: Bad ${err}"
 	}
-	println('${label}: ${out}')
+	println("${label}: ${out}")
 }
 
 // ---------------------------------------------------------------------------
@@ -111,12 +111,12 @@ fn show_response_framing(label String, code Int, input Binary) Nil {
 fn show_url(text String) Nil {
 	out = match url::parse(text) {
 		Ok(u) ->
-			'${u.scheme} host=${u.host} port=${u.port} target=${q(
+			"${u.scheme} host=${u.host} port=${u.port} target=${q(
 				u.target,
-			)} host-field=${q(url::authority(u))}'
-		Err(e) -> 'Err ${string::inspect(e)}'
+			)} host-field=${q(url::authority(u))}"
+		Err(e) -> "Err ${string::inspect(e)}"
 	}
-	println('${text} -> ${out}')
+	println("${text} -> ${out}")
 }
 
 // ---------------------------------------------------------------------------
@@ -201,20 +201,20 @@ fn wire_io(inbox process::Subject(Wire), chunk Int) client::Io {
 
 fn show_exchange(label String, req_url String, method Binary, script Binary, chunk Int) Nil {
 	match url::parse(req_url) {
-		Err(e) -> println('${label}: url Err ${string::inspect(e)}')
+		Err(e) -> println("${label}: url Err ${string::inspect(e)}")
 		Ok(u) -> {
 			inbox = scripted(script)
 			io = wire_io(inbox, chunk)
 			req = client::Request(method: method, url: u, headers: [], body: <<>>)
 			out = match client::send(io, req) {
 				Ok(r) ->
-					'${r.status} reason=${q(
+					"${r.status} reason=${q(
 						r.reason,
-					)} headers=${array::length(r.headers)} body=${q(r.body)}'
-				Err(e) -> 'Err ${string::inspect(e)}'
+					)} headers=${array::length(r.headers)} body=${q(r.body)}"
+				Err(e) -> "Err ${string::inspect(e)}"
 			}
 			stop(inbox)
-			println('${label}: ${out}')
+			println("${label}: ${out}")
 		}
 	}
 }
@@ -222,14 +222,14 @@ fn show_exchange(label String, req_url String, method Binary, script Binary, chu
 fn show_bounded(label String, script Binary, max_body Int) Nil {
 	inbox = scripted(script)
 	io = wire_io(inbox, 65536)
-	u = url::Url(scheme: url::Http, host: 'example.com', port: 80, target: <<'/a'>>)
-	req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+	u = url::Url(scheme: url::Http, host: "example.com", port: 80, target: <<"/a">>)
+	req = client::Request(method: <<"GET">>, url: u, headers: [], body: <<>>)
 	out = match client::send_bounded(io, req, max_body) {
-		Ok(r) -> '${r.status} body=${q(r.body)}'
-		Err(e) -> 'Err ${string::inspect(e)}'
+		Ok(r) -> "${r.status} body=${q(r.body)}"
+		Err(e) -> "Err ${string::inspect(e)}"
 	}
 	stop(inbox)
-	println('${label}: ${out}')
+	println("${label}: ${out}")
 }
 
 // The request head is asserted as bytes: the routing point may not quietly
@@ -242,48 +242,48 @@ fn show_written(
 	body Binary,
 ) Nil {
 	match url::parse(req_url) {
-		Err(e) -> println('${label}: url Err ${string::inspect(e)}')
+		Err(e) -> println("${label}: url Err ${string::inspect(e)}")
 		Ok(u) -> {
-			inbox = scripted(<<'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n'>>)
+			inbox = scripted(<<"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n">>)
 			io = wire_io(inbox, 65536)
 			req = client::Request(method: method, url: u, headers: extra, body: body)
 			outcome = match client::send(io, req) {
-				Ok(r) -> 'sent, got ${r.status}'
-				Err(e) -> 'Err ${string::inspect(e)}'
+				Ok(r) -> "sent, got ${r.status}"
+				Err(e) -> "Err ${string::inspect(e)}"
 			}
 			reply = process::subject()
 			process::send(inbox, Dump(reply))
 			wrote = process::receive(reply)
 			stop(inbox)
-			println('${label}: ${outcome}')
-			println('  wrote: ${q(wrote)}')
+			println("${label}: ${outcome}")
+			println("  wrote: ${q(wrote)}")
 		}
 	}
 }
 
 pub fn main() {
-	println('== status line ==')
-	show_response('minimal', <<'HTTP/1.1 200 OK\r\n\r\n'>>)
-	show_response('http/1.0', <<'HTTP/1.0 404 Not Found\r\n\r\n'>>)
+	println("== status line ==")
+	show_response("minimal", <<"HTTP/1.1 200 OK\r\n\r\n">>)
+	show_response("http/1.0", <<"HTTP/1.0 404 Not Found\r\n\r\n">>)
 	// RFC 9112 §4 allows an empty reason phrase, and a client must ignore its
 	// content either way. Both forms parse; neither is an error.
-	show_response('empty reason after space', <<'HTTP/1.1 204 \r\n\r\n'>>)
-	show_response('no reason and no space', <<'HTTP/1.1 204\r\n\r\n'>>)
-	show_response('reason with spaces', <<'HTTP/1.1 418 I am a teapot\r\n\r\n'>>)
+	show_response("empty reason after space", <<"HTTP/1.1 204 \r\n\r\n">>)
+	show_response("no reason and no space", <<"HTTP/1.1 204\r\n\r\n">>)
+	show_response("reason with spaces", <<"HTTP/1.1 418 I am a teapot\r\n\r\n">>)
 
-	println('')
-	println('== status line rejects ==')
+	println("")
+	println("== status line rejects ==")
 	// TRUNCATED, three ways. Only the first is recoverable: more bytes may still
 	// arrive. The other two are complete lines that cannot be status lines, and
 	// each is REPORTED rather than defaulted to 200.
-	show_response('truncated mid-line (no CRLF yet)', <<'HTTP/1.1 20'>>)
-	show_response('truncated: line ends before the code', <<'HTTP/1.1\r\n\r\n'>>)
-	show_response('truncated: two-digit code', <<'HTTP/1.1 20\r\n\r\n'>>)
-	show_response('code is not digits', <<'HTTP/1.1 2x0 OK\r\n\r\n'>>)
-	show_response('no space after version', <<'HTTP/1.1_200 OK\r\n\r\n'>>)
-	show_response('junk before the reason', <<'HTTP/1.1 200_OK\r\n\r\n'>>)
-	show_response('not HTTP at all', <<'ICY 200 OK\r\n\r\n'>>)
-	show_response('binary junk (a TLS record header)', <<
+	show_response("truncated mid-line (no CRLF yet)", <<"HTTP/1.1 20">>)
+	show_response("truncated: line ends before the code", <<"HTTP/1.1\r\n\r\n">>)
+	show_response("truncated: two-digit code", <<"HTTP/1.1 20\r\n\r\n">>)
+	show_response("code is not digits", <<"HTTP/1.1 2x0 OK\r\n\r\n">>)
+	show_response("no space after version", <<"HTTP/1.1_200 OK\r\n\r\n">>)
+	show_response("junk before the reason", <<"HTTP/1.1 200_OK\r\n\r\n">>)
+	show_response("not HTTP at all", <<"ICY 200 OK\r\n\r\n">>)
+	show_response("binary junk (a TLS record header)", <<
 		22,
 		3,
 		1,
@@ -301,34 +301,34 @@ pub fn main() {
 	// `HTTP/` and a version we do not speak is a DIFFERENT answer from "not
 	// HTTP/1": one means retry with another protocol, the other means this peer is
 	// not speaking HTTP/1 at all.
-	show_response('http/2', <<'HTTP/2.0 200 OK\r\n\r\n'>>)
-	show_response('http/0.9', <<'HTTP/0.9 200 OK\r\n\r\n'>>)
+	show_response("http/2", <<"HTTP/2.0 200 OK\r\n\r\n">>)
+	show_response("http/0.9", <<"HTTP/0.9 200 OK\r\n\r\n">>)
 	// A bare LF inside the reason phrase would split the status line for anything
 	// that re-serialised it.
-	show_response('bare LF in reason', <<'HTTP/1.1 200 O\nK\r\n\r\n'>>)
-	show_response('bare CR in reason', <<'HTTP/1.1 200 O\rK\r\n\r\n'>>)
+	show_response("bare LF in reason", <<"HTTP/1.1 200 O\nK\r\n\r\n">>)
+	show_response("bare CR in reason", <<"HTTP/1.1 200 O\rK\r\n\r\n">>)
 	// The request parser tolerates leading CRLFs (RFC 7230 §3.5). The response
 	// parser must not: a stray CRLF before a status line means the connection has
 	// desynchronised.
-	show_response('leading CRLF is NOT skipped', <<'\r\nHTTP/1.1 200 OK\r\n\r\n'>>)
+	show_response("leading CRLF is NOT skipped", <<"\r\nHTTP/1.1 200 OK\r\n\r\n">>)
 
-	println('')
-	println('== header block: the same grammar as a request head ==')
-	show_response('two fields', <<'HTTP/1.1 200 OK\r\nContent-Length: 3\r\nX-A: b\r\n\r\nabc'>>)
-	show_response('field with no colon', <<'HTTP/1.1 200 OK\r\nContent-Length 3\r\n\r\n'>>)
-	show_response('space before colon', <<'HTTP/1.1 200 OK\r\nContent-Length : 3\r\n\r\n'>>)
-	show_response('obs-fold continuation', <<'HTTP/1.1 200 OK\r\nX-A: b\r\n c\r\n\r\n'>>)
-	show_response('empty field name', <<'HTTP/1.1 200 OK\r\n: b\r\n\r\n'>>)
-	show_response('head not terminated', <<'HTTP/1.1 200 OK\r\nX-A: b\r\n'>>)
+	println("")
+	println("== header block: the same grammar as a request head ==")
+	show_response("two fields", <<"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nX-A: b\r\n\r\nabc">>)
+	show_response("field with no colon", <<"HTTP/1.1 200 OK\r\nContent-Length 3\r\n\r\n">>)
+	show_response("space before colon", <<"HTTP/1.1 200 OK\r\nContent-Length : 3\r\n\r\n">>)
+	show_response("obs-fold continuation", <<"HTTP/1.1 200 OK\r\nX-A: b\r\n c\r\n\r\n">>)
+	show_response("empty field name", <<"HTTP/1.1 200 OK\r\n: b\r\n\r\n">>)
+	show_response("head not terminated", <<"HTTP/1.1 200 OK\r\nX-A: b\r\n">>)
 	// The 64 KiB head cap measures from the status line, exactly as a request
 	// head's does from the request line.
-	big = grow(<<'X-Pad: 0123456789012345678901234567890123456789012345678901234\r\n'>>, 70000)
-	show_response('head over 64 KiB', binary::append(<<'HTTP/1.1 200 OK\r\n'>>, big))
-	show_response('no CRLF anywhere, over cap', grow(<<'HTTP/1.1 200 OKKKKKKK'>>, 70000))
+	big = grow(<<"X-Pad: 0123456789012345678901234567890123456789012345678901234\r\n">>, 70000)
+	show_response("head over 64 KiB", binary::append(<<"HTTP/1.1 200 OK\r\n">>, big))
+	show_response("no CRLF anywhere, over cap", grow(<<"HTTP/1.1 200 OKKKKKKK">>, 70000))
 
-	println('')
-	println('== consumed threads to the body ==')
-	framed = <<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello-and-then-some'>>
+	println("")
+	println("== consumed threads to the body ==")
+	framed = <<"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello-and-then-some">>
 	parsed = h1::parse_response(framed, 0)
 	match parsed {
 		h1::ResponseDone(_, _, _, _, _, consumed) -> {
@@ -338,271 +338,271 @@ pub fn main() {
 			// as an error rather than as an empty window.
 			body = match binary::slice_bytes(framed, consumed, 5) {
 				Ok(v) -> q(v)
-				Err(Nil) -> 'OUT OF RANGE'
+				Err(Nil) -> "OUT OF RANGE"
 			}
-			println('body starts at ${consumed}: ${body}')
+			println("body starts at ${consumed}: ${body}")
 		}
-		h1::ResponseNeedMore | h1::ResponseBad(_) -> println('unexpected: ${parsed}')
+		h1::ResponseNeedMore | h1::ResponseBad(_) -> println("unexpected: ${parsed}")
 	}
 
-	println('')
-	println('== response framing ==')
+	println("")
+	println("== response framing ==")
 	// THE ASYMMETRY: no framing field means "no body" on a request and "until the
 	// connection closes" on a response. Reusing h1::framing here would truncate
 	// every close-framed reply to empty.
-	show_response_framing('no framing fields -> until close', 200, <<'HTTP/1.1 200 OK\r\n\r\n'>>)
-	show_response_framing('content-length', 200, <<'HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n'>>)
-	show_response_framing('chunked', 200, <<
-		'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n',
+	show_response_framing("no framing fields -> until close", 200, <<"HTTP/1.1 200 OK\r\n\r\n">>)
+	show_response_framing("content-length", 200, <<"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n">>)
+	show_response_framing("chunked", 200, <<
+		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
 	>>)
 	// 1xx / 204 / 304 have no body whatever the fields claim.
-	show_response_framing('204 with a content-length', 204, <<
-		'HTTP/1.1 204 No Content\r\nContent-Length: 9\r\n\r\n',
+	show_response_framing("204 with a content-length", 204, <<
+		"HTTP/1.1 204 No Content\r\nContent-Length: 9\r\n\r\n",
 	>>)
-	show_response_framing('304 with a content-length', 304, <<
-		'HTTP/1.1 304 Not Modified\r\nContent-Length: 9\r\n\r\n',
+	show_response_framing("304 with a content-length", 304, <<
+		"HTTP/1.1 304 Not Modified\r\nContent-Length: 9\r\n\r\n",
 	>>)
-	show_response_framing('100 continue', 100, <<'HTTP/1.1 100 Continue\r\n\r\n'>>)
-	show_response_framing('199 is still 1xx', 199, <<
-		'HTTP/1.1 199 Early\r\nContent-Length: 4\r\n\r\n',
+	show_response_framing("100 continue", 100, <<"HTTP/1.1 100 Continue\r\n\r\n">>)
+	show_response_framing("199 is still 1xx", 199, <<
+		"HTTP/1.1 199 Early\r\nContent-Length: 4\r\n\r\n",
 	>>)
-	show_response_framing('200 is not', 200, <<'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n'>>)
+	show_response_framing("200 is not", 200, <<"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n">>)
 	// The smuggling conflicts are rejected once, in h1::framing, for both
 	// directions — a response cannot claim both framings either.
-	show_response_framing('content-length AND chunked', 200, <<
-		'HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n',
+	show_response_framing("content-length AND chunked", 200, <<
+		"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n",
 	>>)
-	show_response_framing('unknown transfer coding', 200, <<
-		'HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n',
+	show_response_framing("unknown transfer coding", 200, <<
+		"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n",
 	>>)
-	show_response_framing('two disagreeing content-lengths', 200, <<
-		'HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\n',
+	show_response_framing("two disagreeing content-lengths", 200, <<
+		"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\n",
 	>>)
 
-	println('')
-	println('== url ==')
-	show_url('http://example.com')
-	show_url('https://example.com')
-	show_url('https://example.com/')
-	show_url('http://example.com/a/b?q=1')
-	show_url('http://example.com?q=1')
-	show_url('http://example.com/a#frag')
-	show_url('http://example.com/a?q=1#frag')
-	show_url('http://example.com:8080/a')
-	show_url('https://example.com:443/a')
-	show_url('https://example.com:8443/a')
-	show_url('HTTPS://Example.COM/a')
-	show_url('http://[::1]:9000/a')
-	show_url('http://[::1]/a')
+	println("")
+	println("== url ==")
+	show_url("http://example.com")
+	show_url("https://example.com")
+	show_url("https://example.com/")
+	show_url("http://example.com/a/b?q=1")
+	show_url("http://example.com?q=1")
+	show_url("http://example.com/a#frag")
+	show_url("http://example.com/a?q=1#frag")
+	show_url("http://example.com:8080/a")
+	show_url("https://example.com:443/a")
+	show_url("https://example.com:8443/a")
+	show_url("HTTPS://Example.COM/a")
+	show_url("http://[::1]:9000/a")
+	show_url("http://[::1]/a")
 
-	println('')
-	println('== url rejects ==')
-	show_url('/just/a/path')
-	show_url('example.com/a')
-	show_url('ftp://example.com/a')
-	show_url('ws://example.com/a')
-	show_url('http:///a')
-	show_url('http://:8080/a')
-	show_url('http://example.com:/a')
-	show_url('http://example.com:0/a')
-	show_url('http://example.com:65536/a')
-	show_url('http://example.com:-1/a')
-	show_url('http://example.com:80x/a')
-	show_url('http://user:pw@example.com/a')
-	show_url('http://[::1/a')
-	show_url('http://[::1]x/a')
+	println("")
+	println("== url rejects ==")
+	show_url("/just/a/path")
+	show_url("example.com/a")
+	show_url("ftp://example.com/a")
+	show_url("ws://example.com/a")
+	show_url("http:///a")
+	show_url("http://:8080/a")
+	show_url("http://example.com:/a")
+	show_url("http://example.com:0/a")
+	show_url("http://example.com:65536/a")
+	show_url("http://example.com:-1/a")
+	show_url("http://example.com:80x/a")
+	show_url("http://user:pw@example.com/a")
+	show_url("http://[::1/a")
+	show_url("http://[::1]x/a")
 
-	println('')
-	println('== client round trips (in-memory transport) ==')
+	println("")
+	println("== client round trips (in-memory transport) ==")
 	show_exchange(
-		'content-length body',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello'>>,
+		"content-length body",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello">>,
 		65536,
 	)
 	// One byte per read: every incremental path in the client runs.
 	show_exchange(
-		'content-length body, one byte per read',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello'>>,
+		"content-length body, one byte per read",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello">>,
 		1,
 	)
 	show_exchange(
-		'chunked body',
-		'http://example.com/a',
-		<<'GET'>>,
+		"chunked body",
+		"http://example.com/a",
+		<<"GET">>,
 		<<
-			'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n',
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
 		>>,
 		3,
 	)
 	show_exchange(
-		'close-framed body',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 200 OK\r\n\r\nno framing fields here'>>,
+		"close-framed body",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 200 OK\r\n\r\nno framing fields here">>,
 		7,
 	)
 	// A HEAD response has a Content-Length and NO body. Reading one would consume
 	// the next response off a reused connection.
 	show_exchange(
-		'HEAD: content-length but no body',
-		'http://example.com/a',
-		<<'HEAD'>>,
-		<<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n'>>,
+		"HEAD: content-length but no body",
+		"http://example.com/a",
+		<<"HEAD">>,
+		<<"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n">>,
 		65536,
 	)
 	show_exchange(
-		'204 has no body whatever it says',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n'>>,
+		"204 has no body whatever it says",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n">>,
 		65536,
 	)
 	// An unsolicited interim response is dropped, not returned as the answer.
 	show_exchange(
-		'100 Continue before the real reply',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nhi'>>,
+		"100 Continue before the real reply",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nhi">>,
 		65536,
 	)
 	show_exchange(
-		'two interim responses',
-		'http://example.com/a',
-		<<'GET'>>,
+		"two interim responses",
+		"http://example.com/a",
+		<<"GET">>,
 		<<
-			'HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi',
+			"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi",
 		>>,
 		65536,
 	)
 
-	println('')
-	println('== client round trips that must FAIL ==')
+	println("")
+	println("== client round trips that must FAIL ==")
 	// A body SHORTER than Content-Length. The peer closed with two of five bytes
 	// delivered: reported, never returned as a two-byte body.
 	show_exchange(
-		'body shorter than content-length',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe'>>,
+		"body shorter than content-length",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe">>,
 		65536,
 	)
 	show_exchange(
-		'peer closes mid-head',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 200 OK\r\nContent-Le'>>,
+		"peer closes mid-head",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 200 OK\r\nContent-Le">>,
 		65536,
 	)
-	show_exchange('peer closes with nothing at all', 'http://example.com/a', <<'GET'>>, <<>>, 65536)
+	show_exchange("peer closes with nothing at all", "http://example.com/a", <<"GET">>, <<>>, 65536)
 	show_exchange(
-		'malformed status line',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 2x0 OK\r\nContent-Length: 0\r\n\r\n'>>,
-		65536,
-	)
-	show_exchange(
-		'header with no colon',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 200 OK\r\nContent-Length 0\r\n\r\n'>>,
+		"malformed status line",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 2x0 OK\r\nContent-Length: 0\r\n\r\n">>,
 		65536,
 	)
 	show_exchange(
-		'framing conflict',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\nhi'>>,
+		"header with no colon",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 200 OK\r\nContent-Length 0\r\n\r\n">>,
 		65536,
 	)
 	show_exchange(
-		'chunked body with a lying size',
-		'http://example.com/a',
-		<<'GET'>>,
-		<<'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloTHISISNOTCRLF'>>,
+		"framing conflict",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\nhi">>,
+		65536,
+	)
+	show_exchange(
+		"chunked body with a lying size",
+		"http://example.com/a",
+		<<"GET">>,
+		<<"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloTHISISNOTCRLF">>,
 		65536,
 	)
 
-	println('')
-	println('== the body budget ==')
+	println("")
+	println("== the body budget ==")
 
 	// Refused on the ADVERTISED length, before a byte of the body is read.
 	show_bounded(
-		'content-length over budget',
-		<<'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n'>>,
+		"content-length over budget",
+		<<"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n">>,
 		10,
 	)
 	show_bounded(
-		'content-length exactly at budget',
-		<<'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabcd'>>,
+		"content-length exactly at budget",
+		<<"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabcd">>,
 		64,
 	)
 	// A close-framed body has no advertised length, so the budget stops the read.
 	show_bounded(
-		'close-framed body over budget',
-		binary::append(<<'HTTP/1.1 200 OK\r\n\r\n'>>, grow(<<'padpadpa'>>, 200)),
+		"close-framed body over budget",
+		binary::append(<<"HTTP/1.1 200 OK\r\n\r\n">>, grow(<<"padpadpa">>, 200)),
 		64,
 	)
 
-	println('')
-	println('== what the client actually wrote ==')
+	println("")
+	println("== what the client actually wrote ==")
 
-	show_written('GET /', 'http://example.com/', <<'GET'>>, [], <<>>)
-	show_written('GET with query and port', 'http://example.com:8080/a?q=1', <<'GET'>>, [], <<>>)
-	show_written('GET https default port omits it', 'https://example.com/a', <<'GET'>>, [], <<>>)
-	show_written('GET ipv6 host is bracketed', 'http://[::1]:9000/a', <<'GET'>>, [], <<>>)
+	show_written("GET /", "http://example.com/", <<"GET">>, [], <<>>)
+	show_written("GET with query and port", "http://example.com:8080/a?q=1", <<"GET">>, [], <<>>)
+	show_written("GET https default port omits it", "https://example.com/a", <<"GET">>, [], <<>>)
+	show_written("GET ipv6 host is bracketed", "http://[::1]:9000/a", <<"GET">>, [], <<>>)
 	show_written(
-		'POST with a body',
-		'http://example.com/e',
-		<<'POST'>>,
-		[headers::Header(name: <<'Content-Type'>>, value: <<'text/plain'>>)],
-		<<'hi'>>,
+		"POST with a body",
+		"http://example.com/e",
+		<<"POST">>,
+		[headers::Header(name: <<"Content-Type">>, value: <<"text/plain">>)],
+		<<"hi">>,
 	)
 	// A caller-set Content-Length is REPLACED, not duplicated: two disagreeing
 	// Content-Length fields is the request-smuggling vector.
 	show_written(
-		'caller-set Content-Length is replaced',
-		'http://example.com/e',
-		<<'POST'>>,
-		[headers::Header(name: <<'content-length'>>, value: <<'999'>>)],
-		<<'hi'>>,
+		"caller-set Content-Length is replaced",
+		"http://example.com/e",
+		<<"POST">>,
+		[headers::Header(name: <<"content-length">>, value: <<"999">>)],
+		<<"hi">>,
 	)
 	show_written(
-		'caller-set Host is replaced',
-		'http://example.com/e',
-		<<'GET'>>,
-		[headers::Header(name: <<'Host'>>, value: <<'evil.example'>>)],
+		"caller-set Host is replaced",
+		"http://example.com/e",
+		<<"GET">>,
+		[headers::Header(name: <<"Host">>, value: <<"evil.example">>)],
 		<<>>,
 	)
 	// A header value carrying CRLF would split the request head into two
 	// requests at any proxy. Refused before the connection is even used.
 	show_written(
-		'CRLF in a header value is refused',
-		'http://example.com/e',
-		<<'GET'>>,
-		[headers::Header(name: <<'X-A'>>, value: <<'b\r\nX-Injected: yes'>>)],
+		"CRLF in a header value is refused",
+		"http://example.com/e",
+		<<"GET">>,
+		[headers::Header(name: <<"X-A">>, value: <<"b\r\nX-Injected: yes">>)],
 		<<>>,
 	)
 	show_written(
-		'a header name that is not a token is refused',
-		'http://example.com/e',
-		<<'GET'>>,
-		[headers::Header(name: <<'X A'>>, value: <<'b'>>)],
+		"a header name that is not a token is refused",
+		"http://example.com/e",
+		<<"GET">>,
+		[headers::Header(name: <<"X A">>, value: <<"b">>)],
 		<<>>,
 	)
 
-	println('')
-	println('== url errors reach the client surface ==')
-	match client::get('nonsense') {
-		Ok(_) -> println('client::get of a non-URL: Ok?!')
-		Err(e) -> println('client::get of a non-URL: Err ${string::inspect(e)}')
+	println("")
+	println("== url errors reach the client surface ==")
+	match client::get("nonsense") {
+		Ok(_) -> println("client::get of a non-URL: Ok?!")
+		Err(e) -> println("client::get of a non-URL: Err ${string::inspect(e)}")
 	}
-	match client::get('ftp://example.com/a') {
-		Ok(_) -> println('client::get of ftp: Ok?!')
-		Err(e) -> println('client::get of ftp: Err ${string::inspect(e)}')
+	match client::get("ftp://example.com/a") {
+		Ok(_) -> println("client::get of ftp: Ok?!")
+		Err(e) -> println("client::get of ftp: Err ${string::inspect(e)}")
 	}
 }

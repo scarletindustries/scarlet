@@ -19,46 +19,46 @@
 import scarlet/int
 
 fn ok(b Bool) String {
-	if b { 'PASS' } else { 'FAIL' }
+	if b { "PASS" } else { "FAIL" }
 }
 
 pub fn main() {
-	println('hex: ${0xFF} ${0xff} ${0X10}')
-	println('bin: ${0b1010} ${0B11} ${0b0}')
-	println('sep: ${0xDE_AD_BE_EF} ${0b1111_0000}')
-	println('eq: ${ok(0xFF == 255)} ${ok(0b1111 == 15)} ${ok(0xDE_AD_BE_EF == 3735928559)}')
-	println('neg: ${-0xFF} ${ok(-0xFF == -255)} ${ok(-0b1010 == -10)}')
+	println("hex: ${0xFF} ${0xff} ${0X10}")
+	println("bin: ${0b1010} ${0B11} ${0b0}")
+	println("sep: ${0xDE_AD_BE_EF} ${0b1111_0000}")
+	println("eq: ${ok(0xFF == 255)} ${ok(0b1111 == 15)} ${ok(0xDE_AD_BE_EF == 3735928559)}")
+	println("neg: ${-0xFF} ${ok(-0xFF == -255)} ${ok(-0b1010 == -10)}")
 	println(
-		'max: ${ok(
+		"max: ${ok(
 			0x7FFFFFFFFFFFFFFF == int::max_value,
-		)} ${ok(0x7FFF_FFFF_FFFF_FFFF == 9223372036854775807)}',
+		)} ${ok(0x7FFF_FFFF_FFFF_FFFF == 9223372036854775807)}",
 	)
 
 	// 2^50 is the first boxed Int; a hex spelling must not notice.
 	boxed = 0x4000000000000
-	println('boxed: ${boxed} ${ok(boxed == 1125899906842624)} ${ok(boxed - 1 == 0x3FFFFFFFFFFFF)}')
+	println("boxed: ${boxed} ${ok(boxed == 1125899906842624)} ${ok(boxed - 1 == 0x3FFFFFFFFFFFF)}")
 
 	println(
-		'match: ${match 255 {
-			0xFF -> 'hex'
-			_ -> 'no'
+		"match: ${match 255 {
+			0xFF -> "hex"
+			_ -> "no"
 		}} ${match -255 {
-			-0xFF -> 'neg'
-			_ -> 'no'
+			-0xFF -> "neg"
+			_ -> "no"
 		}} ${match 10 {
-			0b1010 -> 'bin'
-			_ -> 'no'
-		}}',
+			0b1010 -> "bin"
+			_ -> "no"
+		}}",
 	)
 	println(
-		'min pattern: ${match int::min_value {
-			-0x8000000000000000 -> 'min'
-			_ -> 'no'
-		}}',
+		"min pattern: ${match int::min_value {
+			-0x8000000000000000 -> "min"
+			_ -> "no"
+		}}",
 	)
 
 	// The WebSocket masking key the bitwise suite had to write as 3735928559.
 	key = 0xDEADBEEF
 	mask_byte = int::bitwise_and(int::bitwise_shift_right(key, 24), 0xFF)
-	println('ws: ${key} ${mask_byte} ${ok(mask_byte == 0xDE)}')
+	println("ws: ${key} ${mask_byte} ${ok(mask_byte == 0xDE)}")
 }

@@ -696,7 +696,7 @@ pub struct BinSegmentPat {
 }
 
 impl BinSegmentPat {
-    /// The string of a `<<'literal'>>` (Utf8 string-literal) pattern segment.
+    /// The string of a `<<"literal">>` (Utf8 string-literal) pattern segment.
     pub fn utf8_literal(&self) -> Option<&str> {
         if !matches!(self.spec, BinSpec::Utf8) {
             return None;

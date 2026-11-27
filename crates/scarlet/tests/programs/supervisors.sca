@@ -9,9 +9,9 @@ import scarlet/process
 
 fn check(name String, ok Bool) Nil {
 	if ok {
-		println('PASS ${name}')
+		println("PASS ${name}")
 	} else {
-		println('FAIL ${name}')
+		println("FAIL ${name}")
 	}
 }
 
@@ -28,7 +28,7 @@ type Req {
 // the order in which a supervisor starts and stops things is observable.
 fn reporting(name String, log process::Subject(String)) fn(process::Subject(Req)) Nil {
 	fn(inbox) {
-		process::send(log, 'start ${name}')
+		process::send(log, "start ${name}")
 		serve(inbox, name, log)
 	}
 }
@@ -39,7 +39,7 @@ fn serve(inbox process::Subject(Req), name String, log process::Subject(String))
 			process::send(reply, process::self())
 			serve(inbox, name, log)
 		}
-		Close -> process::send(log, 'close ${name}')
+		Close -> process::send(log, "close ${name}")
 	}
 }
 
@@ -150,26 +150,26 @@ fn scenarios() Nil {
 	app = process::supervisor(process::OneForOne(restarts: 100, within_ms: 60000))
 
 	// A permanent worker comes back at the same address.
-	a = process::permanent(app, reporting('a', log))
+	a = process::permanent(app, reporting("a", log))
 	_ = take(log, 1, [])
 	a1 = whoami(a)
 	process::kill(a1)
 	a2 = await_restart(a, a1)
-	check('a killed permanent worker is restarted at the same address', a1 != a2)
-	check('and says so when it starts', take(log, 1, []) == ['start a'])
+	check("a killed permanent worker is restarted at the same address", a1 != a2)
+	check("and says so when it starts", take(log, 1, []) == ["start a"])
 	info = process::info(process::supervised(a))
-	check('info counts the restart', info.restarts == 1)
-	check('info names the policy', info.kind == process::Worker(process::Permanent))
-	check('info carries the current pid', info.pid == Some(a2))
+	check("info counts the restart", info.restarts == 1)
+	check("info names the policy", info.kind == process::Worker(process::Permanent))
+	check("info carries the current pid", info.pid == Some(a2))
 
 	// A transient worker that returns is finished.
-	t = process::transient(app, reporting('t', log))
-	check('t started', take(log, 1, []) == ['start t'])
+	t = process::transient(app, reporting("t", log))
+	check("t started", take(log, 1, []) == ["start t"])
 	entry = process::supervised(t)
 	process::send(t, Close)
-	check('t closed', take(log, 1, []) == ['close t'])
-	check('a returned transient worker is gone', await_gone(entry, 200))
-	check('the supervisor forgot it', process::count(app.supervised) == 1)
+	check("t closed", take(log, 1, []) == ["close t"])
+	check("a returned transient worker is gone", await_gone(entry, 200))
+	check("the supervisor forgot it", process::count(app.supervised) == 1)
 
 	// One-for-all: siblings are closed in reverse order, then all restart.
 	group = process::supervisor_in(app, process::OneForAll(restarts: 10, within_ms: 60000))
@@ -177,19 +177,19 @@ fn scenarios() Nil {
 		group,
 		process::Permanent,
 		process::Ask(Close, grace_ms: 1000),
-		reporting('g1', log),
+		reporting("g1", log),
 	)
 	g2 = process::worker(
 		group,
 		process::Permanent,
 		process::Ask(Close, grace_ms: 1000),
-		reporting('g2', log),
+		reporting("g2", log),
 	)
 	g3 = process::worker(
 		group,
 		process::Permanent,
 		process::Ask(Close, grace_ms: 1000),
-		reporting('g3', log),
+		reporting("g3", log),
 	)
 	_ = take(log, 3, [])
 	g1_pid = whoami(g1)
@@ -197,32 +197,32 @@ fn scenarios() Nil {
 	g3_pid = whoami(g3)
 	process::kill(g1_pid)
 	check(
-		'one-for-all closes the survivors last-declared first',
-		take(log, 2, []) == ['close g3', 'close g2'],
+		"one-for-all closes the survivors last-declared first",
+		take(log, 2, []) == ["close g3", "close g2"],
 	)
 	check(
-		'then starts everything again',
-		same_set(take(log, 3, []), ['start g1', 'start g2', 'start g3']),
+		"then starts everything again",
+		same_set(take(log, 3, []), ["start g1", "start g2", "start g3"]),
 	)
 	check(
-		'every sibling is a new process',
+		"every sibling is a new process",
 		await_restart(g2, g2_pid) != g2_pid && await_restart(g3, g3_pid) != g3_pid,
 	)
-	check('at the same addresses', whoami(g1) != g1_pid)
+	check("at the same addresses", whoami(g1) != g1_pid)
 	check(
-		'the nested supervisor is a child of the application',
+		"the nested supervisor is a child of the application",
 		process::parent(group.supervised) == app.supervised,
 	)
 	check(
-		'and the worker a child of the nested supervisor',
+		"and the worker a child of the nested supervisor",
 		process::parent(process::supervised(g2)) == group.supervised,
 	)
 	check(
-		'the nested supervisor reports its strategy',
+		"the nested supervisor reports its strategy",
 		process::info(group.supervised).kind == process::SupervisorOf(process::OneForAll(10, 60000)),
 	)
 	check(
-		'a top-level supervisor is declared under a plain process',
+		"a top-level supervisor is declared under a plain process",
 		process::info(process::parent(app.supervised)).kind == process::Process,
 	)
 
@@ -232,33 +232,33 @@ fn scenarios() Nil {
 		rest,
 		process::Permanent,
 		process::Ask(Close, grace_ms: 1000),
-		reporting('r1', log),
+		reporting("r1", log),
 	)
 	r2 = process::worker(
 		rest,
 		process::Permanent,
 		process::Ask(Close, grace_ms: 1000),
-		reporting('r2', log),
+		reporting("r2", log),
 	)
 	r3 = process::worker(
 		rest,
 		process::Permanent,
 		process::Ask(Close, grace_ms: 1000),
-		reporting('r3', log),
+		reporting("r3", log),
 	)
 	_ = take(log, 3, [])
 	r1_pid = whoami(r1)
 	r2_pid = whoami(r2)
 	process::kill(r2_pid)
-	check('rest-for-one closes only the later siblings', take(log, 1, []) == ['close r3'])
+	check("rest-for-one closes only the later siblings", take(log, 1, []) == ["close r3"])
 	check(
-		'and restarts from the dead one onward',
-		same_set(take(log, 2, []), ['start r2', 'start r3']),
+		"and restarts from the dead one onward",
+		same_set(take(log, 2, []), ["start r2", "start r3"]),
 	)
 	_ = await_restart(r2, r2_pid)
-	check('the earlier sibling was not touched', whoami(r1) == r1_pid)
+	check("the earlier sibling was not touched", whoami(r1) == r1_pid)
 	check(
-		'children lists every worker',
+		"children lists every worker",
 		array::map(
 			process::children(rest.supervised),
 			fn(c) c == process::supervised(r1) ||
@@ -270,96 +270,96 @@ fn scenarios() Nil {
 
 	// A factory has one member per key, restarts it in place and frees the key on exit.
 	rooms = process::factory(app, process::Restarted(restarts: 10, within_ms: 60000), member)
-	lobby = process::lookup_or_start(rooms, 'lobby')
-	check('a member knows its key', member_key(lobby) == 'lobby')
-	check('the same key finds the same member', process::lookup_or_start(rooms, 'lobby') == lobby)
-	check('lookup finds it too', process::lookup(rooms, 'lobby') == Some(lobby))
-	check('another key is another member', process::lookup_or_start(rooms, 'ops') != lobby)
-	check('an unknown key is nothing', process::lookup(rooms, 'nowhere') == None)
-	check('the factory counts its members', process::count(rooms.supervised) == 2)
+	lobby = process::lookup_or_start(rooms, "lobby")
+	check("a member knows its key", member_key(lobby) == "lobby")
+	check("the same key finds the same member", process::lookup_or_start(rooms, "lobby") == lobby)
+	check("lookup finds it too", process::lookup(rooms, "lobby") == Some(lobby))
+	check("another key is another member", process::lookup_or_start(rooms, "ops") != lobby)
+	check("an unknown key is nothing", process::lookup(rooms, "nowhere") == None)
+	check("the factory counts its members", process::count(rooms.supervised) == 2)
 	check(
-		'and reports its kind',
+		"and reports its kind",
 		process::info(rooms.supervised).kind == process::FactoryOf(process::Restarted(10, 60000)),
 	)
 	lobby_pid = member_pid(lobby)
 	process::kill(lobby_pid)
 	check(
-		'a killed member is restarted at its address',
+		"a killed member is restarted at its address",
 		await_member_restart(lobby, lobby_pid) != lobby_pid,
 	)
-	check('with its key', member_key(lobby) == 'lobby')
+	check("with its key", member_key(lobby) == "lobby")
 	process::send(lobby, Done)
-	check('a member that returns is done', await_count(rooms.supervised, 1, 200))
-	check('which frees its key', process::lookup(rooms, 'lobby') == None)
-	check('so the next request makes a new one', process::lookup_or_start(rooms, 'lobby') != lobby)
+	check("a member that returns is done", await_count(rooms.supervised, 1, 200))
+	check("which frees its key", process::lookup(rooms, "lobby") == None)
+	check("so the next request makes a new one", process::lookup_or_start(rooms, "lobby") != lobby)
 
 	// Disposable members made without keys, which is what a server's connections are.
 	jobs = process::factory(app, process::Disposable, member)
-	j1 = process::start_in(jobs, 'one')
-	j2 = process::start_in(jobs, 'two')
-	check('unkeyed members are counted', process::count(jobs.supervised) == 2)
-	check('and receive their argument', member_key(j1) == 'one' && member_key(j2) == 'two')
-	check('but are not in the key index', process::lookup(jobs, 'one') == None)
+	j1 = process::start_in(jobs, "one")
+	j2 = process::start_in(jobs, "two")
+	check("unkeyed members are counted", process::count(jobs.supervised) == 2)
+	check("and receive their argument", member_key(j1) == "one" && member_key(j2) == "two")
+	check("but are not in the key index", process::lookup(jobs, "one") == None)
 	process::send(j1, Done)
-	check('one finishing leaves the other', await_count(jobs.supervised, 1, 200))
+	check("one finishing leaves the other", await_count(jobs.supervised, 1, 200))
 	check(
-		'a supervisor value reports its own kind',
+		"a supervisor value reports its own kind",
 		process::info(app.supervised).kind == process::SupervisorOf(process::OneForOne(100, 60000)),
 	)
 	check(
-		'the application holds every subtree declared into it',
+		"the application holds every subtree declared into it",
 		process::count(app.supervised) == 5,
 	)
 	check(
-		'the declaring process holds the application',
+		"the declaring process holds the application",
 		process::count(process::parent(app.supervised)) == 1,
 	)
-	check('walking up stops at a fixed point', {
+	check("walking up stops at a fixed point", {
 		main_entry = process::parent(app.supervised)
 		process::parent(main_entry) == main_entry
 	})
-	check('shutdown by Kill is the default', {
-		k = process::worker(app, process::Transient, process::Kill, reporting('k', log))
+	check("shutdown by Kill is the default", {
+		k = process::worker(app, process::Transient, process::Kill, reporting("k", log))
 		_ = take(log, 1, [])
 		process::send(k, Close)
-		take(log, 1, []) == ['close k']
+		take(log, 1, []) == ["close k"]
 	})
 
 	// A watch reports every exit at a place, across restarts, then its removal.
 	events = process::subject()
-	w = process::permanent(app, reporting('w', log))
+	w = process::permanent(app, reporting("w", log))
 	_ = take(log, 1, [])
 	place = process::supervised(w)
 	watch = process::watch(place, events, fn(e) e)
 	process::kill(whoami(w))
 	first = process::receive(events)
 	check(
-		'a watch reports the exit',
+		"a watch reports the exit",
 		first.supervised == place && first.ended == process::Exited(process::Killed),
 	)
-	check('and that it was restarted on the spot', first.status == process::Running)
+	check("and that it was restarted on the spot", first.status == process::Running)
 	_ = take(log, 1, [])
 	process::kill(whoami(w))
 	second = process::receive(events)
-	check('a watch survives the restart', second.status == process::Running)
+	check("a watch survives the restart", second.status == process::Running)
 	_ = take(log, 1, [])
 	process::unwatch(watch)
 	process::kill(whoami(w))
 	_ = take(log, 1, [])
-	check('unwatch stops the reports', process::receive_within(events, 30) == Err(Nil))
+	check("unwatch stops the reports", process::receive_within(events, 30) == Err(Nil))
 
 	// A transient worker that returns gives one report, and the place is gone.
-	v = process::transient(app, reporting('v', log))
+	v = process::transient(app, reporting("v", log))
 	_ = take(log, 1, [])
 	_ = process::watch(process::supervised(v), events, fn(e) e)
 	process::send(v, Close)
 	_ = take(log, 1, [])
 	last = process::receive(events)
 	check(
-		'a final exit reports Gone',
+		"a final exit reports Gone",
 		last.status == process::Gone && last.ended == process::Exited(process::Normal),
 	)
-	check('watching a place that is gone reports so at once', {
+	check("watching a place that is gone reports so at once", {
 		_ = process::watch(process::supervised(v), events, fn(e) e)
 		exit = process::receive(events)
 		exit.ended == process::Exited(process::NoProcess) && exit.status == process::Gone
@@ -374,12 +374,12 @@ fn scenarios() Nil {
 		process::receive(mine)
 	})
 	helper_place = process::supervised(process::receive(handoff))
-	check('a plain subject places its owner', process::info(helper_place).kind == process::Process)
+	check("a plain subject places its owner", process::info(helper_place).kind == process::Process)
 	_ = process::watch(helper_place, events, fn(e) e)
 	process::kill(helper)
 	exit = process::receive(events)
 	check(
-		'a plain process reports its one exit',
+		"a plain process reports its one exit",
 		exit.ended == process::Exited(process::Killed) && exit.status == process::Gone,
 	)
 
@@ -391,15 +391,15 @@ fn scenarios() Nil {
 		process::Ask(Close, grace_ms: 5000),
 		slow_worker(log),
 	)
-	trigger = process::permanent(pair, reporting('trigger', log))
+	trigger = process::permanent(pair, reporting("trigger", log))
 	_ = take(log, 2, [])
 	// Queue up slow work, then have the group stop the slow worker: the
 	// close message overtakes the backlog, so it closes having done at most
 	// the job it was in the middle of.
 	array::each([1, 2, 3, 4, 5, 6, 7, 8], fn(_) process::send(slow, Whoami(process::subject())))
 	process::kill(whoami(trigger))
-	check('the stop message overtakes queued work', match take(log, 1, []) {
-		['closed after 0 jobs'] | ['closed after 1 jobs'] -> True
+	check("the stop message overtakes queued work", match take(log, 1, []) {
+		["closed after 0 jobs"] | ["closed after 1 jobs"] -> True
 		_ -> False
 	})
 }
@@ -408,7 +408,7 @@ fn scenarios() Nil {
 // when closed; each request takes a while, so a backlog builds up.
 fn slow_worker(log process::Subject(String)) fn(process::Subject(Req)) Nil {
 	fn(inbox) {
-		process::send(log, 'start slow')
+		process::send(log, "start slow")
 		slow_loop(inbox, log, 0)
 	}
 }
@@ -420,7 +420,7 @@ fn slow_loop(inbox process::Subject(Req), log process::Subject(String), jobs Int
 			process::send(reply, process::self())
 			slow_loop(inbox, log, jobs + 1)
 		}
-		Close -> process::send(log, 'closed after ${jobs} jobs')
+		Close -> process::send(log, "closed after ${jobs} jobs")
 	}
 }
 
@@ -447,5 +447,5 @@ pub fn main() {
 		process::kill(process::self())
 	})
 	process::receive(done)
-	println('done')
+	println("done")
 }

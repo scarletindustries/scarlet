@@ -16,7 +16,7 @@ pub fn row(t units::Celsius, cells Array(String)) String {
 	match cells {
 		[] -> units::show(t)
 		[first, ..rest] ->
-			array::fold(rest, pad(units::show(t)) + first, fn(line, cell) line + ' = ' + cell)
+			array::fold(rest, pad(units::show(t)) + first, fn(line, cell) line + " = " + cell)
 	}
 }
 
@@ -25,6 +25,6 @@ fn pad(cell String) String {
 	if string::length(cell) >= COLUMN {
 		cell
 	} else {
-		pad(cell + ' ')
+		pad(cell + " ")
 	}
 }

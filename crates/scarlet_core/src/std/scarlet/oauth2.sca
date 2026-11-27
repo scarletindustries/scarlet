@@ -52,20 +52,20 @@ fn texts(values Array(String)) json::Json {
  * /.well-known/oauth-protected-resource. */
 pub fn resource_metadata(resource_uri String, auth_server String, scopes Array(String)) json::Json {
 	json::Object([
-		('resource', json::Str(resource_uri)),
-		('authorization_servers', json::List([json::Str(auth_server)])),
-		('scopes_supported', texts(scopes)),
-		('bearer_methods_supported', json::List([json::Str('header')])),
+		("resource", json::Str(resource_uri)),
+		("authorization_servers", json::List([json::Str(auth_server)])),
+		("scopes_supported", texts(scopes)),
+		("bearer_methods_supported", json::List([json::Str("header")])),
 	])
 }
 
 /** Builds the `WWW-Authenticate` value for a 401 (RFC 6750 §3). It leaves
  * `scope` out when it's empty. */
 pub fn challenge(metadata_url String, scope String) String {
-	base = 'Bearer resource_metadata="${metadata_url}"'
+	base = "Bearer resource_metadata=\"${metadata_url}\""
 	match scope {
-		'' -> base
-		_ -> '${base}, scope="${scope}"'
+		"" -> base
+		_ -> "${base}, scope=\"${scope}\""
 	}
 }
 
@@ -74,15 +74,15 @@ pub fn challenge(metadata_url String, scope String) String {
  * /.well-known/oauth-authorization-server. */
 pub fn metadata(issuer String, scopes Array(String)) json::Json {
 	json::Object([
-		('issuer', json::Str(issuer)),
-		('authorization_endpoint', json::Str('${issuer}/oauth/authorize')),
-		('token_endpoint', json::Str('${issuer}/oauth/token')),
-		('registration_endpoint', json::Str('${issuer}/oauth/register')),
-		('response_types_supported', json::List([json::Str('code')])),
-		('grant_types_supported', json::List([json::Str('authorization_code')])),
-		('code_challenge_methods_supported', json::List([json::Str('S256')])),
-		('token_endpoint_auth_methods_supported', json::List([json::Str('none')])),
-		('scopes_supported', texts(scopes)),
+		("issuer", json::Str(issuer)),
+		("authorization_endpoint", json::Str("${issuer}/oauth/authorize")),
+		("token_endpoint", json::Str("${issuer}/oauth/token")),
+		("registration_endpoint", json::Str("${issuer}/oauth/register")),
+		("response_types_supported", json::List([json::Str("code")])),
+		("grant_types_supported", json::List([json::Str("authorization_code")])),
+		("code_challenge_methods_supported", json::List([json::Str("S256")])),
+		("token_endpoint_auth_methods_supported", json::List([json::Str("none")])),
+		("scopes_supported", texts(scopes)),
 	])
 }
 
@@ -107,9 +107,9 @@ pub type RegisterError {
  * body. */
 pub fn register_error_code(e RegisterError) Option(String) {
 	match e {
-		BodyInvalidJson(_) -> Some('invalid_client_metadata')
+		BodyInvalidJson(_) -> Some("invalid_client_metadata")
 		MissingRedirectUris | RedirectUrisNotList | RedirectUriNotString(_) ->
-			Some('invalid_redirect_uri')
+			Some("invalid_redirect_uri")
 		NoClientId -> None
 	}
 }
@@ -124,17 +124,17 @@ pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) 
 	put_client(id, uris)
 	Ok(
 		json::Object([
-			('client_id', json::Str(id)),
-			('redirect_uris', texts(uris)),
-			('token_endpoint_auth_method', json::Str('none')),
-			('grant_types', json::List([json::Str('authorization_code')])),
-			('response_types', json::List([json::Str('code')])),
+			("client_id", json::Str(id)),
+			("redirect_uris", texts(uris)),
+			("token_endpoint_auth_method", json::Str("none")),
+			("grant_types", json::List([json::Str("authorization_code")])),
+			("response_types", json::List([json::Str("code")])),
 		]),
 	)
 }
 
 fn redirect_uris(doc json::Doc) Result(Array(String), RegisterError) {
-	match json::field(doc, 'redirect_uris') {
+	match json::field(doc, "redirect_uris") {
 		None -> Err(MissingRedirectUris)
 		Some(list) -> if json::kind(list) != json::ArrayKind {
 			Err(RedirectUrisNotList)
@@ -212,28 +212,28 @@ pub type RefusedReason {
 /** Returns the RFC 6749 §4.1.2.1 `error` value for a refused request. */
 pub fn authorize_error_code(reason RefusedReason) String {
 	match reason {
-		UnsupportedResponseType -> 'unsupported_response_type'
+		UnsupportedResponseType -> "unsupported_response_type"
 		RepeatedParameter(_) | MissingChallenge | MalformedChallenge | UnsupportedChallengeMethod ->
-			'invalid_request'
+			"invalid_request"
 	}
 }
 
 /** Where to send the client for a `Refused` request. */
 pub fn refusal_redirect(redirect_uri String, state Option(String), reason RefusedReason) String {
-	redirect_with(redirect_uri, [('error', authorize_error_code(reason)), ..state_param(state)])
+	redirect_with(redirect_uri, [("error", authorize_error_code(reason)), ..state_param(state)])
 }
 
 /** Where to send the client when `approve` fails. */
 pub fn server_error_redirect(areq AuthorizeReq) String {
-	redirect_with(areq.redirect_uri, [('error', 'server_error'), ..state_param(areq.state)])
+	redirect_with(areq.redirect_uri, [("error", "server_error"), ..state_param(areq.state)])
 }
 
 /** Checks the query of a `GET /authorize`. The redirect URI must be one the
  * client registered, because a code sent anywhere else can be stolen. */
 pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, AuthorizeError) {
 	q <- result::then(form::decode(query_bytes) |> result::replace_err(Untrusted(MalformedQuery)))
-	client_id <- result::then(client_param(q, 'client_id'))
-	redirect_uri <- result::then(client_param(q, 'redirect_uri'))
+	client_id <- result::then(client_param(q, "client_id"))
+	redirect_uri <- result::then(client_param(q, "redirect_uri"))
 	Store(_, get_client, _, _, _, _) = store
 	match get_client(client_id) {
 		None -> Err(Untrusted(UnknownClient))
@@ -259,20 +259,20 @@ fn parse_trusted(
 	client_id String,
 	redirect_uri String,
 ) Result(AuthorizeReq, AuthorizeError) {
-	match param(q, 'state') {
+	match param(q, "state") {
 		Err(n) ->
 			Err(Refused(redirect_uri: redirect_uri, state: None, reason: RepeatedParameter(n)))
 		Ok(state) -> {
 			refuse = fn(reason) Refused(redirect_uri: redirect_uri, state: state, reason: reason)
 			repeated = fn(n) refuse(RepeatedParameter(n))
-			response_type <- result::then(param(q, 'response_type') |> result::map_err(repeated))
-			challenge <- result::then(param(q, 'code_challenge') |> result::map_err(repeated))
-			method <- result::then(param(q, 'code_challenge_method') |> result::map_err(repeated))
-			scope <- result::then(param(q, 'scope') |> result::map_err(repeated))
-			resource <- result::then(param(q, 'resource') |> result::map_err(repeated))
-			if response_type != Some('code') {
+			response_type <- result::then(param(q, "response_type") |> result::map_err(repeated))
+			challenge <- result::then(param(q, "code_challenge") |> result::map_err(repeated))
+			method <- result::then(param(q, "code_challenge_method") |> result::map_err(repeated))
+			scope <- result::then(param(q, "scope") |> result::map_err(repeated))
+			resource <- result::then(param(q, "resource") |> result::map_err(repeated))
+			if response_type != Some("code") {
 				Err(refuse(UnsupportedResponseType))
-			} else if method != Some('S256') {
+			} else if method != Some("S256") {
 				Err(refuse(UnsupportedChallengeMethod))
 			} else {
 				match challenge {
@@ -325,29 +325,29 @@ pub fn approve(store Store, areq AuthorizeReq, user String) Result(String, Nil) 
 			resource: areq.resource,
 		),
 	)
-	Ok(redirect_with(areq.redirect_uri, [('code', code), ..state_param(areq.state)]))
+	Ok(redirect_with(areq.redirect_uri, [("code", code), ..state_param(areq.state)]))
 }
 
 fn state_param(state Option(String)) Array((String, String)) {
 	match state {
-		Some(s) -> [('state', s)]
+		Some(s) -> [("state", s)]
 		None -> []
 	}
 }
 
 fn redirect_with(redirect_uri String, params Array((String, String))) String {
-	sep = match string::contains(redirect_uri, '?') {
-		True -> '&'
-		False -> '?'
+	sep = match string::contains(redirect_uri, "?") {
+		True -> "&"
+		False -> "?"
 	}
 	query =
 		params
 		|> array::map(fn(p) {
 			(k, v) = p
-			'${form::pct_encode(k)}=${form::pct_encode(v)}'
+			"${form::pct_encode(k)}=${form::pct_encode(v)}"
 		})
-		|> join('&')
-	'${redirect_uri}${sep}${query}'
+		|> join("&")
+	"${redirect_uri}${sep}${query}"
 }
 
 // Token
@@ -378,9 +378,9 @@ pub type TokenError {
 pub fn token_error_code(e TokenError) Option(String) {
 	match e {
 		MalformedBody | RepeatedBodyParameter(_) | MissingBodyParameter(_) ->
-			Some('invalid_request')
-		UnsupportedGrantType -> Some('unsupported_grant_type')
-		UnknownCode | PkceFailed | GrantMismatch -> Some('invalid_grant')
+			Some("invalid_request")
+		UnsupportedGrantType -> Some("unsupported_grant_type")
+		UnknownCode | PkceFailed | GrantMismatch -> Some("invalid_grant")
 		NoAccessToken -> None
 	}
 }
@@ -391,12 +391,12 @@ pub fn token_error_code(e TokenError) Option(String) {
  * allows, but if it sends one, it must match. */
 pub fn token(store Store, req_body Binary) Result(json::Json, TokenError) {
 	f <- result::then(form::decode(req_body) |> result::replace_err(MalformedBody))
-	grant_type <- result::then(required(f, 'grant_type'))
-	code <- result::then(required(f, 'code'))
-	verifier <- result::then(required(f, 'code_verifier'))
-	client_id <- result::then(required(f, 'client_id'))
-	redirect_uri <- result::then(param(f, 'redirect_uri') |> result::map_err(RepeatedBodyParameter))
-	if grant_type != 'authorization_code' {
+	grant_type <- result::then(required(f, "grant_type"))
+	code <- result::then(required(f, "code"))
+	verifier <- result::then(required(f, "code_verifier"))
+	client_id <- result::then(required(f, "client_id"))
+	redirect_uri <- result::then(param(f, "redirect_uri") |> result::map_err(RepeatedBodyParameter))
+	if grant_type != "authorization_code" {
 		Err(UnsupportedGrantType)
 	} else {
 		// The token is made before the code is taken, so if this fails the
@@ -413,8 +413,8 @@ pub fn token(store Store, req_body Binary) Result(json::Json, TokenError) {
 				put_token(tok, g)
 				Ok(
 					json::Object([
-						('access_token', json::Str(tok)),
-						('token_type', json::Str('Bearer')),
+						("access_token", json::Str(tok)),
+						("token_type", json::Str("Bearer")),
 						..scope_field(g.scope),
 					]),
 				)
@@ -440,7 +440,7 @@ fn matches_if_sent(sent Option(String), issued String) Bool {
 
 fn scope_field(scope Option(String)) Array((String, json::Json)) {
 	match scope {
-		Some(s) -> [('scope', json::Str(s))]
+		Some(s) -> [("scope", json::Str(s))]
 		None -> []
 	}
 }
@@ -484,9 +484,9 @@ fn param(pairs Array((String, String)), name String) Result(Option(String), Stri
 fn join(xs Array(String), sep String) String {
 	joined = array::fold(xs, None, fn(acc, x) match acc {
 		None -> Some(x)
-		Some(a) -> Some('${a}${sep}${x}')
+		Some(a) -> Some("${a}${sep}${x}")
 	})
-	joined or ''
+	joined or ""
 }
 
 // Makes 32 random bytes as URL-safe base64, for tokens, codes and client IDs.

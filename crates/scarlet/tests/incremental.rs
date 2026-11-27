@@ -101,7 +101,7 @@ fn only_what_changed_is_checked_again() {
     // A type error in c is reported, though nothing else needs checking.
     p.write(
         "c.sca",
-        "pub fn val() Int { 'nope' }\npub fn more() Int { 3 }\n",
+        "pub fn val() Int { \"nope\" }\npub fn more() Int { 3 }\n",
     );
     assert_eq!(b.check(&p, A_SRC), (1, false), "c broke");
 
@@ -134,7 +134,7 @@ fn an_editor_buffer_wins_over_the_file() {
 
     b.sources
         .buffers
-        .insert(c.clone(), Text::new("pub fn val() Int { 'oops' }\n"));
+        .insert(c.clone(), Text::new("pub fn val() Int { \"oops\" }\n"));
     let (_, clean) = b.check(&p, A_SRC);
     assert!(!clean, "the unsaved buffer is checked, not the clean file");
 

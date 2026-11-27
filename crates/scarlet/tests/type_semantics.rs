@@ -11,7 +11,7 @@ run_case! {
     type_keyword_single_variant: (
         "type User { User(name String, age Int) }\n\
          pub fn main() {\n\
-         \tu = User(name: 'al', age: 18)\n\
+         \tu = User(name: \"al\", age: 18)\n\
          \tprintln(u.name)\n\
          \tprintln(u.age)\n\
          }\n",
@@ -196,8 +196,8 @@ run_case! {
         "type Named {\n\tPerson(name String, age Int)\n\tOrg(name String, size Int)\n}\n\
          fn name_of(n Named) String { n.name }\n\
          pub fn main() {\n\
-         \tprintln(name_of(Person(name: 'al', age: 18)))\n\
-         \tprintln(name_of(Org(name: 'anthropic', size: 1000)))\n\
+         \tprintln(name_of(Person(name: \"al\", age: 18)))\n\
+         \tprintln(name_of(Org(name: \"anthropic\", size: 1000)))\n\
          }\n",
         "al\nanthropic\n",
     ),
@@ -235,9 +235,9 @@ ok_case! {
         "pub fn main() {\n\
          \tx = Some(Some(5))\n\
          \tr = match x {\n\
-         \t\tSome(Some(n)) -> 'ss ${n}'\n\
-         \t\tSome(None) -> 'sn'\n\
-         \t\tNone -> 'n'\n\
+         \t\tSome(Some(n)) -> \"ss ${n}\"\n\
+         \t\tSome(None) -> \"sn\"\n\
+         \t\tNone -> \"n\"\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -249,9 +249,9 @@ run_case! {
         "pub fn main() {\n\
          \tx = Some(Some(5))\n\
          \tr = match x {\n\
-         \t\tSome(Some(n)) -> 'ss ${n}'\n\
-         \t\tSome(None) -> 'sn'\n\
-         \t\tNone -> 'n'\n\
+         \t\tSome(Some(n)) -> \"ss ${n}\"\n\
+         \t\tSome(None) -> \"sn\"\n\
+         \t\tNone -> \"n\"\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -263,9 +263,9 @@ ok_case! {
     nested_result_match_is_exhaustive: (
         "fn classify(x Result(Result(Int, String), String)) String {\n\
          \tmatch x {\n\
-         \t\tOk(Ok(n)) -> 'ok ${n}'\n\
-         \t\tOk(Err(e)) -> 'okerr ${e}'\n\
-         \t\tErr(e) -> 'err ${e}'\n\
+         \t\tOk(Ok(n)) -> \"ok ${n}\"\n\
+         \t\tOk(Err(e)) -> \"okerr ${e}\"\n\
+         \t\tErr(e) -> \"err ${e}\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -280,8 +280,8 @@ reject_case! {
         "pub fn main() {\n\
          \tx = Some(Some(5))\n\
          \tr = match x {\n\
-         \t\tSome(Some(n)) -> 'ss ${n}'\n\
-         \t\tNone -> 'n'\n\
+         \t\tSome(Some(n)) -> \"ss ${n}\"\n\
+         \t\tNone -> \"n\"\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -293,10 +293,10 @@ reject_case! {
         "pub fn main() {\n\
          \tx = Some(Some(5))\n\
          \tr = match x {\n\
-         \t\tSome(Some(n)) -> 'ss ${n}'\n\
-         \t\tSome(None) -> 'sn'\n\
-         \t\tSome(_) -> 'other'\n\
-         \t\tNone -> 'n'\n\
+         \t\tSome(Some(n)) -> \"ss ${n}\"\n\
+         \t\tSome(None) -> \"sn\"\n\
+         \t\tSome(_) -> \"other\"\n\
+         \t\tNone -> \"n\"\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -318,7 +318,7 @@ fn non_uniform_recursive_type_resolution_terminates() {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln('${f(Done)}')\n\
+         \tprintln(\"${f(Done)}\")\n\
          }\n",
     );
 }
@@ -361,7 +361,7 @@ reject_case! {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(f(User(name: 'a', age: 1, email: 'e')))\n\
+         \tprintln(f(User(name: \"a\", age: 1, email: \"e\")))\n\
          }\n",
         "missing field(s): age, email",
     ),
@@ -376,7 +376,7 @@ run_case! {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(f(User(name: 'alice', age: 30, email: 'a@b')))\n\
+         \tprintln(f(User(name: \"alice\", age: 30, email: \"a@b\")))\n\
          }\n",
         "alice\n",
     ),
@@ -396,7 +396,7 @@ run_case! {
     or_on_result_unwraps_ok: (
         "import scarlet/string\n\
          fn f(b Bool) Result(Int, String) {\n\
-         \tif b { Ok(42) } else { Err('nope') }\n\
+         \tif b { Ok(42) } else { Err(\"nope\") }\n\
          }\n\
          pub fn main() {\n\
          \tprintln(f(True) or e -> 0 - string::length(e))\n\
@@ -411,15 +411,15 @@ reject_case! {
     rigid_tyvar_body_mismatch_is_rejected: (
         "fn bad(x a) a { 1 }\n\
          pub fn main() {\n\
-         \tprintln(bad('s'))\n\
+         \tprintln(bad(\"s\"))\n\
          }\n",
         "Type mismatch: expected 'a', got 'Int'",
     ),
-    /// `f` declares both params as `a`, so `f(1, 's')` must be rejected.
+    /// `f` declares both params as `a`, so `f(1, "s")` must be rejected.
     rigid_tyvar_same_var_unifies_args: (
         "fn f(x a, y a) a { x }\n\
          pub fn main() {\n\
-         \tprintln(f(1, 's'))\n\
+         \tprintln(f(1, \"s\"))\n\
          }\n",
         "Type mismatch: expected 'Int', got 'String'",
     ),
@@ -462,7 +462,7 @@ fn ctor_record_update_overrides_and_projects() {
     run_outputs(
         "type P { P(name String, age Int) }\n\
          pub fn main() {\n\
-         \tbase = P(name: 'al', age: 18)\n\
+         \tbase = P(name: \"al\", age: 18)\n\
          \tolder = P(..base, age: 19)\n\
          \tprintln(older.name)\n\
          \tprintln(older.age)\n\
@@ -480,7 +480,7 @@ reject_case! {
          pub fn main() {\n\
          \tb = B(v: 1)\n\
          \ta = A(..b)\n\
-         \tprintln('${a}')\n\
+         \tprintln(\"${a}\")\n\
          }\n",
         "The spread cannot fill field 'r', which is not present on every variant of 'S' (missing on 'B')",
     ),
@@ -494,8 +494,8 @@ run_case! {
          pub fn main() {\n\
          \tb = B(y: 1, x: 2)\n\
          \ta = A(..b, y: 3)\n\
-         \tprintln('${a}')\n\
-         \tprintln('${b.x} ${a.x}')\n\
+         \tprintln(\"${a}\")\n\
+         \tprintln(\"${b.x} ${a.x}\")\n\
          }\n",
         "A(2, 3)\n2 2\n",
     ),
@@ -519,7 +519,7 @@ reject_case! {
     ctor_record_update_at_most_one_spread: (
         "type P { P(name String, age Int) }\n\
          pub fn main() {\n\
-         \tbase = P(name: 'al', age: 18)\n\
+         \tbase = P(name: \"al\", age: 18)\n\
          \tolder = P(..base, ..base)\n\
          \tprintln(older.age)\n\
          }\n",
@@ -619,10 +619,10 @@ run_case! {
     match_guard_basic: (
         "fn classify(n Int) String {\n\
          \tmatch n {\n\
-         \t\tx if x < 0 -> 'neg'\n\
-         \t\t0 -> 'zero'\n\
-         \t\tx if x < 10 -> 'small'\n\
-         \t\t_ -> 'big'\n\
+         \t\tx if x < 0 -> \"neg\"\n\
+         \t\t0 -> \"zero\"\n\
+         \t\tx if x < 10 -> \"small\"\n\
+         \t\t_ -> \"big\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -655,7 +655,7 @@ reject_case! {
     match_guard_non_exhaustive_errors: (
         "fn f(n Int) String {\n\
          \tmatch n {\n\
-         \t\tx if x < 2 -> 'a'\n\
+         \t\tx if x < 2 -> \"a\"\n\
          \t}\n\
          }\n",
         "exhaustive",
@@ -663,8 +663,8 @@ reject_case! {
     match_guard_type_must_be_bool: (
         "fn f(n Int) String {\n\
          \tmatch n {\n\
-         \t\tx if x -> 'a'\n\
-         \t\t_ -> 'b'\n\
+         \t\tx if x -> \"a\"\n\
+         \t\t_ -> \"b\"\n\
          \t}\n\
          }\n",
         "Bool",
@@ -771,13 +771,13 @@ fn nested_ctor_pattern_exhaustive() {
     // `resolve_icon`'s cycle guard must not leak across sibling type arguments.
     check_ok(
         "pub fn main() {\n\
-         \tmatch Ok(Nil) { Ok(Nil) -> println('y')\n Err(e) -> println(e) }\n\
+         \tmatch Ok(Nil) { Ok(Nil) -> println(\"y\")\n Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(
         "type T {\n\tA\n\tB\n}\n\
          pub fn main() {\n\
-         \tmatch Ok(A) { Ok(A) -> println('a')\n Ok(B) -> println('b')\n Err(e) -> println(e) }\n\
+         \tmatch Ok(A) { Ok(A) -> println(\"a\")\n Ok(B) -> println(\"b\")\n Err(e) -> println(e) }\n\
          }\n",
     );
 }
@@ -787,20 +787,20 @@ fn module_builtins_qualified_and_destructured() {
     check_ok(
         "import scarlet/net\n\
          pub fn main() {\n\
-         \tmatch net::listen('0.0.0.0', 8080) { Ok(s) -> println(s)\n Err(e) -> println(e) }\n\
+         \tmatch net::listen(\"0.0.0.0\", 8080) { Ok(s) -> println(s)\n Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(
         "import scarlet/net\n\
          fn go(s net::Server) Nil { println(s) }\n\
          pub fn main() {\n\
-         \tmatch net::listen('0.0.0.0', 8080) { Ok(s) -> go(s)\n Err(e) -> println(e) }\n\
+         \tmatch net::listen(\"0.0.0.0\", 8080) { Ok(s) -> go(s)\n Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(
         "import scarlet/io\n\
          pub fn main() {\n\
-         \tx = io::read_text('a') or e -> '${e}'\n\
+         \tx = io::read_text(\"a\") or e -> \"${e}\"\n\
          \tprintln(x)\n\
          }\n",
     );
@@ -872,7 +872,7 @@ fn bool_is_a_normal_two_ctor_type_runs() {
         "True\nFalse\nFalse\n",
     );
     run_outputs(
-        "fn show(b Bool) String { match b { True -> 'yes'\nFalse -> 'no' } }\n\
+        "fn show(b Bool) String { match b { True -> \"yes\"\nFalse -> \"no\" } }\n\
          pub fn main() {\n\
          \tprintln(show(True))\n\
          \tprintln(show(1 == 2))\n\
@@ -918,8 +918,8 @@ fn binary_string_literal_patterns() {
     check_rejects(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary::from_string('AB') {\n\
-         \t\t<<'AB':16>> -> 1\n\
+         \tr = match binary::from_string(\"AB\") {\n\
+         \t\t<<\"AB\":16>> -> 1\n\
          \t\t_ -> 0\n\
          \t}\n\
          \tprintln(r)\n\
@@ -935,8 +935,8 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary::from_string('GET /index.html') {\n\
-         \t\t<<'GET ', ..rest>> -> binary::to_string(rest)\n\
+         \tr = match binary::from_string(\"GET /index.html\") {\n\
+         \t\t<<\"GET \", ..rest>> -> binary::to_string(rest)\n\
          \t\t_ -> Err(Nil)\n\
          \t}\n\
          \tprintln(r)\n\
@@ -947,8 +947,8 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary::from_string('POST /x') {\n\
-         \t\t<<'POST ':utf8, ..>> -> 1\n\
+         \tr = match binary::from_string(\"POST /x\") {\n\
+         \t\t<<\"POST \":utf8, ..>> -> 1\n\
          \t\t_ -> 0\n\
          \t}\n\
          \tprintln(r)\n\
@@ -960,14 +960,14 @@ fn binary_string_literal_patterns_runs() {
         "import scarlet/binary\n\
          fn is_get(b Binary) Bool {\n\
          \tmatch b {\n\
-         \t\t<<'GET'>> -> True\n\
+         \t\t<<\"GET\">> -> True\n\
          \t\t_ -> False\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(is_get(binary::from_string('GET')))\n\
-         \tprintln(is_get(binary::from_string('GETX')))\n\
-         \tprintln(is_get(binary::from_string('GE')))\n\
+         \tprintln(is_get(binary::from_string(\"GET\")))\n\
+         \tprintln(is_get(binary::from_string(\"GETX\")))\n\
+         \tprintln(is_get(binary::from_string(\"GE\")))\n\
          }\n",
         "True\nFalse\nFalse\n",
     );
@@ -975,11 +975,11 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary::from_string('DELETE /v') {\n\
-         \t\t<<'GET ', ..>> -> 'get'\n\
-         \t\t<<'DELETE /very/long/path/that/overruns', ..>> -> 'overrun'\n\
-         \t\t<<'DELETE ', ..>> -> 'delete'\n\
-         \t\t_ -> 'other'\n\
+         \tr = match binary::from_string(\"DELETE /v\") {\n\
+         \t\t<<\"GET \", ..>> -> \"get\"\n\
+         \t\t<<\"DELETE /very/long/path/that/overruns\", ..>> -> \"overrun\"\n\
+         \t\t<<\"DELETE \", ..>> -> \"delete\"\n\
+         \t\t_ -> \"other\"\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -989,8 +989,8 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary::from_string('HTTP/1.1') {\n\
-         \t\t<<'HTTP/1.', minor>> -> minor - 48\n\
+         \tr = match binary::from_string(\"HTTP/1.1\") {\n\
+         \t\t<<\"HTTP/1.\", minor>> -> minor - 48\n\
          \t\t_ -> 0 - 1\n\
          \t}\n\
          \tprintln(r)\n\
@@ -1001,8 +1001,8 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary::from_string('héllo world') {\n\
-         \t\t<<'héllo ', ..rest>> -> binary::to_string(rest)\n\
+         \tr = match binary::from_string(\"héllo world\") {\n\
+         \t\t<<\"héllo \", ..rest>> -> binary::to_string(rest)\n\
          \t\t_ -> Err(Nil)\n\
          \t}\n\
          \tprintln(r)\n\
@@ -1013,7 +1013,7 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary::from_string('\\r\\nrest') {\n\
+         \tr = match binary::from_string(\"\\r\\nrest\") {\n\
          \t\t<<13, 10, ..rest>> -> binary::byte_size(rest)\n\
          \t\t_ -> 0 - 1\n\
          \t}\n\
@@ -1026,9 +1026,9 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tpacket = <<1:4, 2:4, 'AB', 7>>\n\
+         \tpacket = <<1:4, 2:4, \"AB\", 7>>\n\
          \tr = match packet {\n\
-         \t\t<<1:4, 2:4, 'AB', n>> -> n\n\
+         \t\t<<1:4, 2:4, \"AB\", n>> -> n\n\
          \t\t_ -> 0 - 1\n\
          \t}\n\
          \tprintln(r)\n\
@@ -1039,9 +1039,9 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(<<'hi there'>> == binary::from_string('hi there'))\n\
-         \tprintln(<<'AB', 67, 'D'>> == binary::from_string('ABCD'))\n\
-         \tprintln(binary::bit_size(<<''>>))\n\
+         \tprintln(<<\"hi there\">> == binary::from_string(\"hi there\"))\n\
+         \tprintln(<<\"AB\", 67, \"D\">> == binary::from_string(\"ABCD\"))\n\
+         \tprintln(binary::bit_size(<<\"\">>))\n\
          }\n",
         "True\nTrue\n0\n",
     );
@@ -1054,7 +1054,7 @@ fn binary_literal_and_pattern_e2e() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary::from_string('AB') {\n\
+         \tr = match binary::from_string(\"AB\") {\n\
          \t\t<<a, b>> -> a + b\n\
          \t\t_ -> 0\n\
          \t}\n\
@@ -1086,7 +1086,7 @@ run_case! {
     ctor_destructure_multi_field_ok: (
         "type Pair { Pair(a Int, b String) }\n\
          pub fn main() {\n\
-         \tPair(x, y) = Pair(7, 'hi')\n\
+         \tPair(x, y) = Pair(7, \"hi\")\n\
          \tprintln(x)\n\
          \tprintln(y)\n\
          }\n",
@@ -1135,13 +1135,13 @@ reject_case! {
 run_case! {
     nil_binding_runs_its_init: (
         "pub fn main() {\n\
-         \tNil = println('x')\n\
+         \tNil = println(\"x\")\n\
          }\n",
         "x\n",
     ),
     typed_underscore_runs_its_init: (
         "pub fn main() {\n\
-         \t_ Nil = println('x')\n\
+         \t_ Nil = println(\"x\")\n\
          }\n",
         "x\n",
     ),
@@ -1151,7 +1151,7 @@ run_case! {
          \tage Int\n\
          }\n\
          pub fn main() {\n\
-         \tUser(age:, ..) = User(name: 'a', age: 3)\n\
+         \tUser(age:, ..) = User(name: \"a\", age: 3)\n\
          \tprintln(age)\n\
          }\n",
         "3\n",
@@ -1167,7 +1167,7 @@ reject_case! {
     ),
     a_type_name_is_not_a_pattern: (
         "pub fn main() {\n\
-         \tInt = 'a'\n\
+         \tInt = \"a\"\n\
          }\n",
         "'Int' is a type, not a constructor. To check a value's type and drop it, write `_ Int = value`",
     ),
@@ -1199,7 +1199,7 @@ fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
 
 const FIELD_ACCESS_THROUGH_A_CONSTRUCTOR_INFERRED_SCRUTINEE_SRC: &str = "type User { User(id Int, name String) }\n\
                fn f() Int {\n\
-               \tmatch Some(User(7, 'al')) {\n\
+               \tmatch Some(User(7, \"al\")) {\n\
                \t\tNone -> 0\n\
                \t\tSome(u) -> u.id\n\
                \t}\n\
@@ -1224,13 +1224,13 @@ fn field_access_through_a_constructor_inferred_scrutinee_runs() {
 const FIELD_ACCESS_THROUGH_A_MODULE_FN_INFERRED_SCRUTINEE_SRC: &str = "import scarlet/map\n\
                type User { User(id Int, name String) }\n\
                fn f(m map::Map(Binary, User)) Int {\n\
-               \tmatch map::get(m, <<'a'>>) {\n\
+               \tmatch map::get(m, <<\"a\">>) {\n\
                \t\tNone -> 0\n\
                \t\tSome(u) -> u.id\n\
                \t}\n\
                }\n\
                pub fn main() {\n\
-               \tprintln(f(map::set(map::new(), <<'a'>>, User(7, 'al'))))\n\
+               \tprintln(f(map::set(map::new(), <<\"a\">>, User(7, \"al\"))))\n\
                }\n";
 
 #[test]

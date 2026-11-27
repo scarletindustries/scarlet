@@ -68,32 +68,32 @@ fn positive(n Int) Result(Int, NotPositive) {
 
 fn show_checked(r Result(Int, NotPositive)) String {
 	match r {
-		Ok(n) -> 'Ok(${n})'
-		Err(NotPositive(n)) -> 'Err(${n} is not positive)'
+		Ok(n) -> "Ok(${n})"
+		Err(NotPositive(n)) -> "Err(${n} is not positive)"
 	}
 }
 
 pub fn main() {
 	// One definition, used at Int and at String.
-	println('${identity(42)} and ${identity('forty-two')}')
-	println('twice doubling 3: ${twice(fn(x) x * 2, 3)}')
-	println('twice shouting: ${twice(fn(s) '${s}!', 'go')}')
+	println("${identity(42)} and ${identity("forty-two")}")
+	println("twice doubling 3: ${twice(fn(x) x * 2, 3)}")
+	println("twice shouting: ${twice(fn(s) "${s}!", "go")}")
 
 	// b is Int here, so size_then_double is fn(String) Int.
 	size_then_double = compose(fn(n) n * 2, fn(s) string::length(s))
-	println('size_then_double(claude) = ${size_then_double('claude')}')
+	println("size_then_double(claude) = ${size_then_double("claude")}")
 
-	pair = Pair(first: 'one', second: 1)
-	println('${string::inspect(pair)} swapped is ${string::inspect(swap(pair))}')
+	pair = Pair(first: "one", second: 1)
+	println("${string::inspect(pair)} swapped is ${string::inspect(swap(pair))}")
 
 	stack = Empty |> push(1) |> push(2) |> push(3)
-	println('stack ${string::inspect(to_array(stack))}')
-	println('first ${stack |> to_array |> first_of |> string::inspect}')
-	println('first of nothing ${Empty |> to_array |> first_of |> string::inspect}')
+	println("stack ${string::inspect(to_array(stack))}")
+	println("first ${stack |> to_array |> first_of |> string::inspect}")
+	println("first of nothing ${Empty |> to_array |> first_of |> string::inspect}")
 
 	check Validate = positive
-	println('${show_checked(check(7))} / ${show_checked(check(-1))}')
+	println("${show_checked(check(7))} / ${show_checked(check(-1))}")
 
-	sizes Bag(Int) = array::map(['al', 'claude', 'inference'], fn(s) string::length(s))
-	println('sizes ${string::inspect(sizes)}')
+	sizes Bag(Int) = array::map(["al", "claude", "inference"], fn(s) string::length(s))
+	println("sizes ${string::inspect(sizes)}")
 }

@@ -24,13 +24,13 @@ type Outcome(a) {
 
 // Print a labelled value.
 fn line(label String, value String) Nil {
-	println('${label}${value}')
+	println("${label}${value}")
 }
 
 // Parse and hand the document to `f`, or report why it did not parse.
 fn read(src String, f fn(json::Doc) String) String {
 	match json::parse(src) {
-		Err(e) -> 'parse error: ${json::parse_error_message(e)}'
+		Err(e) -> "parse error: ${json::parse_error_message(e)}"
 		Ok(d) -> f(d)
 	}
 }
@@ -48,9 +48,9 @@ fn decoded(src String, dec decode::Decoder(a)) Outcome(a) {
 
 fn show(o Outcome(a)) String {
 	match o {
-		Parsed(v) -> '${v}'
-		NotParsed(why) -> 'parse error: ${why}'
-		NotDecoded(why) -> 'decode error: ${why}'
+		Parsed(v) -> "${v}"
+		NotParsed(why) -> "parse error: ${why}"
+		NotDecoded(why) -> "decode error: ${why}"
 	}
 }
 
@@ -59,41 +59,41 @@ fn shown(src String, dec decode::Decoder(a)) String {
 }
 
 fn field_int(d json::Doc, name String) String {
-	'${option::then(json::field(d, name), json::int)}'
+	"${option::then(json::field(d, name), json::int)}"
 }
 
 fn b0(d json::Doc) String {
-	elem = option::then(json::field(d, 'b'), fn(b) json::index(b, 0))
-	'${option::then(elem, json::bool)}'
+	elem = option::then(json::field(d, "b"), fn(b) json::index(b, 0))
+	"${option::then(elem, json::bool)}"
 }
 
 fn b1_null(d json::Doc) String {
-	elem = option::then(json::field(d, 'b'), fn(b) json::index(b, 1))
-	'${option::unwrap(option::map(elem, json::is_null), False)}'
+	elem = option::then(json::field(d, "b"), fn(b) json::index(b, 1))
+	"${option::unwrap(option::map(elem, json::is_null), False)}"
 }
 
 fn cd(d json::Doc) String {
-	inner = option::then(json::field(d, 'c'), fn(c) json::field(c, 'd'))
-	'${option::then(inner, json::float)}'
+	inner = option::then(json::field(d, "c"), fn(c) json::field(c, "d"))
+	"${option::then(inner, json::float)}"
 }
 
 fn missing(d json::Doc) String {
-	'${option::is_none(json::field(d, 'nope'))}'
+	"${option::is_none(json::field(d, "nope"))}"
 }
 
 fn null_kind(d json::Doc) String {
-	'${option::map(json::field(d, 'n'), json::kind)}'
+	"${option::map(json::field(d, "n"), json::kind)}"
 }
 
 // A nickname the program already holds. A PATCH must not lose it merely
 // because the sender did not mention the field. A function, not a top-level
 // binding: a function body cannot see one.
 fn held() Option(String) {
-	Some('lovelace')
+	Some("lovelace")
 }
 
 fn nickname(src String) Outcome(field::Field(String)) {
-	decoded(src, decode::optional_field('nickname', decode::string_value()))
+	decoded(src, decode::optional_field("nickname", decode::string_value()))
 }
 
 // The property the type exists for: absent keeps the held value, null clears
@@ -102,7 +102,7 @@ fn nickname(src String) Outcome(field::Field(String)) {
 fn after(src String) String {
 	outcome = nickname(src)
 	match outcome {
-		Parsed(f) -> '${field::update(f, held())}'
+		Parsed(f) -> "${field::update(f, held())}"
 		NotParsed(_) | NotDecoded(_) -> show(outcome)
 	}
 }
@@ -111,13 +111,13 @@ fn after(src String) String {
 fn state(src String) String {
 	outcome = nickname(src)
 	match outcome {
-		Parsed(f) -> field::fold(f, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
+		Parsed(f) -> field::fold(f, fn() "absent", fn() "null", fn(v) "present(${v})")
 		NotParsed(_) | NotDecoded(_) -> show(outcome)
 	}
 }
 
 fn states_differ() String {
-	'${state('{}') != state('{"nickname":null}')}'
+	"${state("{}") != state("{\"nickname\":null}")}"
 }
 
 type User {
@@ -129,10 +129,10 @@ type User {
 
 // One line per member, and the same shape at four members as at forty.
 fn user_decoder() decode::Decoder(User) {
-	id <- decode::take('id', decode::int_string())
-	name <- decode::take('username', decode::string_value())
-	bot <- decode::also(decode::with_default('bot', decode::bool(), False))
-	nick <- decode::take_optional('nickname', decode::string_value())
+	id <- decode::take("id", decode::int_string())
+	name <- decode::take("username", decode::string_value())
+	bot <- decode::also(decode::with_default("bot", decode::bool(), False))
+	nick <- decode::take_optional("nickname", decode::string_value())
 	decode::succeed(User(id, name, bot, nick))
 }
 
@@ -143,46 +143,46 @@ type Event {
 
 fn pick_event(t String) Result(decode::Decoder(Event), Nil) {
 	match t {
-		'MESSAGE' ->
-			Ok(decode::map(decode::field('content', decode::string_value()), fn(c) Message(c)))
-		'HEARTBEAT' -> Ok(decode::map(decode::field('seq', decode::int()), fn(s) Heartbeat(s)))
+		"MESSAGE" ->
+			Ok(decode::map(decode::field("content", decode::string_value()), fn(c) Message(c)))
+		"HEARTBEAT" -> Ok(decode::map(decode::field("seq", decode::int()), fn(s) Heartbeat(s)))
 		_ -> Err(Nil)
 	}
 }
 
 fn outcome(src String) String {
 	match json::parse(src) {
-		Ok(_) -> 'accepted'
-		Err(_) -> 'rejected'
+		Ok(_) -> "accepted"
+		Err(_) -> "rejected"
 	}
 }
 
 // Invalid UTF-8 cannot be written as a Scarlet string literal, so it goes in
 // as bytes. The parser must reject it rather than hand back a broken String.
 fn utf8_outcome() String {
-	match json::parse_binary(<<'["', 255, 254, '"]'>>) {
-		Ok(_) -> 'accepted'
-		Err(_) -> 'rejected'
+	match json::parse_binary(<<"[\"", 255, 254, "\"]">>) {
+		Ok(_) -> "accepted"
+		Err(_) -> "rejected"
 	}
 }
 
 // The 64-bit boundary. i64::MAX is an Int; one above it is not, and what comes
 // back is `None` rather than a truncated number.
 fn nth_int(d json::Doc, i Int) String {
-	'${option::then(json::index(d, i), json::int)}'
+	"${option::then(json::index(d, i), json::int)}"
 }
 
 fn nth_is_float(d json::Doc, i Int) String {
-	'${option::is_some(option::then(json::index(d, i), json::float))}'
+	"${option::is_some(option::then(json::index(d, i), json::float))}"
 }
 
 fn nth_kind(d json::Doc, i Int) String {
-	'${option::map(json::index(d, i), json::kind)}'
+	"${option::map(json::index(d, i), json::kind)}"
 }
 
 // Empty containers are empty, not scalars.
 fn empties(d json::Doc) String {
-	'${json::size(d)} ${nth_kind(d, 0)} ${nth_kind(d, 1)}'
+	"${json::size(d)} ${nth_kind(d, 0)} ${nth_kind(d, 1)}"
 }
 
 // Deep nesting must not take the parser's stack with it: the tape build is one
@@ -191,12 +191,12 @@ fn nest(n Int, acc String) String {
 	if n == 0 {
 		acc
 	} else {
-		nest(n - 1, '[${acc}]')
+		nest(n - 1, "[${acc}]")
 	}
 }
 
 fn deep_kind(d json::Doc) String {
-	'${json::kind(d)} size ${json::size(d)}'
+	"${json::kind(d)} size ${json::size(d)}"
 }
 
 // Re-encode, parse the result, re-encode again, and compare BOTH to
@@ -211,7 +211,7 @@ fn stable(src String, canonical String) String {
 		once = json::reencode(d)
 		twice = read(once, json::reencode)
 		ok = once == canonical && twice == canonical
-		'${ok}'
+		"${ok}"
 	})
 }
 
@@ -227,278 +227,278 @@ type Patch {
 // A stand-in for a request body: the arena behind this document holds a
 // credential, and printing a `Doc` must not put it on stdout.
 fn secret_doc() String {
-	'{"token":"hunter2","n":2,"xs":[1],"f":1.5,"z":null}'
+	"{\"token\":\"hunter2\",\"n\":2,\"xs\":[1],\"f\":1.5,\"z\":null}"
 }
 
 // The image of one member, so the printed form can be seen at a node other
 // than the root.
 fn shown_member(d json::Doc, name String) String {
 	match json::field(d, name) {
-		None -> 'no such member'
-		Some(m) -> '${m}'
+		None -> "no such member"
+		Some(m) -> "${m}"
 	}
 }
 
 pub fn main() {
 	// ---------------------------------------------------------------- parsing --
 
-	println('-- parse and read on demand --')
+	println("-- parse and read on demand --")
 
-	sample = '{"a":1,"b":[true,null,"x"],"c":{"d":2.5}}'
+	sample = "{\"a\":1,\"b\":[true,null,\"x\"],\"c\":{\"d\":2.5}}"
 
-	line('kind          ', read(sample, fn(d) '${json::kind(d)}'))
-	line('size          ', read(sample, fn(d) '${json::size(d)}'))
-	line('a             ', read(sample, fn(d) field_int(d, 'a')))
-	line('b.0           ', read(sample, b0))
-	line('b.1 is null   ', read(sample, b1_null))
-	line('c.d           ', read(sample, cd))
-	line('missing       ', read(sample, missing))
-	line('kind of null  ', read('{"n":null}', null_kind))
+	line("kind          ", read(sample, fn(d) "${json::kind(d)}"))
+	line("size          ", read(sample, fn(d) "${json::size(d)}"))
+	line("a             ", read(sample, fn(d) field_int(d, "a")))
+	line("b.0           ", read(sample, b0))
+	line("b.1 is null   ", read(sample, b1_null))
+	line("c.d           ", read(sample, cd))
+	line("missing       ", read(sample, missing))
+	line("kind of null  ", read("{\"n\":null}", null_kind))
 
 	// ------------------------------------------------- absent / null / present --
 
-	println('')
-	println('-- absent, null and present are three states --')
+	println("")
+	println("-- absent, null and present are three states --")
 
-	line('held          ', '${held()}')
-	line('after absent  ', after('{"name":"ada"}'))
-	line('after null    ', after('{"name":"ada","nickname":null}'))
-	line('after present ', after('{"name":"ada","nickname":"count"}'))
-	line('state {}      ', state('{}'))
-	line('state {k:null}', state('{"nickname":null}'))
-	line('state {k:v}   ', state('{"nickname":"count"}'))
+	line("held          ", "${held()}")
+	line("after absent  ", after("{\"name\":\"ada\"}"))
+	line("after null    ", after("{\"name\":\"ada\",\"nickname\":null}"))
+	line("after present ", after("{\"name\":\"ada\",\"nickname\":\"count\"}"))
+	line("state {}      ", state("{}"))
+	line("state {k:null}", state("{\"nickname\":null}"))
+	line("state {k:v}   ", state("{\"nickname\":\"count\"}"))
 
 	// `{}` and `{"nickname":null}` are different documents and stay different.
-	line('{} != {k:null}', states_differ())
+	line("{} != {k:null}", states_differ())
 
 	// ----------------------------------------------------------- typed records --
 
-	println('')
-	println('-- typed records --')
+	println("")
+	println("-- typed records --")
 
 	// A Discord snowflake arrives quoted precisely because a JSON number cannot
 	// carry 64 bits through a double.
-	null_nick = '{"id":"1070000000000000001","username":"ada","nickname":null}'
-	absent_nick = '{"id":"1070000000000000001","username":"ada"}'
-	set_nick = '{"id":"1070000000000000001","username":"ada","nickname":"c","bot":true}'
+	null_nick = "{\"id\":\"1070000000000000001\",\"username\":\"ada\",\"nickname\":null}"
+	absent_nick = "{\"id\":\"1070000000000000001\",\"username\":\"ada\"}"
+	set_nick = "{\"id\":\"1070000000000000001\",\"username\":\"ada\",\"nickname\":\"c\",\"bot\":true}"
 
-	line('null nick     ', shown(null_nick, user_decoder()))
-	line('absent nick   ', shown(absent_nick, user_decoder()))
-	line('set nick      ', shown(set_nick, user_decoder()))
+	line("null nick     ", shown(null_nick, user_decoder()))
+	line("absent nick   ", shown(absent_nick, user_decoder()))
+	line("set nick      ", shown(set_nick, user_decoder()))
 
 	// ------------------------------------------------- failures name their path --
 
-	println('')
-	println('-- failures carry paths and accumulate --')
+	println("")
+	println("-- failures carry paths and accumulate --")
 
-	bad = '{"id":7,"username":42,"profile":{"tags":["a",1]}}'
+	bad = "{\"id\":7,\"username\":42,\"profile\":{\"tags\":[\"a\",1]}}"
 
 	// Two independent fields are wrong; BOTH are reported, not just the first.
 	two_bad = decode::map2(
-		decode::field('id', decode::int_string()),
-		decode::field('username', decode::string_value()),
-		fn(a, b) '${a}/${b}',
+		decode::field("id", decode::int_string()),
+		decode::field("username", decode::string_value()),
+		fn(a, b) "${a}/${b}",
 	)
 	println(shown(bad, two_bad))
 
 	// A nested element names its index as well as its fields.
-	nested = decode::field('profile', decode::field('tags', decode::list(decode::string_value())))
+	nested = decode::field("profile", decode::field("tags", decode::list(decode::string_value())))
 	println(shown(bad, nested))
 
 	// A missing member says which one.
-	println(shown(bad, decode::field('absent_here', decode::int())))
+	println(shown(bad, decode::field("absent_here", decode::int())))
 
 	// A wrong type at the root has no path to name.
-	println(shown('[1]', decode::int()))
+	println(shown("[1]", decode::int()))
 
 	// ------------------------------------------------------------ tagged unions --
 
-	println('')
-	println('-- tagged unions --')
+	println("")
+	println("-- tagged unions --")
 
-	event_decoder = decode::tagged('t', pick_event)
+	event_decoder = decode::tagged("t", pick_event)
 
-	line('message       ', shown('{"t":"MESSAGE","content":"hi"}', event_decoder))
-	line('heartbeat     ', shown('{"t":"HEARTBEAT","seq":9}', event_decoder))
-	line('unknown tag   ', shown('{"t":"NOPE"}', event_decoder))
+	line("message       ", shown("{\"t\":\"MESSAGE\",\"content\":\"hi\"}", event_decoder))
+	line("heartbeat     ", shown("{\"t\":\"HEARTBEAT\",\"seq\":9}", event_decoder))
+	line("unknown tag   ", shown("{\"t\":\"NOPE\"}", event_decoder))
 
 	// ------------------------------------------------------------- adversarial --
 
-	println('')
-	println('-- adversarial input --')
+	println("")
+	println("-- adversarial input --")
 
-	line('1e400                 ', outcome('[1e400]'))
-	line('trailing garbage      ', outcome('{} xyz'))
-	line('unterminated string   ', outcome('["abc'))
-	line('trailing comma        ', outcome('[1,2,]'))
-	line('comment               ', outcome('[1] // no'))
-	line('bare NaN              ', outcome('[NaN]'))
-	line('empty input           ', outcome(''))
-	line('lone surrogate        ', outcome('["\\ud800"]'))
-	line('unpaired low          ', outcome('["\\udc00"]'))
-	line('valid surrogate pair  ', outcome('["\\ud83d\\ude00"]'))
-	line('invalid utf8          ', utf8_outcome())
+	line("1e400                 ", outcome("[1e400]"))
+	line("trailing garbage      ", outcome("{} xyz"))
+	line("unterminated string   ", outcome("[\"abc"))
+	line("trailing comma        ", outcome("[1,2,]"))
+	line("comment               ", outcome("[1] // no"))
+	line("bare NaN              ", outcome("[NaN]"))
+	line("empty input           ", outcome(""))
+	line("lone surrogate        ", outcome("[\"\\ud800\"]"))
+	line("unpaired low          ", outcome("[\"\\udc00\"]"))
+	line("valid surrogate pair  ", outcome("[\"\\ud83d\\ude00\"]"))
+	line("invalid utf8          ", utf8_outcome())
 
-	big = '[9223372036854775807,9223372036854775808,-9223372036854775808]'
+	big = "[9223372036854775807,9223372036854775808,-9223372036854775808]"
 
-	line('i64 max               ', read(big, fn(d) nth_int(d, 0)))
-	line('i64 max + 1 as int    ', read(big, fn(d) nth_int(d, 1)))
-	line('i64 max + 1 as float  ', read(big, fn(d) nth_is_float(d, 1)))
-	line('i64 min               ', read(big, fn(d) nth_int(d, 2)))
-	line('i64 max + 1 kind      ', read(big, fn(d) nth_kind(d, 1)))
+	line("i64 max               ", read(big, fn(d) nth_int(d, 0)))
+	line("i64 max + 1 as int    ", read(big, fn(d) nth_int(d, 1)))
+	line("i64 max + 1 as float  ", read(big, fn(d) nth_is_float(d, 1)))
+	line("i64 min               ", read(big, fn(d) nth_int(d, 2)))
+	line("i64 max + 1 kind      ", read(big, fn(d) nth_kind(d, 1)))
 	// An Int has no bounds, so every integer that parses is one. Past 64 bits
 	// the parser underneath has no integer to read it into.
-	line('past 64 bits          ', outcome('[18446744073709551616]'))
+	line("past 64 bits          ", outcome("[18446744073709551616]"))
 
 	// A float is not an Int, even when it is integral.
-	line('1.0 as int            ', read('[1.0]', fn(d) nth_int(d, 0)))
+	line("1.0 as int            ", read("[1.0]", fn(d) nth_int(d, 0)))
 
 	// Duplicate keys: the first wins for a lookup, both survive on the tape.
-	line('dup first             ', read('{"a":1,"a":2}', fn(d) field_int(d, 'a')))
-	line('dup member count      ', read('{"a":1,"a":2}', fn(d) '${json::size(d)}'))
+	line("dup first             ", read("{\"a\":1,\"a\":2}", fn(d) field_int(d, "a")))
+	line("dup member count      ", read("{\"a\":1,\"a\":2}", fn(d) "${json::size(d)}"))
 
-	line('empty obj/arr         ', read('[{},[]]', empties))
+	line("empty obj/arr         ", read("[{},[]]", empties))
 
-	line('600-deep parses       ', read(nest(600, '1'), deep_kind))
+	line("600-deep parses       ", read(nest(600, "1"), deep_kind))
 
 	// -------------------------------------------------------------- round trip --
 
-	println('')
-	println('-- encode and round trip --')
+	println("")
+	println("-- encode and round trip --")
 
 	built = json::Object([
-		('name', json::Str('ada')),
-		('id', json::Integer(1070000000000000001)),
-		('score', json::Real(9.5)),
-		('active', json::Boolean(True)),
-		('tags', json::List([json::Str('a'), json::Str('b')])),
-		('nickname', json::Null),
-		('empty', json::Object([])),
+		("name", json::Str("ada")),
+		("id", json::Integer(1070000000000000001)),
+		("score", json::Real(9.5)),
+		("active", json::Boolean(True)),
+		("tags", json::List([json::Str("a"), json::Str("b")])),
+		("nickname", json::Null),
+		("empty", json::Object([])),
 	])
 
-	line('encoded       ', json::encode(built))
+	line("encoded       ", json::encode(built))
 
 	// `Number` carries digits verbatim, which is how a JSON integer wider than an
 	// `Int` survives. It is a public constructor, so text that is not a number
 	// reaches the encoder too — and it is written as `null` rather than emitted
 	// raw, which would stop the whole document parsing at the far end.
-	line('number big    ', json::encode(json::Number('18446744073709551615')))
-	line('number signed ', json::encode(json::Number('-1.5e-10')))
-	line('number junk   ', json::encode(json::Number('oops')))
-	line('number empty  ', json::encode(json::Number('')))
-	line('number nested ', json::encode(json::List([json::Number('01'), json::Number('7')])))
+	line("number big    ", json::encode(json::Number("18446744073709551615")))
+	line("number signed ", json::encode(json::Number("-1.5e-10")))
+	line("number junk   ", json::encode(json::Number("oops")))
+	line("number empty  ", json::encode(json::Number("")))
+	line("number nested ", json::encode(json::List([json::Number("01"), json::Number("7")])))
 
 	// Escapes survive both directions. `tricky` is not itself canonical — the
 	// encoder writes `é` as the character — so the canonical form is spelled
 	// out rather than assumed.
-	tricky = '{"q":"a\\"b","nl":"x\\ny","tab":"p\\tq","uni":"\\u00e9","ctl":"\\u0001","empty":"","obj":{},"arr":[]}'
-	tricky_canonical = '{"q":"a\\"b","nl":"x\\ny","tab":"p\\tq","uni":"é","ctl":"\\u0001","empty":"","obj":{},"arr":[]}'
+	tricky = "{\"q\":\"a\\\"b\",\"nl\":\"x\\ny\",\"tab\":\"p\\tq\",\"uni\":\"\\u00e9\",\"ctl\":\"\\u0001\",\"empty\":\"\",\"obj\":{},\"arr\":[]}"
+	tricky_canonical = "{\"q\":\"a\\\"b\",\"nl\":\"x\\ny\",\"tab\":\"p\\tq\",\"uni\":\"é\",\"ctl\":\"\\u0001\",\"empty\":\"\",\"obj\":{},\"arr\":[]}"
 
-	line('reencoded     ', read(tricky, json::reencode))
-	line('stable        ', stable(tricky, tricky_canonical))
+	line("reencoded     ", read(tricky, json::reencode))
+	line("stable        ", stable(tricky, tricky_canonical))
 
 	// An integer above `Int` range has no `Int` to be materialised into, and a
 	// document being passed through must keep it anyway. These are already
 	// canonical, so they must come back byte for byte.
-	line('big uint      ', stable('{"id":18446744073709551615}', '{"id":18446744073709551615}'))
-	line('nested big    ', stable('[[[9999999999999999999]]]', '[[[9999999999999999999]]]'))
+	line("big uint      ", stable("{\"id\":18446744073709551615}", "{\"id\":18446744073709551615}"))
+	line("nested big    ", stable("[[[9999999999999999999]]]", "[[[9999999999999999999]]]"))
 	line(
-		'i64 bounds    ',
+		"i64 bounds    ",
 		stable(
-			'[9223372036854775807,-9223372036854775808]',
-			'[9223372036854775807,-9223372036854775808]',
+			"[9223372036854775807,-9223372036854775808]",
+			"[9223372036854775807,-9223372036854775808]",
 		),
 	)
 
 	// An integral float must not come back as an integer — that would change the
 	// value's kind on every round trip.
-	line('floats        ', read('[1.0,2.5,-0.75,1e2]', json::reencode))
+	line("floats        ", read("[1.0,2.5,-0.75,1e2]", json::reencode))
 
 	// A READY-shaped gateway payload: parsed, decoded into records, re-encoded.
-	ready = '{"t":"READY","s":1,"op":0,"d":{"v":10,"user":{"id":"80351110224678912","username":"ada","bot":false,"nickname":null},"session_id":"abc123","guilds":[{"id":"41771983423143937","unavailable":true}]}}'
+	ready = "{\"t\":\"READY\",\"s\":1,\"op\":0,\"d\":{\"v\":10,\"user\":{\"id\":\"80351110224678912\",\"username\":\"ada\",\"bot\":false,\"nickname\":null},\"session_id\":\"abc123\",\"guilds\":[{\"id\":\"41771983423143937\",\"unavailable\":true}]}}"
 
-	guild_ids = decode::at(['d', 'guilds'], decode::list(decode::field('id', decode::int_string())))
+	guild_ids = decode::at(["d", "guilds"], decode::list(decode::field("id", decode::int_string())))
 
-	line('ready user    ', shown(ready, decode::at(['d', 'user'], user_decoder())))
-	line('ready v       ', shown(ready, decode::at(['d', 'v'], decode::int())))
-	line('ready guilds  ', shown(ready, guild_ids))
-	line('ready session ', shown(ready, decode::at(['d', 'session_id'], decode::string_value())))
-	line('round trip    ', stable(ready, ready))
+	line("ready user    ", shown(ready, decode::at(["d", "user"], user_decoder())))
+	line("ready v       ", shown(ready, decode::at(["d", "v"], decode::int())))
+	line("ready guilds  ", shown(ready, guild_ids))
+	line("ready session ", shown(ready, decode::at(["d", "session_id"], decode::string_value())))
+	line("round trip    ", stable(ready, ready))
 
 	// ------------------------------------------------- decoders and wrong shapes --
 
-	println('')
-	println('-- a decoder built from optional fields still checks the shape --')
+	println("")
+	println("-- a decoder built from optional fields still checks the shape --")
 
 	patch_decoder = decode::map2(
-		decode::optional_field('a', decode::int()),
-		decode::optional_field('b', decode::int()),
+		decode::optional_field("a", decode::int()),
+		decode::optional_field("b", decode::int()),
 		fn(x, y) Patch(x, y),
 	)
 
 	// `with_default` is the same hazard with a value attached: it would overwrite
 	// held state with the default rather than leaving it alone.
 	defaults_decoder = decode::map2(
-		decode::with_default('a', decode::int(), 0),
-		decode::optional_field('b', decode::int()),
+		decode::with_default("a", decode::int(), 0),
+		decode::optional_field("b", decode::int()),
 		fn(x, y) Patch(field::present(x), y),
 	)
 
-	line('patch object  ', shown('{"a":1}', patch_decoder))
-	line('patch array   ', shown('[1,2,3]', patch_decoder))
-	line('patch string  ', shown('"not a config at all"', patch_decoder))
-	line('patch number  ', shown('7', patch_decoder))
-	line('patch null    ', shown('null', patch_decoder))
-	line('defaults array', shown('[1,2,3]', defaults_decoder))
+	line("patch object  ", shown("{\"a\":1}", patch_decoder))
+	line("patch array   ", shown("[1,2,3]", patch_decoder))
+	line("patch string  ", shown("\"not a config at all\"", patch_decoder))
+	line("patch number  ", shown("7", patch_decoder))
+	line("patch null    ", shown("null", patch_decoder))
+	line("defaults array", shown("[1,2,3]", defaults_decoder))
 
 	// `field` and `optional_field` must say the same thing about the same
 	// document, or the required one is the only combinator checking the shape.
-	line('required array', shown('[1,2,3]', decode::field('a', decode::int())))
+	line("required array", shown("[1,2,3]", decode::field("a", decode::int())))
 
 	// ------------------------------------------------------- quoted integers --
 
-	println('')
-	println('-- quoted integers --')
+	println("")
+	println("-- quoted integers --")
 
-	line('quoted pos    ', shown('"5"', decode::int_string()))
-	line('quoted neg    ', shown('"-5"', decode::int_string()))
-	line('quoted i64 min', shown('"-9223372036854775808"', decode::int_string()))
-	line('quoted snowfl ', shown('"1070000000000000001"', decode::int_string()))
-	line('quoted zero   ', shown('"-0"', decode::int_string()))
-	line('quoted plus   ', shown('"+5"', decode::int_string()))
-	line('quoted double ', shown('"--5"', decode::int_string()))
-	line('quoted sign   ', shown('"-"', decode::int_string()))
-	line('quoted empty  ', shown('""', decode::int_string()))
-	line('quoted words  ', shown('"five"', decode::int_string()))
+	line("quoted pos    ", shown("\"5\"", decode::int_string()))
+	line("quoted neg    ", shown("\"-5\"", decode::int_string()))
+	line("quoted i64 min", shown("\"-9223372036854775808\"", decode::int_string()))
+	line("quoted snowfl ", shown("\"1070000000000000001\"", decode::int_string()))
+	line("quoted zero   ", shown("\"-0\"", decode::int_string()))
+	line("quoted plus   ", shown("\"+5\"", decode::int_string()))
+	line("quoted double ", shown("\"--5\"", decode::int_string()))
+	line("quoted sign   ", shown("\"-\"", decode::int_string()))
+	line("quoted empty  ", shown("\"\"", decode::int_string()))
+	line("quoted words  ", shown("\"five\"", decode::int_string()))
 
 	// ------------------------------------------------------------ alternatives --
 
-	println('')
-	println('-- alternatives --')
+	println("")
+	println("-- alternatives --")
 
 	// The first alternative is a parameter of its own, so there is no `one_of`
 	// with nothing to try. When no arm matches, every arm's failure is reported —
 	// a union that matched nothing should say what each arm wanted.
 	id_decoder = decode::one_of(decode::int(), [decode::int_string()])
 
-	line('alt plain     ', shown('5', id_decoder))
-	line('alt quoted    ', shown('"5"', id_decoder))
-	line('alt neither   ', shown('true', id_decoder))
-	line('alt sole      ', shown('true', decode::one_of(decode::int(), [])))
+	line("alt plain     ", shown("5", id_decoder))
+	line("alt quoted    ", shown("\"5\"", id_decoder))
+	line("alt neither   ", shown("true", id_decoder))
+	line("alt sole      ", shown("true", decode::one_of(decode::int(), [])))
 
 	// --------------------------------------------------------- printing a doc --
 
-	println('')
-	println('-- printing a doc --')
+	println("")
+	println("-- printing a doc --")
 
 	// `Doc` is opaque and carries the whole string arena. Its image names what
 	// the cursor points at and where it sits, and stays this short whatever the
 	// document holds. Rendering it as the record it is would print the arena and
 	// the tape instead — every key and every string value, as bytes.
-	line('doc root      ', read(secret_doc(), fn(d) '${d}'))
-	line('doc string    ', read(secret_doc(), fn(d) shown_member(d, 'token')))
-	line('doc int       ', read(secret_doc(), fn(d) shown_member(d, 'n')))
-	line('doc array     ', read(secret_doc(), fn(d) shown_member(d, 'xs')))
-	line('doc float     ', read(secret_doc(), fn(d) shown_member(d, 'f')))
-	line('doc null      ', read(secret_doc(), fn(d) shown_member(d, 'z')))
+	line("doc root      ", read(secret_doc(), fn(d) "${d}"))
+	line("doc string    ", read(secret_doc(), fn(d) shown_member(d, "token")))
+	line("doc int       ", read(secret_doc(), fn(d) shown_member(d, "n")))
+	line("doc array     ", read(secret_doc(), fn(d) shown_member(d, "xs")))
+	line("doc float     ", read(secret_doc(), fn(d) shown_member(d, "f")))
+	line("doc null      ", read(secret_doc(), fn(d) shown_member(d, "z")))
 }

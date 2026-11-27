@@ -742,7 +742,7 @@ impl<'p> Write<'_, '_, 'p> {
         let ty = self.lo.bind_ty(bin)?;
         let int_t = self.lo.around.temps.int;
         match seg {
-            // A `<<'literal'>>` segment matches its UTF-8 bytes as a prefix.
+            // A `<<"literal">>` segment matches its UTF-8 bytes as a prefix.
             TypedBinPatSeg::Utf8Literal { bytes, bits } => {
                 let prefix = self.lo.let_(ty, Atom::Const(*bytes))?;
                 let bool_t = self.lo.around.temps.bool;

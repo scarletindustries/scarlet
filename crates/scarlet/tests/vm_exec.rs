@@ -13,12 +13,12 @@ run_case! {
     // after a dot is still a field.
     if_then_and_blocks: (
         "fn sign(n Int) String {\n\
-         \tif n < 0 then 'negative' else if n == 0 then 'zero' else 'positive'\n\
+         \tif n < 0 then \"negative\" else if n == 0 then \"zero\" else \"positive\"\n\
          }\n\
          fn describe(n Int) String {\n\
          \tif n > 100 {\n\
-         \t\tlabel = 'big'\n\
-         \t\t'${label} ${n}'\n\
+         \t\tlabel = \"big\"\n\
+         \t\t\"${label} ${n}\"\n\
          \t} else sign(n)\n\
          }\n\
          type Step {\n\
@@ -44,8 +44,8 @@ run_case! {
         "pub fn main() {\n\
          \tprintln(1_000_000 + 1)\n\
          \tprintln(match 1000 {\n\
-         \t\t1_000 -> 'grouped'\n\
-         \t\t_ -> 'other'\n\
+         \t\t1_000 -> \"grouped\"\n\
+         \t\t_ -> \"other\"\n\
          \t})\n\
          \tprintln(1_0.2_5 == 10.25)\n\
          }\n",
@@ -140,13 +140,13 @@ run_case! {
 
     // `string.split` with a non-empty delimiter takes `Op::StrSplit`'s `split(&delim)`
     // arm (the empty-delimiter char-explode arm is the one stdlib_string covers).
-    // Trailing/empty fields are preserved, so `'a,,b,'` splits into four parts.
+    // Trailing/empty fields are preserved, so `"a,,b,"` splits into four parts.
     string_split_nonempty_delimiter: (
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string::split('a,b,c', ','))\n\
-         \tprintln(string::split('a,,b,', ','))\n\
-         \tprintln(string::split('nodelim', 'X'))\n\
+         \tprintln(string::split(\"a,b,c\", \",\"))\n\
+         \tprintln(string::split(\"a,,b,\", \",\"))\n\
+         \tprintln(string::split(\"nodelim\", \"X\"))\n\
          }\n",
         "[a, b, c]\n[a, , b, ]\n[nodelim]\n",
     ),
@@ -249,11 +249,11 @@ run_case! {
     binary_index_of: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \th = binary::from_string('abcabc')\n\
-         \tprintln(binary::index_of(h, binary::from_string('bc'), 0))\n\
-         \tprintln(binary::index_of(h, binary::from_string('bc'), 2))\n\
-         \tprintln(binary::index_of(h, binary::from_string('xy'), 0))\n\
-         \tprintln(binary::index_of(h, binary::from_string(''), 3))\n\
+         \th = binary::from_string(\"abcabc\")\n\
+         \tprintln(binary::index_of(h, binary::from_string(\"bc\"), 0))\n\
+         \tprintln(binary::index_of(h, binary::from_string(\"bc\"), 2))\n\
+         \tprintln(binary::index_of(h, binary::from_string(\"xy\"), 0))\n\
+         \tprintln(binary::index_of(h, binary::from_string(\"\"), 3))\n\
          }\n",
         "Some(1)\nSome(4)\nNone\nSome(3)\n",
     ),
@@ -263,12 +263,12 @@ run_case! {
     binary_parse_int: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary::parse_int(binary::from_string('255'), binary::Dec))\n\
-         \tprintln(binary::parse_int(binary::from_string('ff'), binary::Hex))\n\
-         \tprintln(binary::parse_int(binary::from_string('FF'), binary::Hex))\n\
-         \tprintln(binary::parse_int(binary::from_string('99999999999999999999'), binary::Dec))\n\
-         \tprintln(binary::parse_int(binary::from_string('12x'), binary::Dec))\n\
-         \tprintln(binary::parse_int(binary::from_string(''), binary::Dec))\n\
+         \tprintln(binary::parse_int(binary::from_string(\"255\"), binary::Dec))\n\
+         \tprintln(binary::parse_int(binary::from_string(\"ff\"), binary::Hex))\n\
+         \tprintln(binary::parse_int(binary::from_string(\"FF\"), binary::Hex))\n\
+         \tprintln(binary::parse_int(binary::from_string(\"99999999999999999999\"), binary::Dec))\n\
+         \tprintln(binary::parse_int(binary::from_string(\"12x\"), binary::Dec))\n\
+         \tprintln(binary::parse_int(binary::from_string(\"\"), binary::Dec))\n\
          }\n",
         "Ok(255)\nOk(255)\nOk(255)\nOk(99999999999999999999)\nErr(Nil)\nErr(Nil)\n",
     ),
@@ -278,16 +278,16 @@ run_case! {
     int_from_string: (
         "import scarlet/int\n\
          pub fn main() {\n\
-         \tprintln(int::from_string('42'))\n\
-         \tprintln(int::from_string('0'))\n\
-         \tprintln(int::from_string('-42'))\n\
-         \tprintln(int::from_string('+42'))\n\
-         \tprintln(int::from_string('007'))\n\
-         \tprintln(int::from_string(''))\n\
-         \tprintln(int::from_string('-'))\n\
-         \tprintln(int::from_string('12x'))\n\
-         \tprintln(int::from_string(' 42'))\n\
-         \tprintln(int::from_string('9223372036854775808'))\n\
+         \tprintln(int::from_string(\"42\"))\n\
+         \tprintln(int::from_string(\"0\"))\n\
+         \tprintln(int::from_string(\"-42\"))\n\
+         \tprintln(int::from_string(\"+42\"))\n\
+         \tprintln(int::from_string(\"007\"))\n\
+         \tprintln(int::from_string(\"\"))\n\
+         \tprintln(int::from_string(\"-\"))\n\
+         \tprintln(int::from_string(\"12x\"))\n\
+         \tprintln(int::from_string(\" 42\"))\n\
+         \tprintln(int::from_string(\"9223372036854775808\"))\n\
          \tprintln(int::from_string(int::to_string(int::min_value)))\n\
          \tprintln(int::from_string(int::to_string(int::max_value)))\n\
          }\n",
@@ -298,9 +298,9 @@ run_case! {
     binary_eq_ignore_ascii_case: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \ta = binary::from_string('Content-Length')\n\
-         \tprintln(binary::eq_ignore_ascii_case(a, binary::from_string('content-length')))\n\
-         \tprintln(binary::eq_ignore_ascii_case(binary::from_string('abc'), binary::from_string('abd')))\n\
+         \ta = binary::from_string(\"Content-Length\")\n\
+         \tprintln(binary::eq_ignore_ascii_case(a, binary::from_string(\"content-length\")))\n\
+         \tprintln(binary::eq_ignore_ascii_case(binary::from_string(\"abc\"), binary::from_string(\"abd\")))\n\
          }\n",
         "True\nFalse\n",
     ),
@@ -309,7 +309,7 @@ run_case! {
     binary_to_ascii_lower: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary::to_string(binary::to_ascii_lower(binary::from_string('AbC-123'))))\n\
+         \tprintln(binary::to_string(binary::to_ascii_lower(binary::from_string(\"AbC-123\"))))\n\
          }\n",
         "Ok(abc-123)\n",
     ),
@@ -395,7 +395,7 @@ fn and_or_short_circuit_skips_rhs() {
     // line proves the RHS was never reached.
     run_outputs(
         "fn loud(b Bool) Bool {\n\
-         \tprintln('evaluated')\n\
+         \tprintln(\"evaluated\")\n\
          \tb\n\
          }\n\
          pub fn main() {\n\
@@ -412,7 +412,7 @@ fn and_or_evaluate_rhs_when_lhs_undecided() {
     // decide the result, so the RHS must run and `loud` must print.
     run_outputs(
         "fn loud(b Bool) Bool {\n\
-         \tprintln('evaluated')\n\
+         \tprintln(\"evaluated\")\n\
          \tb\n\
          }\n\
          pub fn main() {\n\
@@ -437,8 +437,8 @@ fn neq_on_int_and_enum() {
          pub fn main() {\n\
          \tprintln(1 != 2)\n\
          \tprintln(1 != 1)\n\
-         \tprintln(Good('x') != Good('y'))\n\
-         \tprintln(Good('x') != Good('x'))\n\
+         \tprintln(Good(\"x\") != Good(\"y\"))\n\
+         \tprintln(Good(\"x\") != Good(\"x\"))\n\
          }\n",
         "True\nFalse\nTrue\nFalse\n",
     );
@@ -450,12 +450,12 @@ fn eq_on_string_array_tuple() {
     // both directions.
     run_outputs(
         "pub fn main() {\n\
-         \tprintln('ab' == 'ab')\n\
-         \tprintln('ab' == 'ac')\n\
+         \tprintln(\"ab\" == \"ab\")\n\
+         \tprintln(\"ab\" == \"ac\")\n\
          \tprintln([1, 2] == [1, 2])\n\
          \tprintln([1, 2] == [1, 3])\n\
-         \tprintln((1, 'a') == (1, 'a'))\n\
-         \tprintln((1, 'a') == (1, 'b'))\n\
+         \tprintln((1, \"a\") == (1, \"a\"))\n\
+         \tprintln((1, \"a\") == (1, \"b\"))\n\
          }\n",
         "True\nFalse\nTrue\nFalse\nTrue\nFalse\n",
     );
@@ -697,7 +697,7 @@ run_case! {
 fn an_or_on_an_index_does_not_evaluate_an_impure_default() {
     run_outputs(
         "fn side() Int {\n\
-         \tprintln('evaluated')\n\
+         \tprintln(\"evaluated\")\n\
          \t0\n\
          }\n\
          fn f(a Array(Int)) Int { a[0] or side() }\n\
@@ -784,7 +784,7 @@ run_case! {
         "import scarlet/string\n\
          pub fn main() {\n\
          \tf = string::length\n\
-         \tprintln(f('abc'))\n\
+         \tprintln(f(\"abc\"))\n\
          }\n",
         "3\n",
     ),
@@ -792,7 +792,7 @@ run_case! {
         "import scarlet/array\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(array::map(['a', 'bb', 'ccc'], string::length))\n\
+         \tprintln(array::map([\"a\", \"bb\", \"ccc\"], string::length))\n\
          }\n",
         "[1, 2, 3]\n",
     ),
@@ -821,7 +821,7 @@ run_case! {
          \tarray::map(xs, string::length)\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(lens(['a', 'bb', 'ccc']))\n\
+         \tprintln(lens([\"a\", \"bb\", \"ccc\"]))\n\
          }\n",
         "[1, 2, 3]\n",
     ),
@@ -891,7 +891,7 @@ run_case! {
         "import scarlet/json\n\
          import scarlet/wire\n\
          fn n_of(d json::Doc) Int {\n\
-         \tmatch json::field(d, 'n') {\n\
+         \tmatch json::field(d, \"n\") {\n\
          \t\tSome(v) -> json::int(v) or 0 - 1\n\
          \t\tNone -> 0 - 2\n\
          \t}\n\
@@ -903,7 +903,7 @@ run_case! {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(match json::parse('{\"m\": 7, \"n\": 41}') {\n\
+         \tprintln(match json::parse(\"{\\\"m\\\": 7, \\\"n\\\": 41}\") {\n\
          \t\tOk(doc) -> through_wire(doc)\n\
          \t\tErr(_) -> 0 - 4\n\
          \t})\n\

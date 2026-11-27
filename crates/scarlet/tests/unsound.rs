@@ -11,7 +11,7 @@ reject_case! {
          \ts = process::subject()\n\
          \tput = fn(v) { process::send(s, v) }\n\
          \tput(1)\n\
-         \tput('x')\n\
+         \tput(\"x\")\n\
          }\n",
         "Type mismatch",
     ),
@@ -23,7 +23,7 @@ reject_case! {
          }\n\
          pub fn main() {\n\
          \tput(1)\n\
-         \tput('x')\n\
+         \tput(\"x\")\n\
          }\n",
         "Type mismatch",
     ),
@@ -42,7 +42,7 @@ reject_case! {
     /// U2: `if` with no else types as Nil but evaluates to `e`, smuggling a
     /// String into an Int through `Option(T)` widening.
     u2_if_no_else_is_rejected: (
-        "fn smuggle() Option(Int) { if True { 'hello' } }\n\
+        "fn smuggle() Option(Int) { if True { \"hello\" } }\n\
          pub fn main() {\n\
          \tn = smuggle() or 0\n\
          \tprintln(n + 1)\n\
@@ -56,7 +56,7 @@ reject_case! {
         "type Box(t) { Box(value t) }\n\
          type Holder { Holder(box Box) }\n\
          pub fn main() {\n\
-         \th = Holder(box: Box(value: 'hello'))\n\
+         \th = Holder(box: Box(value: \"hello\"))\n\
          \tprintln(h.box.value + 100)\n\
          }\n",
         "Type 'Box' expects 1 type argument",
@@ -77,13 +77,13 @@ reject_case! {
         "not bound in the first alternative",
     ),
 
-    /// U8: range pattern bounds not unified with Int let `true..'z'` typecheck
+    /// U8: range pattern bounds not unified with Int let `true.."z"` typecheck
     /// and crash the VM comparator.
     u8_range_pattern_bounds_must_be_int: (
         "pub fn main() {\n\
          \tr = match 5 {\n\
-         \t\ttrue..'z' -> 'huh'\n\
-         \t\t_ -> 'ok'\n\
+         \t\ttrue..\"z\" -> \"huh\"\n\
+         \t\t_ -> \"ok\"\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -166,7 +166,7 @@ run_case! {
     u3_err_constructor_typechecks: (
         "type E { E(msg String) }\n\
          fn f() Result(Int, E) {\n\
-         \tErr(E(msg: 'boom'))\n\
+         \tErr(E(msg: \"boom\"))\n\
          }\n\
          pub fn main() {\n\
          \tr = f() or e -> match e { E(_) -> 99 }\n\
@@ -176,12 +176,12 @@ run_case! {
     ),
 
     // U4: a block-scoped type env with a function-scoped slot map lets an inner
-    // `x = 'hi'` overwrite the outer slot while the outer type stays Int.
+    // `x = "hi"` overwrite the outer slot while the outer type stays Int.
     u4_block_scope_preserves_outer_slot: (
         "pub fn main() {\n\
          \tx = 1\n\
          \tr = {\n\
-         \t\tx = 'hi'\n\
+         \t\tx = \"hi\"\n\
          \t\tx\n\
          \t}\n\
          \tprintln(r)\n\
@@ -230,7 +230,7 @@ run_case! {
     u15_tuple_index_then_field_access: (
         "type P { P(name String) }\n\
          pub fn main() {\n\
-         \tt = (P(name: 'hi'), 5)\n\
+         \tt = (P(name: \"hi\"), 5)\n\
          \tprintln(t.0.name)\n\
          }\n",
         "hi\n",
@@ -442,7 +442,7 @@ fn u22_same_scope_shadow_preserves_closure_capture() {
         "pub fn main() {\n\
          \tn = 1\n\
          \tf = fn() n + 100\n\
-         \tn = 'hello'\n\
+         \tn = \"hello\"\n\
          \tprintln(f())\n\
          \tprintln(n)\n\
          }\n",
@@ -461,7 +461,7 @@ reject_case! {
          pub fn main() {\n\
          \ts = process::subject()\n\
          \tprocess::send(s, 1)\n\
-         \tprocess::send(s, 'text')\n\
+         \tprocess::send(s, \"text\")\n\
          }\n",
         "Type mismatch: expected 'Int', got 'String'",
     ),
@@ -514,7 +514,7 @@ ok_case! {
     a_bound_function_literal_stays_generic: (
         "pub fn main() {\n\
          \tid = fn(x) x\n\
-         \tprintln('${id(1)} ${id('one')}')\n\
+         \tprintln(\"${id(1)} ${id(\"one\")}\")\n\
          }\n",
     ),
     /// A call's result stays generic over what only comes out of it: an
@@ -523,9 +523,9 @@ ok_case! {
         "import scarlet/map\n\
          pub fn main() {\n\
          \tm = map::new()\n\
-         \ta = map::set(m, 'age', 30)\n\
-         \tb = map::set(m, 'name', 'Ann')\n\
-         \tprintln('${map::size(a)} ${map::size(b)}')\n\
+         \ta = map::set(m, \"age\", 30)\n\
+         \tb = map::set(m, \"name\", \"Ann\")\n\
+         \tprintln(\"${map::size(a)} ${map::size(b)}\")\n\
          }\n",
     ),
     /// A custom type's parameter is covariant when its fields only hand it
@@ -546,7 +546,7 @@ ok_case! {
          }\n\
          pub fn main() {\n\
          \ts = empty()\n\
-         \tprintln('${depth(Top(item: 1, rest: s))} ${depth(Top(item: 'a', rest: s))}')\n\
+         \tprintln(\"${depth(Top(item: 1, rest: s))} ${depth(Top(item: \"a\", rest: s))}\")\n\
          }\n",
     ),
     /// So is a constructor of values, like an empty array.
@@ -554,7 +554,7 @@ ok_case! {
         "import scarlet/array\n\
          pub fn main() {\n\
          \tnone = []\n\
-         \tprintln('${array::length([1, ..none])} ${array::length(['a', ..none])}')\n\
+         \tprintln(\"${array::length([1, ..none])} ${array::length([\"a\", ..none])}\")\n\
          }\n",
     ),
 }

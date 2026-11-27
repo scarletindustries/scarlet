@@ -37,7 +37,7 @@ fn dis_fails_on_a_name_nothing_has() {
 #[test]
 fn dis_reports_a_compile_error_instead_of_a_listing() {
     let p = Project::new("dis_bad");
-    p.write("bad.sca", "pub fn main() {\n\tprintln(1 + 'a')\n}\n");
+    p.write("bad.sca", "pub fn main() {\n\tprintln(1 + \"a\")\n}\n");
     let out = run_al("dis", &p.dir.join("bad.sca"));
     assert!(!out.success);
     assert!(out.stderr.contains("Type mismatch"), "{}", out.stderr);

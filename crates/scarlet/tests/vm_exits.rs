@@ -54,12 +54,12 @@ pub fn main() {
 	})
 	_ = process::monitor(worker, downs, fn(d) d)
 	match process::receive(downs).reason {
-		process::Crashed(process::SliceOutOfBounds(from, to, length)) -> println('crashed: slice ${from}..${to} of ${length}')
+		process::Crashed(process::SliceOutOfBounds(from, to, length)) -> println("crashed: slice ${from}..${to} of ${length}")
 		process::Crashed(process::IndexOutOfBounds(..) | process::ForeignReceive | process::TypeMismatch(..) | process::Supervision(_)) ->
-			println('crashed some other way')
-		process::Normal | process::NoProcess | process::Killed -> println('did not crash')
+			println("crashed some other way")
+		process::Normal | process::NoProcess | process::Killed -> println("did not crash")
 	}
-	println('spawner still running: ${third(xs)}')
+	println("spawner still running: ${third(xs)}")
 }
 "#,
     );
@@ -89,9 +89,9 @@ fn a_main_crash_fails_the_run_and_is_reported_once() {
         r#"import scarlet/int
 
 pub fn main() {
-	println('before')
+	println("before")
 	_ = int::bitwise_shift_left(1, int::max_value)
-	println('after')
+	println("after")
 }
 "#,
     );
@@ -156,7 +156,7 @@ pub fn main() {
 	})
 	// Blocked for ever: only the link can end this process.
 	_ = process::receive(process::subject())
-	println('unreachable')
+	println("unreachable")
 }
 "#,
     );
@@ -217,10 +217,10 @@ pub fn main() {
 	})
 	_ = process::monitor(middle, downs, fn(d) d)
 	match process::receive(downs).reason {
-		process::Killed -> println('middle was killed by its child')
-		process::Normal | process::NoProcess | process::Crashed(_) -> println('unexpected reason')
+		process::Killed -> println("middle was killed by its child")
+		process::Normal | process::NoProcess | process::Crashed(_) -> println("unexpected reason")
 	}
-	println('main survived')
+	println("main survived")
 }
 "#,
     );
@@ -253,30 +253,30 @@ import scarlet/process
 
 pub fn main() {
 	xs = [1, 2, 3]
-	match net::listen('127.0.0.1', 0) {
+	match net::listen("127.0.0.1", 0) {
 		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
 				_ = net::serve_on(server, fn(sock) {
 					match socket::read(sock, 16) {
 						Ok(socket::Data(b)) -> {
-							if b == <<'crash'>> {
+							if b == <<"crash">> {
 								_ = xs[0..9]
 								Nil
 							} else {
-								socket::write(sock, <<'served'>>) or Nil
+								socket::write(sock, <<"served">>) or Nil
 							}
 						}
 						Ok(socket::Closed) -> Nil
 						Err(_) -> Nil
 					}
 				})
-				println('listening ${address::to_string(addr)}')
+				println("listening ${address::to_string(addr)}")
 				// Keep serving until told to stop; the test drives connections.
 				process::sleep(20000)
 			}
-			Err(_) -> println('no addr')
+			Err(_) -> println("no addr")
 		}
-		Err(_) -> println('no listen')
+		Err(_) -> println("no listen")
 	}
 }
 "#;

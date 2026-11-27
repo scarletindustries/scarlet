@@ -54,7 +54,7 @@ type Wide {
 }
 
 fn twice(n Int) Int {
-	println('twice ${n}')
+	println("twice ${n}")
 	n * 2
 }
 
@@ -74,7 +74,7 @@ fn fill(l Line, n Int) Line {
 	if n == 0 {
 		l
 	} else {
-		fill(Line(..l, seen: [..l.seen, n], tags: map::set(l.tags, '${n % 5}', n)), n - 1)
+		fill(Line(..l, seen: [..l.seen, n], tags: map::set(l.tags, "${n % 5}", n)), n - 1)
 	}
 }
 
@@ -110,7 +110,7 @@ fn put(b Box(a), value a) Box(a) {
 }
 
 fn many(w Wide, n Int) Wide {
-	Wide(..w, g: n, a: n + 1, c: 'c${n}', m: twice(n))
+	Wide(..w, g: n, a: n + 1, c: "c${n}", m: twice(n))
 }
 
 fn few(w Wide, n Int) Wide {
@@ -144,7 +144,7 @@ fn last(xs Array(Int)) Int {
 }
 
 pub fn main() {
-	p = Point(1, 2, 'start')
+	p = Point(1, 2, "start")
 	println(shift(p, 10))
 	println(p)
 	println(walk(p, 1000))
@@ -160,7 +160,7 @@ pub fn main() {
 	full = fill(line, 100)
 	println(array::length(full.seen) + last(full.seen) + map::size(full.tags))
 	println(Line(..full, from: full.to, to: full.from, seen: []))
-	println(Line(..line, from: Point(..line.from, name: 'moved')))
+	println(Line(..line, from: Point(..line.from, name: "moved")))
 	println(line.from)
 
 	c = wrap(Chain(None, 0), 50)
@@ -168,19 +168,19 @@ pub fn main() {
 	println(depth(Chain(..c, inner: None), 0))
 	println(depth(c, 0))
 
-	circle = Circle(1, 2.5, ['round'])
-	square = Square(3.0, 2, ['flat'])
+	circle = Circle(1, 2.5, ["round"])
+	square = Square(3.0, 2, ["flat"])
 	println(rename(circle, 7))
 	println(rename(rename(square, 8), 9))
 	println(rounded(square))
 	println(rounded(rename(circle, 10)))
 	println(circle)
 
-	println(put(put(Box(1, 0, 'n'), 2), 3))
-	println(put(Box([1], 0, 'xs'), [..[2], 3]))
-	println(put(Box(p, 0, 'p'), Point(..p, y: 0)))
+	println(put(put(Box(1, 0, "n"), 2), 3))
+	println(put(Box([1], 0, "xs"), [..[2], 3]))
+	println(put(Box(p, 0, "p"), Point(..p, y: 0)))
 
-	w = Wide(1, 1.5, 'c', [1, 2], True, None, 2, 3, 'i', 4, 5, 6, 7)
+	w = Wide(1, 1.5, "c", [1, 2], True, None, 2, 3, "i", 4, 5, 6, 7)
 	println(many(w, 20))
 	println(few(few(w, 1), 2))
 	println(few(many(few(w, 3), 4), 5))
@@ -197,12 +197,12 @@ pub fn main() {
 	println(move(2))
 	println(array::map([p, shift(p, 5)], fn(q) Point(..q, x: q.x * 2, y: q.y * 2)))
 	println(if p.x > 0 {
-		Point(..p, name: 'if')
+		Point(..p, name: "if")
 	} else {
 		p
 	})
 	println(match Some(p) {
-		Some(q) -> Point(..q, name: 'match')
+		Some(q) -> Point(..q, name: "match")
 		None -> p
 	})
 }

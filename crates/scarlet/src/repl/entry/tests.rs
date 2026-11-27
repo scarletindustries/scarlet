@@ -31,7 +31,16 @@ fn a_doc_comment_travels_with_its_declaration() {
 
 #[test]
 fn a_bare_expression_is_never_kept() {
-    let p = parts("println('once')");
+    let p = parts(r#"println("once")"#);
     assert!(p.definitions.is_empty() && p.imports.is_empty());
-    assert_eq!(p.expressions, "println('once')\n");
+    assert_eq!(p.expressions, "println(\"once\")\n");
+}
+
+/// Single quotes don't ask for another line. A block left open still does.
+#[test]
+fn single_quotes_are_rejected_when_the_entry_is_whole() {
+    for src in ["'a'\n", "x = 'a ${'b'}'\n", "don't\n", "x = 'a\n"] {
+        assert!(matches!(parse(src), Entry::Rejected(_)), "{src}");
+    }
+    assert!(matches!(parse("fn f() {\n'a'\n"), Entry::Incomplete(_)));
 }

@@ -119,7 +119,7 @@ fn paint(
     Ok(out)
 }
 
-/// A copy of the scanner's interpolation state. Inside `'a ${b} c'` the string
+/// A copy of the scanner's interpolation state. Inside `"a ${b} c"` the string
 /// body and the embedded expression are coloured differently, and only the
 /// scanner's own rule (`${` opens, the matching `}` closes) says which is
 /// which.

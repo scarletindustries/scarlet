@@ -92,7 +92,7 @@ fn repeat(times Int, bounces Int, positions Int) (Int, Int) {
 
 pub fn main() {
 	(bounces, positions) = benchmark()
-	println('${bounces} ${positions}')
+	println("${bounces} ${positions}")
 	(bounces, positions) = repeat(1000, 0, 0)
-	println('${bounces} ${positions}')
+	println("${bounces} ${positions}")
 }

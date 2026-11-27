@@ -196,7 +196,7 @@ What goes, and why:
 - `Load::Capture` and `Load::SelfClosure` go. A capture is `Capture(i)(env)`, a part read out of `params[0]`. A lambda that calls itself passes its `env` on like any argument.
 - A built-in that returns a found flag and a value does not exist. On a miss the value would be a Nil in a register the checker thinks is owned, and no state means "present only when the flag is true". `Probe` binds the value only in the arm where it was found. BEAM's `get_map_elements` and `bs_get_utf8` take a fail label for the same reason.
 
-A `LitKey::Text` or `Bits` is a `ConstId` because `build_program` already interns constants by content (`const_ids: HashMap<Const, ConstId>`), so the id is the identity of the bytes. A float cannot use a `ConstId`, because `Const` compares floats by bits and a match compares them with `==`. I ran the case: `(0.0, 1) -> 'A'`, `(-0.0, 2) -> 'B'`, `_ -> 'C'` prints B for `(0.0, 2)` today, and a tree keyed by `ConstId` would print C.
+A `LitKey::Text` or `Bits` is a `ConstId` because `build_program` already interns constants by content (`const_ids: HashMap<Const, ConstId>`), so the id is the identity of the bytes. A float cannot use a `ConstId`, because `Const` compares floats by bits and a match compares them with `==`. I ran the case: `(0.0, 1) -> "A"`, `(-0.0, 2) -> "B"`, `_ -> "C"` prints B for `(0.0, 2)` today, and a tree keyed by `ConstId` would print C.
 
 ### The checker's witness
 

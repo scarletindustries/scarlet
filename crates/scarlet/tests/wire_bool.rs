@@ -55,7 +55,7 @@ fn a_record_with_a_bool_field_and_an_array_of_bools_round_trip() {
          \t\t\tprintln(back == f)\n\
          \t\t\tprintln(if back.on { back.n } else { 0 })\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          \txs = [True, False, True]\n\
          \tmatch wire::decode(wire::encode(xs)) {\n\
@@ -63,7 +63,7 @@ fn a_record_with_a_bool_field_and_an_array_of_bools_round_trip() {
          \t\t\tprintln(ys == xs)\n\
          \t\t\tprintln(ys == [True, True, True])\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "True\n3\nTrue\nFalse\n",

@@ -448,7 +448,7 @@ const LIMIT = 3\n\
 fn pick(c Color) Int { if c == Green { 1 } else { 0 } }\n\
 pub fn main() {\n\
 \tchosen = Red\n\
-\tbx = Box(label: 'hi')\n\
+\tbx = Box(label: \"hi\")\n\
 \tshown = bx.label\n\
 \ttotal = LIMIT + 1\n\
 \tprintln(pick(chosen))\n\
@@ -564,7 +564,7 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
 const HTTP_ENTRY: &str = "import scarlet/binary\n\
 import scarlet/http/h1\n\
 pub fn main() {\n\
-\tr = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+\tr = match h1::parse_request(binary::from_string(\"GET / HTTP/1.1\\r\\n\\r\\n\"), 0) {\n\
 \t\th1::Done(_, _, _, _, _, consumed) -> consumed\n\
 \t\th1::NeedMore -> 0 - 1\n\
 \t\th1::Bad(s) -> s\n\
@@ -600,7 +600,7 @@ fn build_recheck_keeps_stdlib_types_intact() {
 // `Header` to real enum types rather than collapsing them to a builtin.
 const HTTP_HELLO_ENTRY: &str = "import scarlet/http\n\
 pub fn main() {\n\
-\tmatch http::serve('127.0.0.1', 8080, fn(_req) http::text('hi'), fn(_) Nil) {\n\
+\tmatch http::serve(\"127.0.0.1\", 8080, fn(_req) http::text(\"hi\"), fn(_) Nil) {\n\
 \t\tOk(_) -> Nil\n\
 \t\tErr(e) -> println(e)\n\
 \t}\n\
@@ -701,12 +701,12 @@ fn a_local_named_like_an_import_keeps_both() {
     common::run_project_outputs(&p, "run", "a.sca", "42\n");
 }
 
-/// `Config(name: 'x')` names the constructor, never the type, so reachability
+/// `Config(name: "x")` names the constructor, never the type, so reachability
 /// only reaches the type through the structural constructor edge.
 #[test]
 fn a_used_constructor_keeps_its_type_alive() {
     let p = Project::new("unused_ctor_type");
-    let entry = "type Config {\n\tname String\n}\n\npub const config = Config(name: 'x')\n\n\
+    let entry = "type Config {\n\tname String\n}\n\npub const config = Config(name: \"x\")\n\n\
                  pub fn main() {\n\tprintln(config.name)\n}\n";
     p.write("a.sca", entry);
     let s = checked_with(&p, entry);

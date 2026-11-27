@@ -75,7 +75,7 @@ pub type Response {
 
 // One request. `url` decides the transport, host, port and target.
 pub type Request {
-	// Wire bytes, like `<<'GET'>>`.
+	// Wire bytes, like `<<"GET">>`.
 	method Binary
 	url url::Url
 	// Fields to send in addition to `Host`, `Content-Length` and `Connection`.
@@ -96,15 +96,15 @@ pub const READ_TIMEOUT_MS = 30000
 
 const READ_SIZE = 65536
 
-const CRLF = <<'\r\n'>>
-const SP = <<' '>>
-const HTTP11 = <<'HTTP/1.1'>>
-const NAME_HOST = <<'Host'>>
-const NAME_CONTENT_LENGTH = <<'Content-Length'>>
-const NAME_CONNECTION = <<'Connection'>>
-const VAL_CLOSE = <<'close'>>
+const CRLF = <<"\r\n">>
+const SP = <<" ">>
+const HTTP11 = <<"HTTP/1.1">>
+const NAME_HOST = <<"Host">>
+const NAME_CONTENT_LENGTH = <<"Content-Length">>
+const NAME_CONNECTION = <<"Connection">>
+const VAL_CLOSE = <<"close">>
 const EMPTY = <<>>
-const HEAD = <<'HEAD'>>
+const HEAD = <<"HEAD">>
 
 // An `Io` over a cleartext socket.
 pub fn plain(sock socket::Socket) Io {
@@ -167,7 +167,7 @@ pub fn fetch_until(
 // Sends `GET url` with no extra fields.
 pub fn get(url_text String) Result(Response, ClientError) {
 	u <- result::then(url::parse(url_text) |> result::map_err(BadUrl))
-	fetch(Request(method: <<'GET'>>, url: u, headers: [], body: EMPTY))
+	fetch(Request(method: <<"GET">>, url: u, headers: [], body: EMPTY))
 }
 
 // Sends `req` over an open `io` and reads the response back. It's for a caller

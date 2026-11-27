@@ -139,7 +139,7 @@ fn an_audited_load_checks_what_is_written() {
         \td = Dot(Light, 1.5, 3, None)\n\
         \ts = same(shade(d))\n\
         \tkept = [s, s]\n\
-        \tprintln(go(n(d), s, at(d), ''))\n\
+        \tprintln(go(n(d), s, at(d), \"\"))\n\
         \tprintln(kept)\n\
         \tprintln((next(d), more(d), looked(map::set(map::new(), 1, s), 1)))\n\
         }\n";

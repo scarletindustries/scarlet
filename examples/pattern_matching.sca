@@ -19,19 +19,19 @@ type Event {
 fn describe(e Event) String {
 	match e {
 		// A nested pattern reaches into the payload's payload.
-		Click(Point(0, 0), _) -> 'click at the origin'
+		Click(Point(0, 0), _) -> "click at the origin"
 		// A guard refines a pattern with a test the pattern can't express.
-		Click(Point(x, y), _) if x == y -> 'click on the diagonal at ${x}'
+		Click(Point(x, y), _) if x == y -> "click on the diagonal at ${x}"
 		// Fields match by label; .. drops the ones not named.
-		Click(at: p, ..) -> 'click at ${p.x},${p.y}'
-		Key(27, _) -> 'escape'
-		Key(code, True) -> 'shift + key ${code}'
-		Key(code, False) -> 'key ${code}'
+		Click(at: p, ..) -> "click at ${p.x},${p.y}"
+		Key(27, _) -> "escape"
+		Key(code, True) -> "shift + key ${code}"
+		Key(code, False) -> "key ${code}"
 		// A payload can be a literal, negative ones included.
-		Scroll(1) -> 'scroll nudge down'
-		Scroll(-1) -> 'scroll nudge up'
-		Scroll(dy) -> 'scroll ${dy}'
-		Quit -> 'quit'
+		Scroll(1) -> "scroll nudge down"
+		Scroll(-1) -> "scroll nudge up"
+		Scroll(dy) -> "scroll ${dy}"
+		Quit -> "quit"
 	}
 }
 
@@ -40,41 +40,41 @@ fn describe(e Event) String {
 fn status_class(code Int) String {
 	match code {
 		// An or-pattern lets several literals share one body.
-		200 | 201 | 204 -> 'success'
-		300..400 -> 'redirect'
-		400..500 -> 'client error'
-		500..600 -> 'server error'
-		_ -> 'unclassified'
+		200 | 201 | 204 -> "success"
+		300..400 -> "redirect"
+		400..500 -> "client error"
+		500..600 -> "server error"
+		_ -> "unclassified"
 	}
 }
 
 // Literal patterns work on strings as well as numbers.
 fn effect(method String) String {
 	match method {
-		'GET' | 'HEAD' -> 'read'
-		'POST' | 'PUT' | 'PATCH' -> 'write'
-		'DELETE' -> 'remove'
-		_ -> 'unknown'
+		"GET" | "HEAD" -> "read"
+		"POST" | "PUT" | "PATCH" -> "write"
+		"DELETE" -> "remove"
+		_ -> "unknown"
 	}
 }
 
 // Matching a tuple keeps the four cases side by side instead of nested ifs.
 fn quadrant(p Point) String {
 	match (p.x >= 0, p.y >= 0) {
-		(True, True) -> 'top right'
-		(True, False) -> 'bottom right'
-		(False, True) -> 'top left'
-		(False, False) -> 'bottom left'
+		(True, True) -> "top right"
+		(True, False) -> "bottom right"
+		(False, True) -> "top left"
+		(False, False) -> "bottom left"
 	}
 }
 
 // Array patterns match by shape, and ..rest binds whatever is left over.
 fn batch(codes Array(Int)) String {
 	match codes {
-		[] -> 'empty batch'
-		[only] -> 'single ${only}'
-		[first, second] -> 'pair ${first}, ${second}'
-		[first, ..rest] -> 'first ${first} + ${string::inspect(rest)}'
+		[] -> "empty batch"
+		[only] -> "single ${only}"
+		[first, second] -> "pair ${first}, ${second}"
+		[first, ..rest] -> "first ${first} + ${string::inspect(rest)}"
 	}
 }
 
@@ -91,8 +91,8 @@ pub fn main() {
 	]
 	array::each(events, fn(e) println(describe(e)))
 
-	array::each([200, 302, 404, 503, 100], fn(c) println('${c}: ${status_class(c)}'))
-	array::each(['GET', 'PATCH', 'DELETE', 'TRACE'], fn(m) println('${m} -> ${effect(m)}'))
+	array::each([200, 302, 404, 503, 100], fn(c) println("${c}: ${status_class(c)}"))
+	array::each(["GET", "PATCH", "DELETE", "TRACE"], fn(m) println("${m} -> ${effect(m)}"))
 
 	println(quadrant(Point(x: 4, y: -2)))
 	println(batch([]))

@@ -378,7 +378,7 @@ fn program_with(params: &[(&str, &str)], ty: &str, body: &str) -> String {
          pub fn make(n Int) Two {{ Two(n, n) }}\n\
          pub fn copy(p P) P {{ p }}\n\
          pub fn f({}) {ty} {{\n\t{body}\n}}\n\
-         pub fn main() {{ println('') }}\n",
+         pub fn main() {{ println(\"\") }}\n",
         params.join(", ")
     )
 }
@@ -416,12 +416,12 @@ fn a_record_update_is_one_where_holding_its_base_cannot_be_seen() {
         "P(..p, c: if i > j { Red } else { p.c })",
         "P(..p, b: p.s == r.s)",
         "P(..p, n: array::length(array::put(p.xs, 0, 1)))",
-        "P(..p, n: string::length('${i}'))",
+        r#"P(..p, n: string::length("${i}"))"#,
         "P(..p, n: match ys { [] -> 0\n [h, ..] -> h + 1\n })",
         "P(n: work(1), ..p)",
-        "P(..p, n: Q(..p.q, s: 'x').n)",
+        r#"P(..p, n: Q(..p.q, s: "x").n)"#,
         // Fields that hold anything are set to what takes a few steps.
-        "P(..p, s: 'x')",
+        r#"P(..p, s: "x")"#,
         "P(..p, s: r.s)",
         "P(..p, xs: [])",
         "P(..p, xs: [i, j])",
@@ -429,11 +429,11 @@ fn a_record_update_is_one_where_holding_its_base_cannot_be_seen() {
         "P(..p, xs: ys)",
         "P(..p, conn: None)",
         "P(..p, conn: r.conn)",
-        "P(..p, conn: r.conn, xs: ys, s: 'x')",
+        r#"P(..p, conn: r.conn, xs: ys, s: "x")"#,
         "P(..p, g: f2)",
         "P(..p, g: fn(k) k + i)",
         "P(..p, t: Node(p.t, Leaf))",
-        "P(..p, q: Q(i, 's', p.s))",
+        r#"P(..p, q: Q(i, "s", p.s))"#,
         "P(..p, q: r.q)",
         "P(..p, m: r.m)",
         "P(..p, o: Some(i))",
@@ -464,8 +464,8 @@ fn a_record_update_is_one_where_holding_its_base_cannot_be_seen() {
         "P(..p, xs: ys[0..1] or [])",
         "P(..p, n: 1, xs: list(i))",
         "P(..p, xs: ys, n: work(i))",
-        "P(..p, s: p.s + 'x')",
-        "P(..p, s: '${i}')",
+        r#"P(..p, s: p.s + "x")"#,
+        r#"P(..p, s: "${i}")"#,
         "P(..p, m: map::set(p.m, 1, 2))",
         "P(..p, conn: match f2(i) { 0 -> None\n _ -> p.conn\n })",
         "P(..p, conn: None, n: i * j)",
@@ -476,7 +476,7 @@ fn a_record_update_is_one_where_holding_its_base_cannot_be_seen() {
         "P(..p, o: Some(i + 1))",
         "P(..p, o: Some(f2(i)))",
         "P(..p, g: fn(k) k + i, n: work(1))",
-        "P(..p, t: { println('')\n Leaf })",
+        "P(..p, t: { println(\"\")\n Leaf })",
         "P(..p, o: p.xs[i + 1])",
         // What is set before the base runs is of a field of it too.
         "P(conn: r.conn, ..copy(p), n: work(i))",
@@ -488,7 +488,7 @@ fn a_record_update_is_one_where_holding_its_base_cannot_be_seen() {
         assert!(f.contains("ctor"), "{body}:\n{f}");
     }
     // An update that a field is set to may write in place, so it is not brief.
-    let nested = of_p("P(..p, q: Q(..p.q, s: 'x'))");
+    let nested = of_p(r#"P(..p, q: Q(..p.q, s: "x"))"#);
     assert_eq!(updates(&nested), 1, "{nested}");
     let of_g = |ty: &str, body: &str| {
         let params = [("g", ty), ("val", "a"), ("i", "Int")];
@@ -588,7 +588,7 @@ fn a_record_update_of_many_fields_is_one_when_it_keeps_more() {
             let fields: String = (0..n).map(|i| format!("\tf{i} Int\n")).collect();
             let set: String = (0..sets).map(|i| format!(", f{i}: i")).collect();
             let core = f_of(&format!(
-                "type P {{\n{fields}}}\nfn f(p P, i Int) P {{ P(..p{set}) }}\npub fn main() {{ println('') }}\n"
+                "type P {{\n{fields}}}\nfn f(p P, i Int) P {{ P(..p{set}) }}\npub fn main() {{ println(\"\") }}\n"
             ));
             let kept = n - sets;
             let want = kept > 0 && (sets <= 3 || kept >= 2 * sets);
@@ -875,15 +875,15 @@ core_golden!(
      }\n\
      fn to_method(m Binary) Method {\n\
      \tmatch m {\n\
-     \t\t<<'GET'>> -> Get\n\
-     \t\t<<'POST'>> -> Post\n\
-     \t\t<<'PUT'>> -> Put\n\
-     \t\t<<'DELETE'>> -> Delete\n\
+     \t\t<<\"GET\">> -> Get\n\
+     \t\t<<\"POST\">> -> Post\n\
+     \t\t<<\"PUT\">> -> Put\n\
+     \t\t<<\"DELETE\">> -> Delete\n\
      \t\t_ -> Other(m)\n\
      \t}\n\
      }\n\
      pub fn main() {\n\
-     \tto_method(<<'PUT'>>)\n\
+     \tto_method(<<\"PUT\">>)\n\
      }\n"
 );
 
@@ -1095,16 +1095,16 @@ fn binary_match_arm_bodies_lowered_once() {
     assert_arm_bodies_once(
         "fn code(m Binary) Int {\n\
          \tmatch m {\n\
-         \t\t<<'GET'>> -> 101\n\
-         \t\t<<'POST'>> -> 202\n\
-         \t\t<<'PUT'>> -> 303\n\
-         \t\t<<'DELETE'>> -> 404\n\
-         \t\t<<'PATCH'>> -> 505\n\
+         \t\t<<\"GET\">> -> 101\n\
+         \t\t<<\"POST\">> -> 202\n\
+         \t\t<<\"PUT\">> -> 303\n\
+         \t\t<<\"DELETE\">> -> 404\n\
+         \t\t<<\"PATCH\">> -> 505\n\
          \t\t_ -> 606\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tcode(<<'HEAD'>>)\n\
+         \tcode(<<\"HEAD\">>)\n\
          }\n",
         &[101, 202, 303, 404, 505, 606],
     );
@@ -1606,9 +1606,9 @@ fn literal_ladder_stays_flat() {
     assert_no_continuations(
         "fn lits(n Int) String {\n\
          \tmatch n {\n\
-         \t\t1 -> 'one'\n\
-         \t\t2 -> 'two'\n\
-         \t\t_ -> 'many'\n\
+         \t\t1 -> \"one\"\n\
+         \t\t2 -> \"two\"\n\
+         \t\t_ -> \"many\"\n\
          \t}\n\
          }\n\
          pub fn main() {\n\

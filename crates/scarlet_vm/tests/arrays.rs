@@ -119,7 +119,7 @@ impl Val {
     fn source(&self) -> String {
         match self {
             Val::Int(n) => n.to_string(),
-            Val::Text(s) => format!("'{s}'"),
+            Val::Text(s) => format!(r#""{s}""#),
             Val::Pair(n, of) => format!("({n}, {})", of.source()),
             Val::Array(all) => {
                 let all: Vec<String> = all.iter().map(Val::source).collect();
@@ -157,7 +157,7 @@ impl Pat {
             Pat::Name(n) => format!("v{n}"),
             Pat::Unread => "_v".to_string(),
             Pat::Int(n) => n.to_string(),
-            Pat::Text(s) => format!("'{s}'"),
+            Pat::Text(s) => format!(r#""{s}""#),
             Pat::Pair(a, b) => format!("({}, {})", a.source(), b.source()),
             Pat::Array(all, rest) => {
                 let mut all: Vec<String> = all.iter().map(Pat::source).collect();
@@ -538,7 +538,7 @@ fn pieces_type(arm: &Arm) -> Ty {
 }
 
 const START: &str = "import scarlet/array\nimport scarlet/map\nimport scarlet/string\n\
-fn ok(i Int, v Int) Bool {\n\tprintln('${i}:${v}')\n\t{ v + i } % 2 == 0\n}\n\
+fn ok(i Int, v Int) Bool {\n\tprintln(\"${i}:${v}\")\n\t{ v + i } % 2 == 0\n}\n\
 fn call(f fn() Int) Int { f() }\n\
 fn again(a Int, b Int) Int { { a * 13 + b } % 9973 }\n\
 fn small(n Int) Int { n % 9973 }\n\
@@ -565,7 +565,7 @@ fn made(dice: &mut Dice, v: &Val, ty: &Ty) -> String {
     };
     let more = match &**elem {
         Ty::Int => Some("9".to_string()),
-        Ty::Text => Some("'z'".to_string()),
+        Ty::Text => Some(r#""z""#.to_string()),
         Ty::Pair(_) | Ty::Array(_) => None,
     };
     let none = || match (&more, **elem == Ty::Int) {
@@ -654,11 +654,11 @@ fn program(seed: u64) -> (String, String) {
         if dice.one_in(2) {
             // It is held while it is matched, and is what it was after that.
             let number = f.ty.number();
-            writeln!(main, "x{i} = {src}\nprintln('= ${{f(x{i}, 0)}}')").expect("a string");
-            writeln!(main, "println('${{{number}(x{i})}}')").expect("a string");
+            writeln!(main, "x{i} = {src}\nprintln(\"= ${{f(x{i}, 0)}}\")").expect("a string");
+            writeln!(main, r#"println("${{{number}(x{i})}}")"#).expect("a string");
             writeln!(out, "{}", v.number()).expect("a string");
         } else {
-            writeln!(main, "println('= ${{f({src}, 0)}}')").expect("a string");
+            writeln!(main, r#"println("= ${{f({src}, 0)}}")"#).expect("a string");
         }
     }
     let f = f.source();

@@ -481,8 +481,7 @@ module.exports = grammar({
       ),
 
     // Strings ----------------------------------------------------------------
-    // Strings fit on one line, take either quote, and interpolate `${expr}`
-    // and `$name`.
+    // Strings fit on one line and interpolate `${expr}` and `$name`.
     //
     // `\u{HEX*}` is written by hand rather than generated, because
     // `lex.escape` is scanner::ESCAPES, where one source byte stands for one
@@ -492,35 +491,19 @@ module.exports = grammar({
     // like `string_content` below, so `@string.escape` highlighting covers it.
 
     string: ($) =>
-      choice(
-        seq(
-          "'",
-          repeat(
-            choice(
-              $.escape_sequence,
-              alias(token.immediate(seq('\\u{', /[0-9A-Fa-f]*/, '}')), $.escape_sequence),
-              $.interpolation,
-              $.short_interpolation,
-              alias(token.immediate(prec(1, /[^'\\$\n]+/)), $.string_content),
-              alias(token.immediate('$'), $.string_content),
-            ),
+      seq(
+        '"',
+        repeat(
+          choice(
+            $.escape_sequence,
+            alias(token.immediate(seq('\\u{', /[0-9A-Fa-f]*/, '}')), $.escape_sequence),
+            $.interpolation,
+            $.short_interpolation,
+            alias(token.immediate(prec(1, /[^"\\$\n]+/)), $.string_content),
+            alias(token.immediate('$'), $.string_content),
           ),
-          "'",
         ),
-        seq(
-          '"',
-          repeat(
-            choice(
-              $.escape_sequence,
-              alias(token.immediate(seq('\\u{', /[0-9A-Fa-f]*/, '}')), $.escape_sequence),
-              $.interpolation,
-              $.short_interpolation,
-              alias(token.immediate(prec(1, /[^"\\$\n]+/)), $.string_content),
-              alias(token.immediate('$'), $.string_content),
-            ),
-          ),
-          '"',
-        ),
+        '"',
       ),
 
     escape_sequence: () => token.immediate(lex.escape),

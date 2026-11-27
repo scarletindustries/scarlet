@@ -34,7 +34,7 @@ mix(h, v) = (h XOR v) * 0x100000001b3   (mod 2^64)
 h0 = mix(0xcbf29ce484222325, VERSION)   VERSION = 3
 ```
 
-Mix in the node count, then the root's index, then each node in order. A name is mixed as its length, then its UTF-8 bytes one per mix. The length goes first, so `('ab', 'c')` and `('a', 'bc')` don't collide.
+Mix in the node count, then the root's index, then each node in order. A name is mixed as its length, then its UTF-8 bytes one per mix. The length goes first, so `("ab", "c")` and `("a", "bc")` don't collide.
 
 Each node mixes its kind tag first, then:
 

@@ -287,7 +287,7 @@ Not checked: why the enum is 48 bytes. I could not run size_of without cargo. Fr
 
 **Benchmarks hit.** strings, string_keys, json, deriv
 
-**Estimated gain.** strings: about 52% (quadratic join and replace 20.5%, small concats 12.5%, split 21%, literals 3%, length/contains/trim 4%, int parse 4.6%, each cut by two thirds or more). string_keys: about 40% (Concat 24.8%, the unused `''` literal about 10% with its free, string key hash and compare inside map get and set 17.8%, of which malloc alone is 14.5% of the run). json: about 15% (byte_at 11%, slice-to-string 8.5%, `''` literal 1.6%). deriv: 1.5% (string == allocates). Geomean factor about 0.94 alone.
+**Estimated gain.** strings: about 52% (quadratic join and replace 20.5%, small concats 12.5%, split 21%, literals 3%, length/contains/trim 4%, int parse 4.6%, each cut by two thirds or more). string_keys: about 40% (Concat 24.8%, the unused `""` literal about 10% with its free, string key hash and compare inside map get and set 17.8%, of which malloc alone is 14.5% of the run). json: about 15% (byte_at 11%, slice-to-string 8.5%, `""` literal 1.6%). deriv: 1.5% (string == allocates). Geomean factor about 0.94 alone.
 
 **Evidence.** strings report (ablation): batch join 1.451M and batch replace 1.498M instructions per batch, about 2.62M of pure copying, 20.5% of the benchmark; split of an 11-byte field 4,200; a small concat about 1,650 fixed plus 9 per byte. strings-and-binaries study: replace is 27% and join about 20% of the strings benchmark by deleting statements; 256 matches in 2 KB cost 7.19M; binary append 313 per byte; `s == t` 859 for 8 bytes; a literal about 320 each time. string_keys report (lldb trace): Concat 927 to 981 traced, about 840 in a normal run, with malloc 216 and free 144; `Str` 185 plus 170 to free; string map get 1,650 to 1,900 against 362 for an Int key. maps study: one 2-byte string get stepped at 1,692, of which malloc and free are about 784. json report: byte_at 212 to 293, 38,753 times per parse; ablating capture removes 11.3M of 93.4M.
 
@@ -302,14 +302,14 @@ All numbers are instructions retired per operation from `/usr/bin/time -l` on `.
 **Per-operation costs (measured)**
 | Operation | Mine | Claim |
 |---|---|---|
-| `''` literal bound and dropped | 360 | about 320 to 355 |
+| `""` literal bound and dropped | 360 | about 320 to 355 |
 | 8-byte literal bound and dropped | 394 | |
 | `s == t`, 8 bytes | 857 | 859 |
 | `s == t`, 512 bytes | 5,583 (about 9.3 per byte) | |
 | Concat 1+1 bytes | about 950 | 840 to 936 |
 | Concat 8+8 bytes | about 1,440 | 1,390 |
 | Concat 512+512 bytes | about 11,400 (about 11 per byte) | 9 per byte |
-| `string::split('score=12345', '=')` | 4,297 | 4,200 |
+| `string::split("score=12345", "=")` | 4,297 | 4,200 |
 | `string::length`, 1 / 8 / 64 / 512 / 1024 bytes | 549 / 641 / 974 / 3,836 / 6,803 | |
 | `map::get` hit, 8-byte string key | 1,664 | 1,650 to 1,900 |
 | `map::get` hit, Int key | 285 | 362 |
@@ -325,7 +325,7 @@ All numbers are instructions retired per operation from `/usr/bin/time -l` on `.
 | Rows of 45 bytes | 25 | 50 | 100 | 200 |
 |---|---|---|---|---|
 | Fold join | 0.47M | 1.38M | 4.77M | 17.8M |
-| `string::replace(text, 'tag=', '#')` | 0.52M | 1.43M | 4.72M | 17.2M |
+| `string::replace(text, "tag=", "#")` | 0.52M | 1.43M | 4.72M | 17.2M |
 
 - Cost grows 2.9x to 3.7x per doubling. The claim's 1.451M and 1.498M per 50-row batch match my 1.38M and 1.43M.
 - The split inside replace is only 78K at 50 rows, so the fold is the cost.
@@ -336,7 +336,7 @@ All numbers are instructions retired per operation from `/usr/bin/time -l` on `.
 
 **Shares (my per-operation numbers times counts read from the source, so partly inferred)**
 - **strings:** batch join plus replace is (1.37M + 1.42M) x 2,400 = 6.7G, or 21.8%. Splits are about 20% and small concats about 12%.
-- **string_keys:** 8.5M concats at about 950 is about 28%. The eager `''` default in `letters[r % 6] or ''` is 8.5M x 360, or 10.7%; the `dis` output shows it evaluated before `ArrayIndexOr` on every step. String-key excess over Int keys is 3M x about 1,380, or 14%.
+- **string_keys:** 8.5M concats at about 950 is about 28%. The eager `""` default in `letters[r % 6] or ""` is 8.5M x 360, or 10.7%; the `dis` output shows it evaluated before `ArrayIndexOr` on every step. String-key excess over Int keys is 3M x about 1,380, or 14%.
 - **json:** 38,753 `byte_at` calls x 294 is 11.4M, or 12% of a parse.
 
 **Sampling profile (time, not instructions; leaf frames only)**
@@ -1117,15 +1117,15 @@ Cross-cutting views of the same instructions (they overlap the lines above, do n
 
 Measured two ways that agree: probes give 10,115 per leaf and about 9,800 per inner node, so 4,096 x 10,115 + 1,365 x 9,800 = 54.8M (100.3%).
 
-**benches/string_keys/string_keys.sca: where Scarlet's 28.70 billion instructions .** About 74% of the instructions go on building the words and only about 18% on the map. Measured by ablation, the benchmark with the map removed and the words still built costs 23.7 of 28.7 billion. One letter of `spell` costs about 2,250 instructions, and there are 8.5 million letters. Inside a letter the big items are the Concat instruction (about 840), the self tail call that frees two string cells and walks the frame (631), the `''` default literal that is allocated and freed every step and never used (about 355), and the array index (290 plus 63 for the global). A string-keyed map lookup costs about 1,650 to 1,900 instructions against 362 for an Int key, because hashing and comparing each copy the key into a freshly malloc'd Vec. Time is spread differently: MapFind is 27% of samples but about 11% of instructions, since the word-building code runs at about 6.7 instructions per cycle and the map walk misses cache. Breakdown: Share of the 28.70 billion instructions (startup taken off), built from an exact per-VM-instruction trace times how often each runs. The trace ran under lldb, where each malloc/free pair cost about 124 more than in a normal run (see the scratch-Vec finding), so I took that off; with it off, the model gives 14,629 per count iteration against 14,656 measured, and 13,866 per probe iteration against 13,855 measured.
+**benches/string_keys/string_keys.sca: where Scarlet's 28.70 billion instructions .** About 74% of the instructions go on building the words and only about 18% on the map. Measured by ablation, the benchmark with the map removed and the words still built costs 23.7 of 28.7 billion. One letter of `spell` costs about 2,250 instructions, and there are 8.5 million letters. Inside a letter the big items are the Concat instruction (about 840), the self tail call that frees two string cells and walks the frame (631), the `""` default literal that is allocated and freed every step and never used (about 355), and the array index (290 plus 63 for the global). A string-keyed map lookup costs about 1,650 to 1,900 instructions against 362 for an Int key, because hashing and comparing each copy the key into a freshly malloc'd Vec. Time is spread differently: MapFind is 27% of samples but about 11% of instructions, since the word-building code runs at about 6.7 instructions per cycle and the map walk misses cache. Breakdown: Share of the 28.70 billion instructions (startup taken off), built from an exact per-VM-instruction trace times how often each runs. The trace ran under lldb, where each malloc/free pair cost about 124 more than in a normal run (see the scratch-Vec finding), so I took that off; with it off, the model gives 14,629 per count iteration against 14,656 measured, and 13,866 per probe iteration against 13,855 measured.
 
 - Concat in `spell` (8.5M): about 24.8%
-- TailCallSelf in `spell`, including freeing the old `acc` and the `''` cell (8.5M x 631): 18.7%
+- TailCallSelf in `spell`, including freeing the old `acc` and the `""` cell (8.5M x 631): 18.7%
 - Call overhead and arithmetic for `next`, `word`, the `spell` exit and the two outer loops (2M iterations x about 1,900 to 2,050): 13.8%
 - Map get (2M x about 1,600): 11.1%
 - ArrayIndexOr (8.5M x 290): 8.6%
 - Int arithmetic, compare and jumps inside `spell` (8.5M x 238): 7.0%
-- Str `''` allocation (10.5M x 185): 6.8%
+- Str `""` allocation (10.5M x 185): 6.8%
 - Map set (1M x about 1,930): 6.7%
 - GetGlobal `letters` (8.5M x 63): 1.9%
 - map::fold, println and teardown: 0.7%

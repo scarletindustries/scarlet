@@ -39,7 +39,7 @@ pub type KelvinError {
 
 pub fn show_error(e KelvinError) String {
 	match e {
-		BelowAbsoluteZero(t) -> '${show(t)} is below absolute zero'
+		BelowAbsoluteZero(t) -> "${show(t)} is below absolute zero"
 	}
 }
 
@@ -52,15 +52,15 @@ pub fn to_kelvin(t Celsius) Result(Kelvin, KelvinError) {
 }
 
 pub fn show(t Celsius) String {
-	'${round1(t.degrees)}C'
+	"${round1(t.degrees)}C"
 }
 
 pub fn show_fahrenheit(t Fahrenheit) String {
-	'${round1(t.degrees)}F'
+	"${round1(t.degrees)}F"
 }
 
 pub fn show_kelvin(t Kelvin) String {
-	'${round1(t.degrees)}K'
+	"${round1(t.degrees)}K"
 }
 
 // No pub: round1 is private to this module.

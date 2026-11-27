@@ -72,7 +72,7 @@ fn an_empty_array_is_kept_between_entries() {
     let out = repl(
         "import scarlet/map\n\
          xs = []\n\
-         m = map::set(map::new(), 3..3, 'found')\n\
+         m = map::set(map::new(), 3..3, \"found\")\n\
          map::get(m, xs)\n\
          xs\n\
          [..xs, 1, ..xs]\n\
@@ -81,11 +81,11 @@ fn an_empty_array_is_kept_between_entries() {
     assert_eq!(out.trim(), "Some(found)\n[]\n[1]\nTrue", "{out}");
 }
 
-/// `'x' + 'y'` and `100 + 200` occupy the identical `Span` when each entry is
+/// `"x" + "y"` and `100 + 200` occupy the identical `Span` when each entry is
 /// parsed on its own, so the second must not retype the first.
 #[test]
 fn a_later_entry_does_not_retype_an_earlier_one() {
-    let out = repl("const a = 'x' + 'y'\nconst b = 100 + 200\nprintln(a)\n");
+    let out = repl("const a = \"x\" + \"y\"\nconst b = 100 + 200\nprintln(a)\n");
     assert!(out.contains("xy"), "want the string concat, got:\n{out}");
     assert!(
         !out.lines().any(|l| l.trim() == "0"),
@@ -114,7 +114,7 @@ fn a_probe_with_a_name_of_the_sessions_is_stored() {
 /// Replaying a bare expression would repeat its effects on every later entry.
 #[test]
 fn a_bare_expression_is_not_replayed() {
-    let out = repl("println('once')\nprintln('twice')\n");
+    let out = repl("println(\"once\")\nprintln(\"twice\")\n");
     assert_eq!(out.matches("once").count(), 1, "replayed an effect:\n{out}");
     assert!(out.contains("twice"), "{out}");
 }
@@ -131,7 +131,7 @@ fn a_multi_line_entry_still_evaluates() {
 /// session is typed in whatever order the user thinks of things.
 #[test]
 fn an_import_after_a_definition_still_resolves() {
-    let out = repl("const s = 'a,b'\nimport scarlet/string\nprintln(string::split(s, ','))\n");
+    let out = repl("const s = \"a,b\"\nimport scarlet/string\nprintln(string::split(s, \",\"))\n");
     assert!(out.contains('b'), "want the split, got:\n{out}");
 }
 
@@ -152,9 +152,9 @@ fn the_type_command_reports_an_inferred_type() {
 /// `:type` sees what the session bound, not only its constants, and runs nothing.
 #[test]
 fn the_type_command_sees_the_sessions_bindings() {
-    let (out, err) = session("x = 41\n:type x + 1\n:type println('ran')\n");
+    let (out, err) = session("x = 41\n:type x + 1\n:type println(\"ran\")\n");
     assert!(out.contains("x + 1  Int"), "{out}\n{err}");
-    assert!(out.contains("println('ran')  Nil"), "{out}\n{err}");
+    assert!(out.contains(r#"println("ran")  Nil"#), "{out}\n{err}");
     assert!(!out.lines().any(|l| l == "ran"), "the probe ran:\n{out}");
 }
 
@@ -190,7 +190,10 @@ fn a_session_round_trips_through_save_and_load() {
         "imports must lead a saved session:\n{text}"
     );
 
-    let out = repl(&format!(":load {}\nprintln(size('hi'))\n", path.display()));
+    let out = repl(&format!(
+        ":load {}\nprintln(size(\"hi\"))\n",
+        path.display()
+    ));
     assert!(out.contains('2'), "want 2, got:\n{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -273,7 +276,7 @@ fn a_module_name_alone_lists_what_is_in_it() {
 /// `:exit` leaves, like `:quit` does, because that's what other REPLs taught people.
 #[test]
 fn exit_leaves_the_repl() {
-    let (out, err) = session(":exit\nprintln('after')\n");
+    let (out, err) = session(":exit\nprintln(\"after\")\n");
     assert!(!out.contains("after"), "kept going past :exit:\n{out}");
     assert!(!err.contains("unknown command"), "{err}");
 }
@@ -309,4 +312,17 @@ fn entries_that_add_types_agree_on_what_their_values_are() {
     let first = format!("(Dark,{held},1)[Not,{held}]");
     let boxes = format!("(Box{{value:Dark}},Box{{value:{held}}},Box{{value:2.5}},Not)");
     assert_eq!(words, first + &boxes);
+}
+
+/// An entry in single quotes is refused whole: nothing of it runs, and nothing
+/// of it is kept.
+#[test]
+fn an_entry_in_single_quotes_is_refused() {
+    let (out, err) = session(
+        "x = 'kept'\nprintln('ran ${x}')\nfn f() String {\n\t'f'\n}\n:type 'a'\nf()\nx\nprintln(\"on\")\n",
+    );
+    assert_eq!(out.trim(), "on", "{out}");
+    assert_eq!(err.matches("Strings use double quotes").count(), 4, "{err}");
+    assert!(err.contains("Unknown identifier 'f'"), "{err}");
+    assert!(err.contains("Unknown identifier 'x'"), "{err}");
 }

@@ -221,7 +221,7 @@ fn ctor<'t>(
     Ok(())
 }
 
-/// A tuple shows as `(1, 'a')` on one line when every element is small and
+/// A tuple shows as `(1, a)` on one line when every element is small and
 /// the line fits, and with one element per line otherwise.
 fn tuple<'t>(
     heap: &Heap,

@@ -11,13 +11,13 @@ pub type Header {
 // with several `Set-Cookie` fields.
 pub type Headers = Array(Header)
 
-const colon_space = <<': '>>
-const crlf = <<'\r\n'>>
-const comma = <<','>>
+const colon_space = <<": ">>
+const crlf = <<"\r\n">>
+const comma = <<",">>
 // The bytes a field value must never contain.
-const cr = <<'\r'>>
-const lf = <<'\n'>>
-const nul = <<'\0'>>
+const cr = <<"\r">>
+const lf = <<"\n">>
+const nul = <<"\0">>
 // ASCII SP and HTAB are the only OWS (optional whitespace) bytes RFC 9110
 // defines.
 const sp = 32

@@ -49,17 +49,17 @@ fn a_pid_round_trips_and_a_monitor_placed_through_the_copy_fires() {
          \t\t\t_ = process::monitor(pid, inbox, fn(d) Ended(d))\n\
          \t\t\tmatch process::receive(inbox) {\n\
          \t\t\t\tReady(gate) -> process::send(gate, Nil)\n\
-         \t\t\t\tEnded(_) -> println('ended before it was told to')\n\
+         \t\t\t\tEnded(_) -> println(\"ended before it was told to\")\n\
          \t\t\t}\n\
          \t\t\tmatch process::receive(inbox) {\n\
          \t\t\t\tEnded(down) -> {\n\
          \t\t\t\t\tprintln(down.pid == worker)\n\
          \t\t\t\t\tprintln(down.reason == process::Normal)\n\
          \t\t\t\t}\n\
-         \t\t\t\tReady(_) -> println('a second gate')\n\
+         \t\t\t\tReady(_) -> println(\"a second gate\")\n\
          \t\t\t}\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "True\nTrue\nTrue\nTrue\n",
@@ -80,10 +80,10 @@ fn a_subject_round_trips_and_a_message_sent_through_the_copy_arrives() {
          \tmatch wire::decode(wire::encode(s)) {\n\
          \t\tOk(copy) -> {\n\
          \t\t\tprintln(copy == s)\n\
-         \t\t\tprocess::send(copy, 'through the copy')\n\
-         \t\t\tprintln(process::receive(s) == 'through the copy')\n\
+         \t\t\tprocess::send(copy, \"through the copy\")\n\
+         \t\t\tprintln(process::receive(s) == \"through the copy\")\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "True\nTrue\n",
@@ -114,10 +114,10 @@ fn a_subject_three_levels_down_round_trips() {
          \treply = process::subject()\n\
          \tmatch wire::decode(wire::encode(Outer(Middle(Inner(reply))))) {\n\
          \t\tOk(back) -> {\n\
-         \t\t\tprocess::send(reply_of(back), 'three levels down')\n\
+         \t\t\tprocess::send(reply_of(back), \"three levels down\")\n\
          \t\t\tprintln(process::receive(reply))\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "three levels down\n",
@@ -133,7 +133,7 @@ fn a_subject_three_levels_down_round_trips() {
 #[ignore = "needs the VM"]
 fn a_listener_and_a_socket_record_round_trip_and_the_copies_are_used() {
     let proj = Project::new("wire_socket");
-    let src = "import scarlet/binary
+    let src = r#"import scarlet/binary
 import scarlet/net
 import scarlet/net/address
 import scarlet/net/socket
@@ -141,9 +141,9 @@ import scarlet/result
 import scarlet/wire
 
 pub fn main() {
-	match net::listen('127.0.0.1', 0) {
+	match net::listen("127.0.0.1", 0) {
 		Ok(server) -> {
-			println('listening ${result::map(net::local_addr(server), address::to_string) or '?'}')
+			println("listening ${result::map(net::local_addr(server), address::to_string) or "?"}")
 			match wire::decode(wire::encode(server)) {
 				Ok(listener) -> {
 					println(listener == server)
@@ -152,27 +152,27 @@ pub fn main() {
 							Ok(copy) -> {
 								println(copy == sock)
 								println(address::to_string(copy.peer) == address::to_string(sock.peer))
-								match socket::write(copy, binary::from_string('through the copy')) {
+								match socket::write(copy, binary::from_string("through the copy")) {
 									Ok(Nil) -> match socket::close(copy) {
-										Ok(Nil) -> println('served')
-										Err(e) -> println('close-failed: ${e}')
+										Ok(Nil) -> println("served")
+										Err(e) -> println("close-failed: ${e}")
 									}
-									Err(e) -> println('write-failed: ${e}')
+									Err(e) -> println("write-failed: ${e}")
 								}
 							}
-							Err(_) -> println('socket refused')
+							Err(_) -> println("socket refused")
 						}
-						Ok(None) -> println('accept-closed')
-						Err(e) -> println('accept-failed: ${e}')
+						Ok(None) -> println("accept-closed")
+						Err(e) -> println("accept-failed: ${e}")
 					}
 				}
-				Err(_) -> println('listener refused')
+				Err(_) -> println("listener refused")
 			}
 		}
-		Err(e) -> println('listen-failed: ${e}')
+		Err(e) -> println("listen-failed: ${e}")
 	}
 }
-";
+"#;
     let srv = spawn_al_server(&proj, src);
     let mut stream = srv.connect();
     let mut got = Vec::new();
@@ -197,17 +197,17 @@ fn a_port_record_round_trips_and_the_copy_is_written_to() {
         "import scarlet/os/port\n\
          import scarlet/wire\n\
          pub fn main() {\n\
-         \tmatch port::spawn('cat', []) {\n\
+         \tmatch port::spawn(\"cat\", []) {\n\
          \t\tOk(p) -> match wire::decode(wire::encode(p)) {\n\
          \t\t\tOk(copy) -> {\n\
          \t\t\t\tprintln(copy == p)\n\
-         \t\t\t\tprintln(port::write(copy, <<'through the copy'>>) == Ok(Nil))\n\
-         \t\t\t\tprintln(port::read_exact(p, 16) == Ok(<<'through the copy'>>))\n\
+         \t\t\t\tprintln(port::write(copy, <<\"through the copy\">>) == Ok(Nil))\n\
+         \t\t\t\tprintln(port::read_exact(p, 16) == Ok(<<\"through the copy\">>))\n\
          \t\t\t\tprintln(port::close(copy) == Ok(port::Exited(0)))\n\
          \t\t\t}\n\
-         \t\t\tErr(_) -> println('refused')\n\
+         \t\t\tErr(_) -> println(\"refused\")\n\
          \t\t}\n\
-         \t\tErr(_) -> println('spawn failed')\n\
+         \t\tErr(_) -> println(\"spawn failed\")\n\
          \t}\n\
          }\n",
         "True\nTrue\nTrue\nTrue\n",
@@ -239,7 +239,7 @@ fn a_handle_from_another_run_is_refused_with_other_run() {
          \t\t\tprintln(theirs == zeros)\n\
          \t\t\tprintln(mine == theirs)\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::Malformed(..) | wire::TrailingBytes(_)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::Malformed(..) | wire::TrailingBytes(_)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n",
         "True\nTrue\nFalse\n",

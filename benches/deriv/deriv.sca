@@ -146,15 +146,15 @@ fn nest(i Int, n Int, f Expr) Expr {
 	if i == n {
 		f
 	} else {
-		df = d('x', f)
-		println('${i + 1} count: ${count(df)}')
+		df = d("x", f)
+		println("${i + 1} count: ${count(df)}")
 		nest(i + 1, n, df)
 	}
 }
 
 pub fn main() {
-	x = Var('x')
+	x = Var("x")
 	_ = nest(0, 9, powr(x, x))
 	_ = nest(0, 9, powr(x, x))
-	println('done')
+	println("done")
 }

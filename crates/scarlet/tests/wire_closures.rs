@@ -33,15 +33,15 @@ fn a_closure_capturing_an_int_and_a_string_round_trips_and_is_called() {
          }\n\
          pub fn main() {\n\
          \tn = 5\n\
-         \ts = 'x'\n\
-         \tf = fn(a) { '${s}${a + n}' }\n\
+         \ts = \"x\"\n\
+         \tf = fn(a) { \"${s}${a + n}\" }\n\
          \tmatch wire::decode(wire::encode(f)) {\n\
          \t\tOk(g) -> {\n\
          \t\t\tprintln(apply(g, 1))\n\
          \t\t\tprintln(apply(g, 1) == apply(f, 1))\n\
          \t\t\tprintln(g == f)\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "x6\nTrue\nTrue\n",
@@ -65,9 +65,9 @@ fn a_closure_capturing_every_value_form_round_trips_and_is_called() {
          \tf()\n\
          }\n\
          pub fn main() {\n\
-         \tp = P(1, 'p')\n\
+         \tp = P(1, \"p\")\n\
          \txs = [1, 2, 3]\n\
-         \tm = map::set(map::new(), 'k', 7)\n\
+         \tm = map::set(map::new(), \"k\", 7)\n\
          \tb = True\n\
          \tz = Nil\n\
          \tfl = 1.5\n\
@@ -80,7 +80,7 @@ fn a_closure_capturing_every_value_form_round_trips_and_is_called() {
          \t\t\t\tprintln(x + 1)\n\
          \t\t\t\tprintln(name)\n\
          \t\t\t\tprintln(ys == [1, 2, 3])\n\
-         \t\t\t\tprintln(map::get(m2, 'k') == Some(7))\n\
+         \t\t\t\tprintln(map::get(m2, \"k\") == Some(7))\n\
          \t\t\t\tprintln(b2)\n\
          \t\t\t\tprintln(fl2)\n\
          \t\t\t\tprintln(big2 == 9223372036854775807)\n\
@@ -88,7 +88,7 @@ fn a_closure_capturing_every_value_form_round_trips_and_is_called() {
          \t\t\t\tprintln(call(g) == call(f))\n\
          \t\t\t}\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "2\np\nTrue\nTrue\nTrue\n1.5\nTrue\nTrue\nTrue\n",
@@ -114,7 +114,7 @@ fn a_closure_capturing_a_closure_round_trips_and_is_called_through_both() {
          \t\t\tprintln(apply(g, 1))\n\
          \t\t\tprintln(apply(g, 10) == apply(twice, 10))\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "7\nTrue\n",
@@ -139,19 +139,19 @@ fn a_closure_capturing_a_subject_and_a_pid_round_trips_and_the_copies_are_used()
          }\n\
          pub fn main() {\n\
          \tinbox = process::subject()\n\
-         \tsend_hi = fn() { process::send(inbox, 'through the copy') }\n\
+         \tsend_hi = fn() { process::send(inbox, \"through the copy\") }\n\
          \tmatch wire::decode(wire::encode(send_hi)) {\n\
          \t\tOk(g) -> {\n\
          \t\t\trun(g)\n\
          \t\t\tprintln(process::receive(inbox))\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          \tme = process::self()\n\
          \tis_me = fn(p) { p == me }\n\
          \tmatch wire::decode(wire::encode(is_me)) {\n\
          \t\tOk(g) -> println(check(g, me))\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "through the copy\nTrue\n",
@@ -174,11 +174,11 @@ fn a_zero_capture_closure_round_trips_and_is_called() {
          pub fn main() {\n\
          \tmatch wire::decode(wire::encode(helper)) {\n\
          \t\tOk(g) -> println(apply(g, 3))\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          \tmatch wire::decode(wire::encode(fn(x) { x + 1 })) {\n\
          \t\tOk(g) -> println(apply(g, 3))\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "6\n4\n",
@@ -203,13 +203,13 @@ fn a_record_with_a_fn_field_round_trips_and_the_field_is_called() {
          }\n\
          pub fn main() {\n\
          \tk = 40\n\
-         \th = Handler('h', fn(x) { x + k })\n\
+         \th = Handler(\"h\", fn(x) { x + k })\n\
          \tmatch wire::decode(wire::encode(h)) {\n\
          \t\tOk(back) -> {\n\
          \t\t\tprintln(name_of(back))\n\
          \t\t\tprintln(fire(back, 2))\n\
          \t\t}\n\
-         \t\tErr(_) -> println('refused')\n\
+         \t\tErr(_) -> println(\"refused\")\n\
          \t}\n\
          }\n",
         "h\n42\n",
@@ -241,7 +241,7 @@ fn a_closure_from_another_run_is_refused_with_other_run() {
          \t\t\tprintln(theirs == zeros)\n\
          \t\t\tprintln(mine == theirs)\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::Malformed(..) | wire::TrailingBytes(_)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::Malformed(..) | wire::TrailingBytes(_)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n",
         "True\nTrue\nFalse\n",
@@ -275,7 +275,7 @@ fn a_tampered_function_index_is_malformed_not_a_panic() {
          \t\t\tprintln(offset)\n\
          \t\t\tprintln(string::inspect(what))\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n",
         "True\n27\nNoSuchFunction\n",
@@ -305,7 +305,7 @@ fn a_tampered_capture_count_is_malformed() {
          \t\t\tprintln(offset == size - 1)\n\
          \t\t\tprintln(string::inspect(what))\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n",
         "True\nCaptureCountMismatch\n",
@@ -340,7 +340,7 @@ fn a_capture_count_short_of_the_functions_is_malformed() {
          \t\t\tprintln(offset == size - 3)\n\
          \t\t\tprintln(string::inspect(what))\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n",
         "True\nTrue\nCaptureCountMismatch\n",
@@ -373,7 +373,7 @@ fn a_tampered_capture_tag_is_malformed() {
          \t\t\tprintln(offset == size - 2)\n\
          \t\t\tprintln(string::inspect(what))\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println(\"some other refusal\")\n\
          \t}\n\
          }\n",
         "True\nTrue\nUnknownCaptureTag\n",

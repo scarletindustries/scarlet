@@ -336,6 +336,14 @@ pub enum SyntaxError {
     },
 }
 
+impl SyntaxError {
+    /// Whether this is the one error the formatter mends, a string in single
+    /// quotes.
+    pub(crate) fn is_single_quoted_string(&self) -> bool {
+        matches!(self, SyntaxError::Scan(ScanError::SingleQuotedString))
+    }
+}
+
 impl Problem for SyntaxError {
     fn code(&self) -> DiagnosticCode {
         match self {

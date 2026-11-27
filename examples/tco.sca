@@ -44,8 +44,8 @@ pub fn main() {
 	println(sum_to(1000000, 0))
 
 	// Three frames in all: the entry, main, and depth_after's one live frame.
-	println('depth after 1 hop: ${depth_after(1)}')
-	println('depth after 1000000 hops: ${depth_after(1000000)}')
+	println("depth after 1 hop: ${depth_after(1)}")
+	println("depth after 1000000 hops: ${depth_after(1000000)}")
 
-	println('1000001 is even: ${is_even(1000001)}')
+	println("1000001 is even: ${is_even(1000001)}")
 }

@@ -678,7 +678,7 @@ fn a_draft_says_what_its_values_types_say() {
          \tif b { plain(n, x, s, b, xs) } else { n }\n}\n\
          fn any(x a, n Int) a { if n > 0 { any(x, n - 1) } else { x } }\n\
          pub fn main() {\n\
-         \tprintln(plain(1, 2.0, '', False, []))\n\
+         \tprintln(plain(1, 2.0, \"\", False, []))\n\
          \tprintln(any(1, 1))\n\
          }\n",
     );

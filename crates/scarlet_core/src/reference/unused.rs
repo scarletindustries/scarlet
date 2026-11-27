@@ -64,7 +64,7 @@ impl ReferenceGraph {
         for (from, to) in self.edges() {
             adj.entry(from).or_default().push(to);
         }
-        // A constructor keeps its type alive, because `Config(name: 'x')`
+        // A constructor keeps its type alive, because `Config(name: "x")`
         // mentions the constructor and never the type. This edge comes from the
         // declaration, so it must not move into `edges()`, which is built from
         // occurrences. If it did, find-references on the type would list the

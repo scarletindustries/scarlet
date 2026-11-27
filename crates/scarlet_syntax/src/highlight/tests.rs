@@ -53,11 +53,11 @@ fn coloring_preserves_the_source_text() {
         "fn add(a Int, b Int) Int { a + b }",
         "// just a comment",
         "const x = 1 // trailing\nconst y = 2",
-        "/* block */ const z = 'hi'",
-        "println('hello ${name}, you are ${age + 1}')",
-        "const s = 'unterminated",
+        r#"/* block */ const z = "hi""#,
+        r#"println("hello ${name}, you are ${age + 1}")"#,
+        "const s = \"unterminated",
         "match x { Ok(v) -> v, Err(_) -> 0 }",
-        "const emoji = 'héllo 🌶'",
+        r#"const emoji = "héllo 🌶""#,
         "",
         "   ",
         "§",
@@ -68,12 +68,12 @@ fn coloring_preserves_the_source_text() {
 
 #[test]
 fn keywords_strings_and_numbers_get_distinct_colors() {
-    let out = hl("const x = 'hi'", &P, None);
+    let out = hl(r#"const x = "hi""#, &P, None);
     assert!(
         out.contains("\x1b[35mconst"),
         "keyword not magenta: {out:?}"
     );
-    assert!(out.contains("\x1b[32m'hi'"), "string not green: {out:?}");
+    assert!(out.contains("\x1b[32m\"hi\""), "string not green: {out:?}");
     let out = hl("const x = 42", &P, None);
     assert!(out.contains("\x1b[33m42"), "number not yellow: {out:?}");
 }
@@ -110,10 +110,10 @@ fn an_unmatched_bracket_has_no_partner_to_bold() {
 
 #[test]
 fn an_interpolation_hole_is_not_string_colored() {
-    let out = hl("'a ${b} c'", &P, None);
+    let out = hl(r#""a ${b} c""#, &P, None);
     // The name inside the hole keeps its own (absent) colour, so the green
     // run must be broken by the reset that ends the `${`.
-    assert!(strip(&out) == "'a ${b} c'");
+    assert!(strip(&out) == r#""a ${b} c""#);
     assert!(out.contains("\x1b[32m"), "string parts not green: {out:?}");
     assert!(
         !out.contains("\x1b[32mb"),
@@ -133,5 +133,5 @@ fn a_qualified_member_being_typed_is_colored() {
 #[test]
 fn a_disabled_palette_adds_nothing() {
     let plain = crate::term::Palette::plain_for_test();
-    assert_eq!(hl("const x = 'hi'", &plain, None), "const x = 'hi'");
+    assert_eq!(hl(r#"const x = "hi""#, &plain, None), r#"const x = "hi""#);
 }

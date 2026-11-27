@@ -44,10 +44,10 @@ fn walk(e Entry) Stat {
 
 fn render(e Entry, indent String) Nil {
 	match e {
-		File(name, size) -> println('${indent}${name}  ${size}b')
+		File(name, size) -> println("${indent}${name}  ${size}b")
 		Dir(name, entries) -> {
-			println('${indent}${name}/')
-			array::each(entries, fn(child) render(child, '${indent}  '))
+			println("${indent}${name}/")
+			array::each(entries, fn(child) render(child, "${indent}  "))
 		}
 	}
 }
@@ -74,39 +74,39 @@ fn find_first(entries Listing, want Path) Option(Entry) {
 
 fn label(e Entry) String {
 	match e {
-		File(name, size) -> 'file ${name} of ${size}b'
-		Dir(name, entries) -> 'dir ${name} with ${array::length(entries)} entries'
+		File(name, size) -> "file ${name} of ${size}b"
+		Dir(name, entries) -> "dir ${name} with ${array::length(entries)} entries"
 	}
 }
 
 pub fn main() {
 	root = Dir(
-		name: 'project',
+		name: "project",
 		entries: [
-			File(name: 'README.md', size: 1024),
+			File(name: "README.md", size: 1024),
 			Dir(
-				name: 'src',
-				entries: [File(name: 'main.al', size: 2048), File(name: 'lib.al', size: 512)],
+				name: "src",
+				entries: [File(name: "main.al", size: 2048), File(name: "lib.al", size: 512)],
 			),
-			Dir(name: 'tests', entries: [File(name: 'golden.al', size: 256)]),
+			Dir(name: "tests", entries: [File(name: "golden.al", size: 256)]),
 		],
 	)
 
-	render(root, '')
+	render(root, "")
 
 	// A single-constructor type also destructures in a binding position.
 	Stat(files, dirs, bytes) = walk(root)
-	println('${files} files, ${dirs} dirs, ${bytes} bytes')
+	println("${files} files, ${dirs} dirs, ${bytes} bytes")
 
 	// inspect renders enums and records too.
 	println(string::inspect(walk(root)))
 
-	println(match find(root, 'lib.al') {
+	println(match find(root, "lib.al") {
 		Some(e) -> label(e)
-		None -> 'not found'
+		None -> "not found"
 	})
-	println(match find(root, 'missing.al') {
+	println(match find(root, "missing.al") {
 		Some(e) -> label(e)
-		None -> 'not found'
+		None -> "not found"
 	})
 }

@@ -119,10 +119,10 @@ fn fib(n Int) Int {
 // call order, i.e. deepest-first on the way down and shallowest-last.
 fn countdown(n Int) Int {
 	if n == 0 {
-		println('countdown: liftoff')
+		println("countdown: liftoff")
 		0
 	} else {
-		println('countdown: ${n}')
+		println("countdown: ${n}")
 		n + countdown(n - 1)
 	}
 }
@@ -138,12 +138,12 @@ fn adder(k Int) fn(Int) Int {
 fn pick(flag Bool) fn() String {
 	match flag {
 		True -> {
-			tag = 'yes'
-			fn() '${tag}!'
+			tag = "yes"
+			fn() "${tag}!"
 		}
 		False -> {
-			tag = 'no'
-			fn() '${tag}?'
+			tag = "no"
+			fn() "${tag}?"
 		}
 	}
 }
@@ -163,7 +163,7 @@ fn double(x Int) Int {
 
 // A never-called `pub fn` is exported, not dead, and must not warn.
 pub fn exported_but_never_called() Nil {
-	println('unreachable')
+	println("unreachable")
 }
 
 // Constructors are values too.
@@ -172,23 +172,23 @@ const wrap = Some
 pub fn main() {
 	// --- Tail calls ----------------------------------------------------------
 
-	println('sum_to(1000000) = ${sum_to(1000000, 0)}')
-	println('self depth at 1000000: ${self_depth(1000000)}')
+	println("sum_to(1000000) = ${sum_to(1000000, 0)}")
+	println("self depth at 1000000: ${self_depth(1000000)}")
 
-	println('ping(500001) = ${ping(500001, 0)}')
-	println('mutual depth at 500000: ${mutual_depth_a(500000)}')
+	println("ping(500001) = ${ping(500001, 0)}")
+	println("mutual depth at 500000: ${mutual_depth_a(500000)}")
 
 	stepper = Stepper(step: fn(s Stepper, n Int, acc Int) run(s, n, acc))
-	println('indirect run(200000) = ${run(stepper, 200000, 0)}')
+	println("indirect run(200000) = ${run(stepper, 200000, 0)}")
 
 	depth_stepper = Stepper(step: fn(s Stepper, n Int, acc Int) run_depth(s, n, acc))
-	println('indirect depth at 200000: ${run_depth(depth_stepper, 200000, 0)}')
+	println("indirect depth at 200000: ${run_depth(depth_stepper, 200000, 0)}")
 
 	// --- Non-tail recursion --------------------------------------------------
 
-	println('depth(100000) = ${depth(100000)}')
-	println('fib(20) = ${fib(20)}')
-	println('countdown total = ${countdown(3)}')
+	println("depth(100000) = ${depth(100000)}")
+	println("fib(20) = ${fib(20)}")
+	println("countdown total = ${countdown(3)}")
 
 	// --- Closure capture -----------------------------------------------------
 
@@ -197,23 +197,23 @@ pub fn main() {
 	n = 5
 	get = fn() n
 	n = 99
-	println('captured ${get()}, n is now ${n}')
+	println("captured ${get()}, n is now ${n}")
 
 	add10 = adder(10)
 	add_neg = adder(-10)
-	println('adder: ${add10(1)}, ${add_neg(1)}, ${add10(add_neg(7))}')
+	println("adder: ${add10(1)}, ${add_neg(1)}, ${add10(add_neg(7))}")
 
-	println('pick: ${pick(True)()} ${pick(False)()}')
+	println("pick: ${pick(True)()} ${pick(False)()}")
 
 	// A closure over closures.
 	add1_then_double = compose(adder(1), double)
 	double_then_add1 = compose(double, adder(1))
-	println('compose: ${add1_then_double(5)} vs ${double_then_add1(5)}')
+	println("compose: ${add1_then_double(5)} vs ${double_then_add1(5)}")
 
 	// Closures in an array, applied by map; each one captured a different `k`.
 	steps = [adder(1), double, compose(adder(2), double)]
 	applied = array::map(steps, fn(f) f(10))
-	println('array of closures: ${string::inspect(applied)}')
+	println("array of closures: ${string::inspect(applied)}")
 
 	// A closure held in a record field, reached from a match arm.
 	holder = Stepper(step: fn(s Stepper, n Int, acc Int) run(s, n, acc))
@@ -221,12 +221,12 @@ pub fn main() {
 		True -> run(holder, 3, 100)
 		False -> 0
 	}
-	println('field closure from match arm: ${picked}')
+	println("field closure from match arm: ${picked}")
 
 	// Recursion through a captured fn value, and a top-level fn passed by name.
-	println('twice: ${twice(add10, 1)} ${twice(double, 3)} ${twice(fn(x) x * x, 3)}')
+	println("twice: ${twice(add10, 1)} ${twice(double, 3)} ${twice(fn(x) x * x, 3)}")
 
-	println('constructor as value: ${string::inspect(array::map([1, 2], wrap))}')
+	println("constructor as value: ${string::inspect(array::map([1, 2], wrap))}")
 
-	println('done')
+	println("done")
 }

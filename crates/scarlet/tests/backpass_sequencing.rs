@@ -53,16 +53,16 @@ fn chunks(n Int, per Int, acc Int) Int {
 
 fn pipeline() Result(Int, Step) {
 	per <- result::then(first_step())
-	println('SECOND STEP RAN')
+	println("SECOND STEP RAN")
 	Ok(chunks(8, per, 0))
 }
 
 pub fn main() {
 	match pipeline() {
-		Ok(v) -> println('ok ${v}')
-		Err(Boom) -> println('short-circuited')
+		Ok(v) -> println("ok ${v}")
+		Err(Boom) -> println("short-circuited")
 	}
-	println('done')
+	println("done")
 }
 "#;
 
@@ -76,20 +76,20 @@ type Step {
 }
 
 fn write(tag String) Result(Nil, Step) {
-	println('write ${tag}')
+	println("write ${tag}")
 	Err(Boom)
 }
 
 fn both() Result(Nil, Step) {
-	Nil <- result::then(write('a'))
-	Nil <- result::then(write('b'))
+	Nil <- result::then(write("a"))
+	Nil <- result::then(write("b"))
 	Ok(Nil)
 }
 
 pub fn main() {
 	match both() {
-		Ok(Nil) -> println('ok')
-		Err(Boom) -> println('short-circuited')
+		Ok(Nil) -> println("ok")
+		Err(Boom) -> println("short-circuited")
 	}
 }
 "#;
@@ -102,7 +102,7 @@ fn run_bounded(tag: &str, src: &str) -> (Option<i32>, String) {
     std::fs::create_dir_all(&dir).expect("mkdir");
     let entry = dir.join("main.sca");
     std::fs::write(&entry, src).expect("write program");
-    std::fs::write(dir.join("package.sca"), "name = 'backpass_test'\n").expect("write package");
+    std::fs::write(dir.join("package.sca"), "name = \"backpass_test\"\n").expect("write package");
 
     let child = scarlet_run(&entry)
         .current_dir(&dir)

@@ -32,42 +32,42 @@ type Error {
 
 fn message(e Error) String {
 	match e {
-		UnexpectedCharacter(c) -> 'unexpected character: ${c}'
-		BadNumber(word) -> 'bad number: ${word}'
-		UnexpectedEnd -> 'unexpected end of input'
-		MissingClose -> 'missing closing )'
-		UnexpectedToken(t) -> 'unexpected ${string::inspect(t)}'
-		TrailingToken(t) -> 'unexpected ${string::inspect(t)} after the expression'
-		UndefinedVariable(name) -> 'undefined variable: ${name}'
-		DivisionByZero -> 'division by zero'
+		UnexpectedCharacter(c) -> "unexpected character: ${c}"
+		BadNumber(word) -> "bad number: ${word}"
+		UnexpectedEnd -> "unexpected end of input"
+		MissingClose -> "missing closing )"
+		UnexpectedToken(t) -> "unexpected ${string::inspect(t)}"
+		TrailingToken(t) -> "unexpected ${string::inspect(t)} after the expression"
+		UndefinedVariable(name) -> "undefined variable: ${name}"
+		DivisionByZero -> "division by zero"
 	}
 }
 
 // Single-character tokens. Numbers and names are runs of word_chars.
-const punctuation = ['+', '-', '*', '/', '(', ')', '=']
+const punctuation = ["+", "-", "*", "/", "(", ")", "="]
 
-const word_chars = string::split('abcdefghijklmnopqrstuvwxyz0123456789_', '')
+const word_chars = string::split("abcdefghijklmnopqrstuvwxyz0123456789_", "")
 
 fn symbol(c String) Token {
 	match c {
-		'+' -> Plus
-		'-' -> Minus
-		'*' -> Star
-		'/' -> Slash
-		'(' -> Open
-		')' -> Close
+		"+" -> Plus
+		"-" -> Minus
+		"*" -> Star
+		"/" -> Slash
+		"(" -> Open
+		")" -> Close
 		_ -> Assign
 	}
 }
 
 fn lex(source String) Result(Array(Token), Error) {
-	source |> string::split('') |> scan
+	source |> string::split("") |> scan
 }
 
 fn scan(chars Array(String)) Result(Array(Token), Error) {
 	match chars {
 		[] -> Ok([])
-		[' ', ..rest] -> scan(rest)
+		[" ", ..rest] -> scan(rest)
 		[c, ..rest] if array::contains(punctuation, c) -> prepend(symbol(c), scan(rest))
 		[c, ..] if array::contains(word_chars, c) -> {
 			(word, rest) = take_word(chars)
@@ -88,7 +88,7 @@ fn take_word(chars Array(String)) (String, Array(String)) {
 			(tail, left) = take_word(rest)
 			(c + tail, left)
 		}
-		_ -> ('', chars)
+		_ -> ("", chars)
 	}
 }
 
@@ -105,7 +105,7 @@ fn word_token(word String) Result(Token, Error) {
 }
 
 fn starts_with_digit(word String) Bool {
-	match string::split(word, '') {
+	match string::split(word, "") {
 		[first, ..] ->
 			first |> binary::from_string |> binary::parse_int(binary::Dec) |> result::is_ok
 		[] -> False
@@ -215,12 +215,12 @@ fn divide(a Int, b Int) Result(Int, Error) {
 // Fully parenthesised, to show the precedence the parser chose.
 fn show(e Expr) String {
 	match e {
-		Lit(n) -> '${n}'
+		Lit(n) -> "${n}"
 		Var(name) -> name
-		Add(l, r) -> '(${show(l)} + ${show(r)})'
-		Sub(l, r) -> '(${show(l)} - ${show(r)})'
-		Mul(l, r) -> '(${show(l)} * ${show(r)})'
-		Div(l, r) -> '(${show(l)} / ${show(r)})'
+		Add(l, r) -> "(${show(l)} + ${show(r)})"
+		Sub(l, r) -> "(${show(l)} - ${show(r)})"
+		Mul(l, r) -> "(${show(l)} * ${show(r)})"
+		Div(l, r) -> "(${show(l)} / ${show(r)})"
 	}
 }
 
@@ -242,7 +242,7 @@ fn run_line(env map::Map(String, Int), line String) map::Map(String, Int) {
 fn describe(tokens Array(Token), env map::Map(String, Int)) Result(String, Error) {
 	e <- result::then(parse(tokens))
 	v <- result::map(evaluate(e, env))
-	'${show(e)} = ${v}'
+	"${show(e)} = ${v}"
 }
 
 fn bind(
@@ -253,7 +253,7 @@ fn bind(
 ) map::Map(String, Int) {
 	match parse(rest) |> result::then(fn(e) evaluate(e, env)) {
 		Ok(v) -> {
-			report(line, Ok('${name} = ${v}'))
+			report(line, Ok("${name} = ${v}"))
 			map::set(env, name, v)
 		}
 		Err(m) -> {
@@ -265,23 +265,23 @@ fn bind(
 
 fn report(line String, outcome Result(String, Error)) Nil {
 	match outcome {
-		Ok(text) -> println('${line}  ->  ${text}')
-		Err(e) -> println('${line}  !  ${message(e)}')
+		Ok(text) -> println("${line}  ->  ${text}")
+		Err(e) -> println("${line}  !  ${message(e)}")
 	}
 }
 
 const session = [
-	'x = 12',
-	'y = x + 3',
-	'x*y',
-	'z = (x + y) * 2',
-	'x = x + 100',
-	'x - z',
-	'z / (y - y)',
-	'a + 1',
-	'2 +',
-	'12abc',
-	'x \$ y',
+	"x = 12",
+	"y = x + 3",
+	"x*y",
+	"z = (x + y) * 2",
+	"x = x + 100",
+	"x - z",
+	"z / (y - y)",
+	"a + 1",
+	"2 +",
+	"12abc",
+	"x \$ y",
 ]
 
 pub fn main() {

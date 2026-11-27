@@ -4,9 +4,9 @@
 
 fn check(name String, expected Bool, actual Bool) Nil {
 	if expected == actual {
-		println('PASS ${name}')
+		println("PASS ${name}")
 	} else {
-		println('FAIL ${name}: expected ${expected}, got ${actual}')
+		println("FAIL ${name}: expected ${expected}, got ${actual}")
 	}
 }
 
@@ -25,26 +25,26 @@ pub fn main() {
 	x = 3
 	y = 4
 	p = Point(x:, y:)
-	check('punned fields build the constructor', True, p.x == 3 && p.y == 4)
-	check('punned form equals the spelled-out form', True, p == Point(x: 3, y: 4))
+	check("punned fields build the constructor", True, p.x == 3 && p.y == 4)
+	check("punned form equals the spelled-out form", True, p == Point(x: 3, y: 4))
 
 	// Punning and an ordinary labelled argument mix freely in one call.
 	from = Point(x: 0, y: 0)
 	to = p
-	s = Segment(from:, to:, label: 'diag')
+	s = Segment(from:, to:, label: "diag")
 	check(
-		'punning mixes with a spelled-out label',
+		"punning mixes with a spelled-out label",
 		True,
-		s.from.x == 0 && s.to.y == 4 && s.label == 'diag',
+		s.from.x == 0 && s.to.y == 4 && s.label == "diag",
 	)
 
 	// Punning composes with record-update spread: fields no argument names
 	// still come from `..base`.
-	label = 'updated'
+	label = "updated"
 	s2 = Segment(..s, label:)
 	check(
-		'punning composes with record-update spread',
+		"punning composes with record-update spread",
 		True,
-		s2.from.x == 0 && s2.to.y == 4 && s2.label == 'updated',
+		s2.from.x == 0 && s2.to.y == 4 && s2.label == "updated",
 	)
 }

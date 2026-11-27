@@ -68,21 +68,21 @@ fn a_crashing_worker_is_restarted_and_its_crash_reported() {
     let out = run(
         "crash_restart",
         &format!(
-            "{COUNTER}
+            r#"{COUNTER}
 pub fn main() {{
 	app <- process::root(process::OneForOne(restarts: 3, within_ms: 5000))
 	c = process::permanent(app, serve)
-	println('${{ping(c)}} ${{ping(c)}}')
+	println("${{ping(c)}} ${{ping(c)}}")
 	crash(c, 1)
-	println('after: ${{ping(c)}}')
-	println('restarts: ${{process::info(process::supervised(c)).restarts}}')
+	println("after: ${{ping(c)}}")
+	println("restarts: ${{process::info(process::supervised(c)).restarts}}")
 	// Exhaust the budget so the program ends: three restarts are allowed,
 	// the fourth crash in the window gives up and main — parked in
 	// `root` — is killed.
 	crash(c, 4)
-	println('not reached')
+	println("not reached")
 }}
-"
+"#
         ),
     );
     assert!(
@@ -120,14 +120,14 @@ fn a_tree_outliving_its_declarer_still_fails_the_run_when_it_gives_up() {
     let out = run(
         "orphan_giveup",
         &format!(
-            "{COUNTER}
+            r#"{COUNTER}
 pub fn main() {{
 	app = process::supervisor(process::OneForOne(restarts: 1, within_ms: 5000))
 	c = process::permanent(app, serve)
 	_ = process::spawn_unlinked(fn() crash(c, 2))
-	println('main returning')
+	println("main returning")
 }}
-"
+"#
         ),
     );
     assert!(!out.success, "--- stderr ---\n{}", out.stderr);
@@ -152,18 +152,18 @@ fn a_returned_main_leaves_its_tree_supervised() {
     let out = run(
         "orphan_restart",
         &format!(
-            "{COUNTER}
+            r#"{COUNTER}
 pub fn main() {{
 	app = process::supervisor(process::OneForOne(restarts: 5, within_ms: 5000))
 	c = process::permanent(app, serve)
 	_ = process::spawn_unlinked(fn() {{
 		crash(c, 1)
-		println('after main returned: ${{ping(c)}}')
+		println("after main returned: ${{ping(c)}}")
 		// Now end the program: exhaust the budget deliberately.
 		crash(c, 6)
 	}})
 }}
-"
+"#
         ),
     );
     assert!(!out.success);
@@ -176,18 +176,18 @@ fn a_nested_supervisor_that_gives_up_is_restarted_by_its_parent() {
     let out = run(
         "nested_giveup",
         &format!(
-            "{COUNTER}
+            r#"{COUNTER}
 pub fn main() {{
 	app <- process::root(process::OneForOne(restarts: 2, within_ms: 5000))
 	inner = process::supervisor_in(app, process::OneForOne(restarts: 0, within_ms: 5000))
 	c = process::permanent(inner, serve)
 	crash(c, 1)
-	println('served again by the restarted subtree: ${{ping(c)}}')
-	println('inner restarts charged to app: ${{process::info(process::supervised(c)).restarts}}')
+	println("served again by the restarted subtree: ${{ping(c)}}")
+	println("inner restarts charged to app: ${{process::info(process::supervised(c)).restarts}}")
 	crash(c, 3)
-	println('not reached')
+	println("not reached")
 }}
-"
+"#
         ),
     );
     assert!(!out.success);
@@ -221,19 +221,19 @@ fn a_watch_on_a_supervisor_reports_its_give_up() {
     let out = run(
         "watch_giveup",
         &format!(
-            "{COUNTER}
+            r#"{COUNTER}
 fn describe(e process::Exit) String {{
 	what = match e.ended {{
-		process::GaveUp(restarts, within_ms) -> 'gave up (${{restarts}} in ${{within_ms}}ms)'
-		process::Exited(process::Killed) -> 'removed'
-		process::Exited(process::Normal | process::NoProcess | process::Crashed(_)) -> 'exited'
+		process::GaveUp(restarts, within_ms) -> "gave up (${{restarts}} in ${{within_ms}}ms)"
+		process::Exited(process::Killed) -> "removed"
+		process::Exited(process::Normal | process::NoProcess | process::Crashed(_)) -> "exited"
 	}}
 	after = match e.status {{
-		process::Restarting -> 'restarting'
-		process::Gone -> 'gone'
-		process::Running -> 'running'
+		process::Restarting -> "restarting"
+		process::Gone -> "gone"
+		process::Running -> "running"
 	}}
-	'${{what}}, ${{after}}'
+	"${{what}}, ${{after}}"
 }}
 
 pub fn main() {{
@@ -253,7 +253,7 @@ pub fn main() {{
 	println(describe(process::receive(events)))
 	println(describe(process::receive(events)))
 }}
-"
+"#
         ),
     );
     assert!(out.success, "--- stderr ---\n{}", out.stderr);
@@ -293,19 +293,19 @@ pub fn main() {
 	downs = process::subject()
 	intruder = process::spawn_unlinked(fn() {
 		_ = process::permanent(app, fn(inbox) process::receive(inbox))
-		println('not reached')
+		println("not reached")
 	})
 	_ = process::monitor(intruder, downs, fn(d) d)
 	match process::receive(downs).reason {
-		process::Crashed(process::Supervision(why)) -> println('refused: ${string::inspect(why)}')
+		process::Crashed(process::Supervision(why)) -> println("refused: ${string::inspect(why)}")
 		process::Crashed(process::IndexOutOfBounds(..) | process::SliceOutOfBounds(..) | process::ForeignReceive | process::TypeMismatch(..))
 		| process::Normal
 		| process::NoProcess
-		| process::Killed -> println('unexpected')
+		| process::Killed -> println("unexpected")
 	}
 	// The creator itself may, of course.
 	_ = process::permanent(app, fn(inbox) process::receive(inbox))
-	println('declared: ${process::count(app.supervised)}')
+	println("declared: ${process::count(app.supervised)}")
 	// End the program: the worker above lives under a supervisor owned by main,
 	// which is returning, so kill it through an exhausted budget instead.
 	_ = process::spawn_unlinked(fn() kill_repeatedly(app.supervised, 3))
@@ -339,7 +339,7 @@ import scarlet/array
 fn first(xs Array(String)) String {
 	match xs {
 		[x, ..] -> x
-		[] -> 'none'
+		[] -> "none"
 	}
 }
 
@@ -349,14 +349,14 @@ fn first(xs Array(String)) String {
 fn handle(sock socket::Socket, stop process::Subject(Nil)) Nil {
 	match socket::read(sock, 64) {
 		Ok(socket::Data(b)) -> {
-			if b == <<'crash'>> {
+			if b == <<"crash">> {
 				xs = [1]
 				_ = xs[0..2]
 				Nil
-			} else if b == <<'quit'>> {
+			} else if b == <<"quit">> {
 				process::send(stop, Nil)
 			} else {
-				socket::write(sock, <<'ok'>>) or Nil
+				socket::write(sock, <<"ok">>) or Nil
 			}
 		}
 		Ok(socket::Closed) -> Nil
@@ -365,25 +365,25 @@ fn handle(sock socket::Socket, stop process::Subject(Nil)) Nil {
 }
 
 pub fn main() {
-	match net::listen('127.0.0.1', 0) {
+	match net::listen("127.0.0.1", 0) {
 		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
-				println('listening ${address::to_string(addr)}')
+				println("listening ${address::to_string(addr)}")
 				stop = process::subject()
 				service = net::serve_on(server, fn(sock) handle(sock, stop))
 				process::receive(stop)
 				kinds = array::map(process::children(service.supervised), fn(c) match process::info(c).kind {
-					process::FactoryOf(_) -> 'factory'
-					process::Worker(process::Transient) -> 'acceptor'
-					process::Process | process::SupervisorOf(_) -> 'other'
+					process::FactoryOf(_) -> "factory"
+					process::Worker(process::Transient) -> "acceptor"
+					process::Process | process::SupervisorOf(_) -> "other"
 				})
-				println('first child: ${first(kinds)}')
-				println('acceptors: ${array::length(array::filter(kinds, fn(k) k == 'acceptor'))}')
+				println("first child: ${first(kinds)}")
+				println("acceptors: ${array::length(array::filter(kinds, fn(k) k == "acceptor"))}")
 				net::close(server) or Nil
 			}
-			Err(_) -> println('no addr')
+			Err(_) -> println("no addr")
 		}
-		Err(_) -> println('no listen')
+		Err(_) -> println("no listen")
 	}
 }
 "#;
