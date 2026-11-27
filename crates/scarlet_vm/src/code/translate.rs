@@ -713,7 +713,7 @@ impl<'c> Translator<'c> {
         Ok(match (op, args, binds) {
             (ProbeOp::ArraySlice, [xs, start, end], [bind]) => Ins::ArraySlice {
                 dst: MaybeHit::new(to(bind)),
-                src: src(*xs),
+                src: Arg::shared(of(*xs)),
                 start: src(*start),
                 end: src(*end),
                 miss,
@@ -1372,7 +1372,7 @@ impl<'c> Translator<'c> {
         Ok(Ins::ArrayExtend {
             dst,
             src,
-            items: ShareList(self.reg_list(&items)?),
+            items: self.arg_list(&items)?,
             end,
         })
     }
@@ -1462,7 +1462,7 @@ impl<'c> Translator<'c> {
                 dst,
                 value: Value::EMPTY_ARRAY,
             }),
-            PrimOp::MakeArray => Ok(match self.shares(args.iter().copied())? {
+            PrimOp::MakeArray => Ok(match self.args(args)? {
                 Fit::Inline(elements) => Ins::Array { dst, elements },
                 Fit::Listed(elements) => Ins::ArrayWide { dst, elements },
             }),
@@ -1475,7 +1475,11 @@ impl<'c> Translator<'c> {
                 let (xs, items) = args.split_first().ok_or(arity(Arity::AtLeastOne))?;
                 self.pushes(dst, *xs, items, End::Back)
             }
-            PrimOp::ArrayConcat => both().map(|(a, b)| Ins::ArrayConcat { dst, a, b }),
+            PrimOp::ArrayConcat => two().map(|(a, b)| Ins::ArrayConcat {
+                dst,
+                a: Arg::shared(of(a)),
+                b: Arg::shared(of(b)),
+            }),
             PrimOp::MakeTuple => Ok(match *args {
                 [a, b] => Ins::Tuple2 {
                     dst,

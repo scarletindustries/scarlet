@@ -63,7 +63,7 @@ fn pair(heap: &Heap, a: Value, b: Value, todo: &mut Vec<(Value, Value)>) -> bool
 
 fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool {
     let kx = heap.kind(x);
-    if matches!(kx, Some(Kind::ArrayRoot | Kind::Range)) {
+    if matches!(kx, Some(Kind::ArrayFlat | Kind::ArrayRoot | Kind::Range)) {
         return arrays(heap, Value::cell(x), Value::cell(y), todo);
     }
     // A slice equals a binary holding the same bits.
@@ -102,7 +102,8 @@ fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool 
         },
         // Arrays and binaries were compared above; a tree's inner nodes are
         // never values.
-        Kind::ArrayRoot
+        Kind::ArrayFlat
+        | Kind::ArrayRoot
         | Kind::ArrayLeaf
         | Kind::ArrayBranch
         | Kind::Range
@@ -123,16 +124,42 @@ fn arrays(heap: &Heap, a: Value, b: Value, todo: &mut Vec<(Value, Value)>) -> bo
         // They are the same length, so both are empty.
         (Seq::Empty, _) | (_, Seq::Empty) => true,
         (Seq::Range { start: x, .. }, Seq::Range { start: y, .. }) => x == y,
+        (Seq::Flat(f), Seq::Range { start, end }) | (Seq::Range { start, end }, Seq::Flat(f)) => {
+            are_ints(heap, f.items(heap), start..end)
+        }
         (Seq::Tree(t), Seq::Range { start, end }) | (Seq::Range { start, end }, Seq::Tree(t)) => {
-            array::elements(heap, t)
-                .into_iter()
-                .zip(start..end)
-                .all(|(v, n)| is_int(heap, v, i128::from(n)))
+            are_ints(heap, array::elements_of_tree(heap, t), start..end)
+        }
+        (Seq::Flat(x), Seq::Flat(y)) => {
+            todo.extend(x.items(heap).zip(y.items(heap)).rev());
+            true
+        }
+        (Seq::Flat(f), Seq::Tree(t)) => {
+            let all = f.items(heap).collect();
+            queue(todo, all, array::elements_of_tree(heap, t))
+        }
+        (Seq::Tree(t), Seq::Flat(f)) => {
+            let all = f.items(heap).collect();
+            queue(todo, array::elements_of_tree(heap, t), all)
         }
         (Seq::Tree(x), Seq::Tree(y)) => {
-            queue(todo, array::elements(heap, x), array::elements(heap, y))
+            let (x, y) = (
+                array::elements_of_tree(heap, x),
+                array::elements_of_tree(heap, y),
+            );
+            queue(todo, x, y)
         }
     }
+}
+
+/// Whether `items`, of which there are as many, are `ints`.
+fn are_ints(
+    heap: &Heap,
+    items: impl IntoIterator<Item = Value>,
+    ints: std::ops::Range<i64>,
+) -> bool {
+    let mut pairs = items.into_iter().zip(ints);
+    pairs.all(|(v, n)| is_int(heap, v, i128::from(n)))
 }
 
 /// Whether `v` is the Int `n`, small or big.

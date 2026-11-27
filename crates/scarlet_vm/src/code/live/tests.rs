@@ -366,9 +366,10 @@ fn a_drop_of_what_was_taken_does_nothing() {
     assert_eq!(idle(d), [0; 0]);
     let ins = vec![of::mv(1, 0), of::len(2, 0), of::drop(0), of::halt(1)];
     assert_eq!(idle(draft(3, 1, ins, &[])), [0; 0]);
-    let shared = Ins::Array {
+    let shared = Ins::Closure {
         dst: Dst(VReg(1)),
-        elements: crate::code::Shares::new(&[VReg(0)]).expect("room for one"),
+        func: scarlet_ir::core_ir::FuncIdx(0),
+        captures: crate::code::Shares::new(&[VReg(0)]).expect("room for one"),
     };
     let ins = vec![shared, of::drop(0), of::halt(1)];
     assert_eq!(idle(draft(3, 3, ins, &[])), [0; 0]);

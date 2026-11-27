@@ -1,5 +1,6 @@
-//! An array is a persistent RRB (relaxed radix-balanced) tree in the
-//! process's heap, the same shape as the old VM's (its `seq.rs`).
+//! An array of 1 to 32 elements is one cell of them ([`flat`]). A longer one is a
+//! persistent RRB (relaxed radix-balanced) tree in the process's heap, the same shape as
+//! the old VM's (its `seq.rs`).
 //!
 //! ```text
 //!   root [ len | shift | offset | head | tree | tail ]
@@ -22,15 +23,21 @@
 //! An array something else holds is never changed. An operation on one
 //! builds new nodes along the one path it touches and shares every other
 //! node with the array it came from, which stays as it was. A node shared
-//! this way holds one more reference. An operation whose caller gives up its
-//! reference ([`set`], [`push_owned`], [`extend_owned`], [`uncons`], [`skip_owned`])
-//! changes a node in place when its count says nothing else holds it.
+//! this way holds one more reference.
 //!
-//! This is the layout, in words after each cell's header:
+//! Everything here that gives an array is handed one reference to each array that it
+//! works on, and to each element that goes in, and gives up what it does not put
+//! in the array that it gives. So a count of 1 says that nothing else holds an array,
+//! which may then change in place. The exceptions are [`uncons`] and [`flat::uncons`], of an
+//! array that is not to change, which take nothing. What is refused for want of room has given up
+//! what it was handed too, but for what a join of two trees had made by then.
+//!
+//! This is the layout of a tree, in words after each cell's header:
 //!
 //! - A root holds `len`, `shift` (the tree's height, 0 for a lone leaf) and
 //!   the head's `offset`, then the head, tree and tail, each a node or `Nil`.
-//! - A leaf holds 1 to 32 elements.
+//! - A leaf holds 1 to 32 elements. A short array's cell that has 32, the first of them
+//!   in its first slot, is a leaf too, so an array that outgrows its cell keeps it.
 //! - A branch holds `shift`, then `n` running totals, then `n` children, all
 //!   one level down, with `n` from 1 to 32.
 //!
@@ -38,21 +45,36 @@
 //! deep as the tree is tall. That is 13 levels at the very most, for 2^64
 //! elements.
 //!
-//! An array can also be a range, `start..end`, which stores only its two
-//! ends, as the old VM's did. Its length, its elements, its tail and its
-//! slices all come from those two numbers. Adding to a range, or joining one to
-//! another array, first builds it as a tree.
+//! A tree is made where an array comes to have more than 32 elements. One that then loses
+//! elements from its front, which is what `[h, ..t]` does, stays a tree until only its
+//! tail is left, or nothing, whatever is put in it meanwhile. So does one that nothing else
+//! holds and that a slice leaves with more than it takes from its front. So an array that is
+//! now a little longer than 32 and now a little shorter is not copied each time. Whatever
+//! else is of 32 elements or fewer is flat, every other slice of a tree that leaves something
+//! out among them, and no reader of an array asks which of the two it is but to find the
+//! elements.
 //!
-//! The array with no elements is neither. It is a word of its own,
+//! An array can also be a range, `start..end`, which stores only its two
+//! ends, as the old VM did. Its length, its elements, its tail and its
+//! slices all come from those two numbers. Adding to a range, or joining one to
+//! another array, first builds the array of its elements.
+//!
+//! The array with no elements is none of these. It is a word of its own,
 //! [`Value::EMPTY_ARRAY`], and no cell is ever one. Every cell of an array is made by
-//! [`new_root`], [`range`] or [`new_node`], which make none for no elements, or is a
-//! copy of one that was. [`Seq`] says which of the three an array is, and is the
-//! only way from a value to one.
+//! [`new_root`], [`range`], [`new_node`] or one of the makers of [`flat`], which make
+//! none for no elements, or is a copy of one that was. [`Seq`] says which of them an
+//! array is. What is written for one of the forms asks a cell whether it is that one, and
+//! answers for no other.
 
 use crate::code::{Length, Split};
 use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
 use crate::value::Value;
 use crate::word::to_usize;
+
+pub(crate) mod flat;
+
+pub(crate) use flat::Flat;
+use flat::MOST;
 
 /// Children per branch, and elements per leaf.
 const B: usize = 32;
@@ -62,13 +84,34 @@ const BITS: usize = 5;
 /// join, which bounds the extra steps a lookup takes (the RRB paper's `e`).
 const E_MAX: usize = 2;
 
-/// An array as the VM holds it: the empty one, a tree of its elements, or a range
-/// of Ints that stores only its two ends.
+/// An array as the VM holds it: the empty one, one cell of its elements, a tree of them,
+/// or a range of Ints that stores only its two ends.
 #[derive(Clone, Copy)]
 pub(crate) enum Seq {
     Empty,
+    Flat(Flat),
     Tree(Cell),
     Range { start: i64, end: i64 },
+}
+
+/// An array that stores its elements.
+#[derive(Clone, Copy)]
+pub(crate) enum Stored {
+    Empty,
+    Flat(Flat),
+    Tree(Cell),
+}
+
+impl Stored {
+    /// The array as a value. Its reference passes to it.
+    #[inline(always)]
+    pub(crate) fn value(self) -> Value {
+        match self {
+            Stored::Empty => Value::EMPTY_ARRAY,
+            Stored::Flat(flat) => Value::cell(flat.cell()),
+            Stored::Tree(cell) => Value::cell(cell),
+        }
+    }
 }
 
 impl Seq {
@@ -76,6 +119,7 @@ impl Seq {
     pub(crate) fn len(self, heap: &Heap) -> u64 {
         match self {
             Seq::Empty => 0,
+            Seq::Flat(flat) => flat.len() as u64,
             Seq::Tree(cell) => tree(heap, cell).map_or(0, |r| r.len as u64),
             Seq::Range { start, end } => range_len(start, end),
         }
@@ -105,14 +149,21 @@ pub(crate) fn seq(heap: &Heap, v: Value) -> Option<Seq> {
     let Some(cell) = v.as_cell() else {
         return (v.bits() == Value::EMPTY_ARRAY.bits()).then_some(Seq::Empty);
     };
+    if let Some(flat) = Flat::of(heap, cell) {
+        return Some(Seq::Flat(flat));
+    }
     if tree(heap, cell).is_some() {
         return Some(Seq::Tree(cell));
     }
+    let (start, end) = range_at(heap, cell)?;
+    Some(Seq::Range { start, end })
+}
+
+/// The ends of the range that `cell` is.
+#[inline(always)]
+pub(crate) fn range_at(heap: &Heap, cell: Cell) -> Option<(i64, i64)> {
     let [start, end] = heap.chunk(cell, Kind::Range)?;
-    Some(Seq::Range {
-        start: start.cast_signed(),
-        end: end.cast_signed(),
-    })
+    Some((start.cast_signed(), end.cast_signed()))
 }
 
 /// Which end of an array.
@@ -123,6 +174,15 @@ pub(crate) enum End {
 }
 
 impl End {
+    /// Where the first of what is put at this end of `len` elements comes to be.
+    #[inline(always)]
+    fn put_at(self, len: usize) -> usize {
+        match self {
+            End::Front => 0,
+            End::Back => len,
+        }
+    }
+
     /// A head and a tail as the buffer at this end and the one at the other,
     /// or those two as a head and a tail.
     fn turn(self, a: Value, b: Value) -> (Value, Value) {
@@ -138,13 +198,15 @@ const ROOT_HEAD: usize = 3;
 const ROOT_TREE: usize = 4;
 const ROOT_TAIL: usize = 5;
 
+#[derive(Clone, Copy)]
 pub(crate) struct Root {
     len: usize,
     shift: usize,
     /// Items at the front of `head` this array has left behind. Dropping from
     /// the front moves this along and keeps the same leaf, so `[h, ..t]`
-    /// copies nothing. A push settles it back to 0, while `take` and `concat`
-    /// keep it along with the head.
+    /// copies nothing. A push at the front writes over them when nothing else holds
+    /// the leaf, and otherwise settles it back to 0. `take` and `concat` keep it along
+    /// with the head.
     offset: usize,
     head: Value,
     tree: Value,
@@ -207,16 +269,6 @@ impl View<'_> {
         }
     }
 
-    /// Slot `i` counted from slot `from`, which is how a head that has left
-    /// `from` items behind is read.
-    fn slot_from(&self, from: usize, i: usize) -> Option<Value> {
-        let words = match self {
-            View::Leaf(items) => items,
-            View::Branch { children, .. } => children,
-        };
-        words.get(from..)?.get(i).copied().map(Value::from_bits)
-    }
-
     /// Slot `i`, which is an element of a leaf or a child of a branch.
     fn slot(&self, i: usize) -> Option<Value> {
         let words = match self {
@@ -232,15 +284,6 @@ impl View<'_> {
 #[inline(always)]
 fn root(heap: &Heap, cell: Cell) -> Result<Root, DeadCell> {
     tree(heap, cell).ok_or(DeadCell)
-}
-
-/// The parts of `array`, which is `None` for the empty one.
-#[inline(always)]
-fn parts(heap: &Heap, array: Option<Cell>) -> Result<Root, DeadCell> {
-    match array {
-        Some(cell) => root(heap, cell),
-        None => Ok(Root::EMPTY),
-    }
 }
 
 /// The root that `cell` is, or `None` when it is something else.
@@ -259,8 +302,23 @@ fn tree(heap: &Heap, cell: Cell) -> Option<Root> {
 
 /// How many live items the head has, which is what `offset` leaves of its
 /// leaf.
+#[inline(always)]
 fn head_len(heap: &Heap, r: &Root) -> usize {
-    slot_count(heap, r.head).saturating_sub(r.offset)
+    leaf_items(heap, r.head).len().saturating_sub(r.offset)
+}
+
+/// How many elements of `r` are in its inner tree, which is what its two buffers leave, when
+/// they have `head` and `tail` live items.
+#[inline(always)]
+fn left_for_tree(r: &Root, head: usize, tail: usize) -> usize {
+    r.len.wrapping_sub(head).wrapping_sub(tail)
+}
+
+/// The same for a root whose buffers have not been looked at.
+#[inline(always)]
+fn tree_len(heap: &Heap, r: &Root) -> usize {
+    let tail = leaf_items(heap, r.tail).len();
+    left_for_tree(r, head_len(heap, r), tail)
 }
 
 /// The head's live items, which are what `offset` leaves of its leaf.
@@ -296,33 +354,21 @@ fn view(heap: &Heap, v: Value) -> Option<View<'_>> {
 #[inline(always)]
 fn view_here(heap: &Heap, v: Value) -> Option<View<'_>> {
     let cell = v.as_cell()?;
-    let d = heap.data(cell);
-    match heap.kind(cell)? {
-        Kind::ArrayLeaf => Some(View::Leaf(d)),
-        Kind::ArrayBranch => {
-            let n = d.len().saturating_sub(1) / 2;
-            let rest = d.get(1..).unwrap_or(&[]);
-            let (sizes, children) = rest.split_at(n.min(rest.len()));
-            Some(View::Branch {
-                shift: to_usize(d.first().copied().unwrap_or(0)),
-                sizes,
-                children,
-            })
-        }
-        Kind::Handle
-        | Kind::String
-        | Kind::BigInt
-        | Kind::Ctor
-        | Kind::Closure
-        | Kind::Tuple
-        | Kind::ArrayRoot
-        | Kind::Range
-        | Kind::Binary
-        | Kind::BinarySlice
-        | Kind::Map
-        | Kind::MapNode
-        | Kind::MapCollision => None,
+    if let Some(items) = heap.leaf(cell) {
+        return Some(View::Leaf(items));
     }
+    if !heap.is(cell, Kind::ArrayBranch) {
+        return None;
+    }
+    let d = heap.data(cell);
+    let n = d.len().saturating_sub(1) / 2;
+    let rest = d.get(1..).unwrap_or(&[]);
+    let (sizes, children) = rest.split_at(n.min(rest.len()));
+    Some(View::Branch {
+        shift: to_usize(d.first().copied().unwrap_or(0)),
+        sizes,
+        children,
+    })
 }
 
 /// `v` as a node copied out of the heap, or `None` for `Nil`.
@@ -339,15 +385,6 @@ fn node(heap: &Heap, v: Value) -> Option<Node> {
             children: children.iter().copied().map(Value::from_bits).collect(),
         },
     })
-}
-
-/// `slots` with `x` added at `end`.
-fn at_end(mut slots: Slots, x: Value, end: End) -> Slots {
-    match end {
-        End::Front => slots.insert(0, x),
-        End::Back => slots.push(x),
-    }
-    slots
 }
 
 fn own_all(heap: &mut Heap, vs: &[Value]) -> Result<Slots, DeadCell> {
@@ -372,6 +409,12 @@ fn new_root(heap: &mut Heap, r: Root) -> Result<Value, Fault> {
     if r.len == 0 {
         return Ok(Value::EMPTY_ARRAY);
     }
+    Ok(Value::cell(root_of(heap, r)?))
+}
+
+/// [`new_root`] of what has an element.
+#[inline(always)]
+fn root_of(heap: &mut Heap, r: Root) -> Result<Cell, Fault> {
     let words = [
         r.len as u64,
         r.shift as u64,
@@ -380,7 +423,17 @@ fn new_root(heap: &mut Heap, r: Root) -> Result<Value, Fault> {
         r.tree.bits(),
         r.tail.bits(),
     ];
-    Ok(Value::cell(heap.make(Kind::ArrayRoot, &words)?))
+    heap.make(Kind::ArrayRoot, &words)
+}
+
+/// Make the tree `array`, which nothing else holds, the one that `r` says. The references
+/// to the parts of `r` pass to it, and those that it had are the caller's.
+#[inline(always)]
+fn rewrite(heap: &mut Heap, array: Cell, r: &Root) {
+    if let [l, s, o, h, t, e] = heap.data_mut(array) {
+        (*l, *s, *o) = (r.len as u64, r.shift as u64, r.offset as u64);
+        (*h, *t, *e) = (r.head.bits(), r.tree.bits(), r.tail.bits());
+    }
 }
 
 /// A leaf or a branch of `words`, or `Nil` when there are none.
@@ -503,30 +556,72 @@ fn size_slot(sizes: &[u64], idx: usize, shift: usize) -> Option<Slot> {
     })
 }
 
-/// An array of `items`, whose references pass to it. A whole number of full
-/// leaves go in a tightly packed tree, and the rest, 1 to 32, in the tail.
-pub(crate) fn from_values(heap: &mut Heap, items: &[Value]) -> Result<Value, Fault> {
-    let len = items.len();
-    if len <= B {
-        let r = Root {
-            len,
-            tail: leaf(heap, items)?,
-            ..Root::EMPTY
-        };
-        return new_root(heap, r);
+/// `why`, where what was to be handed to a new array is given up, because there is none.
+#[cold]
+#[inline(never)]
+fn refused(heap: &mut Heap, why: Fault, handed: &[Value]) -> Fault {
+    for v in handed {
+        if let Err(dead) = release(heap, *v) {
+            return dead.into();
+        }
     }
-    // Every chunk but the last is a full leaf for the tree, and the last, of
-    // 1 to 32 items, is the tail.
-    let mut chunks: Vec<&[Value]> = items.chunks(B).collect();
-    let tail_items = chunks.pop().unwrap_or(&[]);
-    let mut nodes = Vec::with_capacity(chunks.len());
-    for chunk in chunks {
+    why
+}
+
+/// The words that a leaf and a branch take at most, and those that a root does.
+const LEAF_WORDS: usize = B + 1;
+const BRANCH_WORDS: usize = 2 * B + 2;
+const ROOT_WORDS: usize = 7;
+
+/// More words than it takes to put `items` items in a tree of height `shift`, or to copy
+/// the way to one, with a root and the buffers of it.
+fn words_for(items: usize, shift: usize) -> usize {
+    let levels = (shift / BITS).saturating_add(3);
+    let leaves = (items / B).saturating_add(3);
+    let way = levels.saturating_mul(BRANCH_WORDS);
+    let each = way.saturating_add(LEAF_WORDS);
+    leaves.saturating_mul(each).saturating_add(ROOT_WORDS)
+}
+
+/// The array of `items`, whose references pass to it.
+pub(crate) fn from_values(heap: &mut Heap, items: &[Value]) -> Result<Value, Fault> {
+    stored(heap, items).map(Stored::value)
+}
+
+/// [`from_values`], as what stores its elements.
+pub(crate) fn stored(heap: &mut Heap, items: &[Value]) -> Result<Stored, Fault> {
+    let made = match items.len() <= MOST {
+        true => flat::new_flat(heap, items),
+        false => tree_of(heap, items),
+    };
+    made.map_err(|why| refused(heap, why, items))
+}
+
+/// A tree of `items`, whose references pass to it. A whole number of full leaves go
+/// in a tightly packed tree, and the rest, 1 to 32, in the tail.
+fn tree_of(heap: &mut Heap, items: &[Value]) -> Result<Stored, Fault> {
+    // Every node is asked for here, so none is refused once there are some. A leaf and the
+    // root are a word longer than what they hold, and a branch has two for each child.
+    let full = items.len().saturating_sub(1) / B;
+    let mut words = items.len().saturating_add(full).saturating_add(1);
+    let mut nodes = full;
+    while nodes > 1 {
+        let above = nodes.div_ceil(B);
+        let these = nodes.saturating_add(above).saturating_mul(2);
+        words = words.saturating_add(these);
+        nodes = above;
+    }
+    heap.reserve(words.saturating_add(ROOT_WORDS))?;
+    let in_leaves = full.saturating_mul(B);
+    let (full, tail_items) = items.split_at_checked(in_leaves).unwrap_or((items, &[]));
+    let mut nodes = Slots::new();
+    for chunk in full.chunks(B) {
         nodes.push(leaf(heap, chunk)?);
     }
     let mut shift = 0;
     while nodes.len() > 1 {
         shift = up(shift)?;
-        let mut level = Vec::with_capacity(nodes.len().div_ceil(B));
+        let mut level = Slots::new();
         for chunk in nodes.chunks(B) {
             level.push(branch(heap, shift, chunk)?);
         }
@@ -535,35 +630,66 @@ pub(crate) fn from_values(heap: &mut Heap, items: &[Value]) -> Result<Value, Fau
     let tree = nodes.pop().unwrap_or(Value::NIL);
     let tail = leaf(heap, tail_items)?;
     let r = Root {
-        len,
+        len: items.len(),
         shift,
         tree,
         tail,
         ..Root::EMPTY
     };
-    new_root(heap, r)
+    Ok(Stored::Tree(root_of(heap, r)?))
 }
 
-/// Element `i`, with no reference added, or `None` past the end.
-// Inside its one caller that reads element after element. Where it is called
-// from more places, the optimizer leaves it out of them all.
+/// What was found at an index.
+pub(crate) enum Near {
+    Found(Value),
+    /// The array has no such index.
+    Past,
+    /// It is not an array that was asked about, and may have the index.
+    Other,
+}
+
+/// What became of a write in place.
+pub(crate) enum Wrote {
+    Done,
+    /// The array has no such index.
+    Past,
+    /// It is not an array that is written in place, and may have the index.
+    Other,
+}
+
+/// Element `i` of `array`, when it is a tree, with no reference added.
+// Joins make trees so long that an index below 0, taken for one that is not, is in them.
+#[inline(always)]
+pub(crate) fn near(heap: &Heap, array: Cell, i: i64) -> Near {
+    let Some(r) = tree(heap, array) else {
+        return Near::Other;
+    };
+    match usize::try_from(i) {
+        Ok(i) if i < r.len => get(heap, array, i).map_or(Near::Other, Near::Found),
+        Ok(_) | Err(_) => Near::Past,
+    }
+}
+
+/// Element `i` of the tree `array`, with no reference added, or `None` past the end.
+// Inside its callers, the first of which reads element after element.
 #[inline(always)]
 pub(crate) fn get(heap: &Heap, array: Cell, i: usize) -> Option<Value> {
     let r = tree(heap, array)?;
     if i >= r.len {
         return None;
     }
-    let head = view(heap, r.head);
-    let head_len = head.as_ref().map_or(0, View::len).saturating_sub(r.offset);
-    let Some(mut idx) = i.checked_sub(head_len) else {
-        return head?.slot_from(r.offset, i);
+    let head = leaf_items(heap, r.head).get(r.offset..).unwrap_or_default();
+    let Some(mut idx) = i.checked_sub(head.len()) else {
+        return head.get(i).copied().map(Value::from_bits);
     };
-    if let Some(in_tail) = idx.checked_sub(node_len(heap, r.tree)) {
-        return view(heap, r.tail)?.slot(in_tail);
+    let tail = leaf_items(heap, r.tail);
+    let in_tree = left_for_tree(&r, head.len(), tail.len());
+    if let Some(in_tail) = idx.checked_sub(in_tree) {
+        return tail.get(in_tail).copied().map(Value::from_bits);
     }
     let mut n = r.tree;
     loop {
-        let v = view(heap, n)?;
+        let v = view_here(heap, n)?;
         match v {
             View::Leaf(_) => return v.slot(idx),
             View::Branch { shift, sizes, .. } => {
@@ -597,9 +723,71 @@ fn copied(heap: &mut Heap, node: Cell) -> Result<Cell, Fault> {
     Ok(copy)
 }
 
-/// `array` with `x` at index `i`. The caller gives up its reference to
-/// `array` and holds the result's, and `x`'s reference passes to the array.
-/// An index the array does not have changes nothing.
+/// `array` with `x` at index `i`. An index the array does not have changes nothing.
+#[inline]
+pub(crate) fn set(heap: &mut Heap, array: Stored, i: usize, x: Value) -> Result<Value, Fault> {
+    match array {
+        Stored::Empty => {
+            release(heap, x)?;
+            Ok(Value::EMPTY_ARRAY)
+        }
+        Stored::Flat(flat) => flat::set(heap, flat, i, x),
+        Stored::Tree(array) => set_in_tree(heap, array, i, x),
+    }
+}
+
+/// [`set`] of a tree.
+#[inline(always)]
+fn set_in_tree(heap: &mut Heap, mut array: Cell, i: usize, x: Value) -> Result<Value, Fault> {
+    let r = root(heap, array)?;
+    let written = match i < r.len {
+        true => write(heap, &mut array, &r, i, x),
+        false => Ok(false),
+    };
+    match written {
+        Ok(true) => {}
+        Ok(false) => not_written(heap, &r, x)?,
+        Err(why) => return Err(refused(heap, why, &[x, Value::cell(array)])),
+    }
+    Ok(Value::cell(array))
+}
+
+/// Give up `x`, which no slot of the tree `r` was there for. Only a tree that is not whole has
+/// an index and not the slot: its totals are wrong, or a part of it is freed. `get` finds
+/// nothing there either, so there is nothing to write over.
+#[cold]
+#[inline(never)]
+fn not_written(heap: &mut Heap, r: &Root, x: Value) -> Result<(), DeadCell> {
+    for part in [r.head, r.tree, r.tail] {
+        if let Some(part) = part.as_cell() {
+            heap.unique(part)?;
+        }
+    }
+    release(heap, x)
+}
+
+/// Put `x`, with its reference, at index `i` of `array`, when it is a tree that nothing else
+/// holds and has the index. Nodes under it that something else holds are copied on the way.
+#[inline(always)]
+pub(crate) fn set_alone(heap: &mut Heap, array: Cell, i: i64, x: Value) -> Result<Wrote, Fault> {
+    let Some(r) = tree(heap, array) else {
+        return Ok(Wrote::Other);
+    };
+    let Some(i) = usize::try_from(i).ok().filter(|i| *i < r.len) else {
+        return Ok(Wrote::Past);
+    };
+    if !heap.unique(array)? {
+        return Ok(Wrote::Other);
+    }
+    let mut alone = array;
+    Ok(match write(heap, &mut alone, &r, i, x)? {
+        true => Wrote::Done,
+        false => Wrote::Other,
+    })
+}
+
+/// Put `x` at index `i` of the tree `array`, whose parts are `r`. Whether it did. The
+/// array is then one that nothing else holds.
 ///
 /// The walk goes from the root down to the leaf that holds the slot. A node
 /// nothing else holds is written where it is. A node something else holds is
@@ -609,32 +797,21 @@ fn copied(heap: &mut Heap, node: Cell) -> Result<Cell, Fault> {
 /// an array with one holder changes in place, and a write to one something
 /// else holds copies the root and one node per level, and shares the rest
 /// with the array it came from, which stays as it was.
-pub(crate) fn set(
-    heap: &mut Heap,
-    array: Option<Cell>,
-    i: usize,
-    x: Value,
-) -> Result<Value, Fault> {
-    let Some(array) = array else {
-        release(heap, x)?;
-        return Ok(Value::EMPTY_ARRAY);
-    };
-    let r = root(heap, array)?;
-    if i >= r.len {
-        release(heap, x)?;
-        return Ok(Value::cell(array));
-    }
-    let array = owned(heap, array)?;
+///
+/// Where there is no room for a copy, the array is as it was, and `x` is not in it.
+#[inline(never)]
+fn write(heap: &mut Heap, array: &mut Cell, r: &Root, i: usize, x: Value) -> Result<bool, Fault> {
+    *array = owned(heap, *array)?;
     // The part of the root that holds the slot: its word in the root, the
     // node there, and the slot's index under that node.
-    let (mut word, mut node, mut idx) = match i.checked_sub(head_len(heap, &r)) {
+    let (mut word, mut node, mut idx) = match i.checked_sub(head_len(heap, r)) {
         None => (ROOT_HEAD, r.head, r.offset.saturating_add(i)),
-        Some(past) => match past.checked_sub(node_len(heap, r.tree)) {
+        Some(past) => match past.checked_sub(tree_len(heap, r)) {
             None => (ROOT_TREE, r.tree, past),
             Some(in_tail) => (ROOT_TAIL, r.tail, in_tail),
         },
     };
-    let mut holder = array;
+    let mut holder = *array;
     while let Some(shared) = node.as_cell() {
         let cell = owned(heap, shared)?;
         if cell != shared
@@ -642,7 +819,7 @@ pub(crate) fn set(
         {
             *w = Value::cell(cell).bits();
         }
-        match view(heap, Value::cell(cell)) {
+        match view_here(heap, Value::cell(cell)) {
             Some(View::Branch {
                 shift,
                 sizes,
@@ -666,19 +843,27 @@ pub(crate) fn set(
                 };
                 let old = Value::from_bits(std::mem::replace(slot, x.bits()));
                 release(heap, old)?;
-                return Ok(Value::cell(array));
+                return Ok(true);
             }
             None => break,
         }
     }
-    // Only a tree whose totals are wrong ends here. `get` finds nothing at
-    // this index of such a tree, so there is nothing to write over.
-    release(heap, x)?;
-    Ok(Value::cell(array))
+    Ok(false)
 }
 
-/// Every element, front to back, with no reference added.
-pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
+/// Every element of `s`, front to back, with no reference added, or `None` when it is a
+/// range, which stores none.
+pub(crate) fn elements(heap: &Heap, s: Seq) -> Option<Vec<Value>> {
+    Some(match s {
+        Seq::Empty => Vec::new(),
+        Seq::Flat(flat) => flat.items(heap).collect(),
+        Seq::Tree(array) => elements_of_tree(heap, array),
+        Seq::Range { .. } => return None,
+    })
+}
+
+/// [`elements`] of a tree.
+pub(crate) fn elements_of_tree(heap: &Heap, array: Cell) -> Vec<Value> {
     let Some(r) = tree(heap, array) else {
         return Vec::new();
     };
@@ -701,66 +886,33 @@ pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
     out
 }
 
-/// `array` with `x` added at `end`. `x`'s reference passes to the result.
-/// The buffer at that end takes it, and a full buffer first goes into the
-/// tree as a finished leaf.
-fn push(heap: &mut Heap, array: Option<Cell>, x: Value, end: End) -> Result<Value, Fault> {
-    let r = parts(heap, array)?;
-    let len = r.len.checked_add(1).ok_or(Fault::Full)?;
-    // Settle a head with items left behind first. The leaf that goes into the
-    // tree, or that the new item joins, must hold only live items.
-    let settled = own_head(heap, &r)?;
-    let (this, this_items, other) = match end {
-        End::Front => (settled, head_items(heap, &r), r.tail),
-        End::Back => (r.tail, slots(heap, r.tail), settled),
-    };
-    let (tree, shift, new) = if this_items.is_empty() {
-        (heap.own(r.tree)?, r.shift, leaf(heap, &[x])?)
-    } else if this_items.len() < B {
-        let kept = own_all(heap, &this_items)?;
-        let items = at_end(kept, x, end);
-        (heap.own(r.tree)?, r.shift, leaf(heap, &items)?)
-    } else {
-        let (tree, this) = (heap.own(r.tree)?, heap.own(this)?);
-        let (tree, shift) = tree_push_leaf(heap, tree, r.shift, this, end)?;
-        (tree, shift, leaf(heap, &[x])?)
-    };
-    let other = heap.own(other)?;
-    // `settled` is the head's own leaf when nothing was left behind, and the
-    // branches above each took their own reference to what they kept.
-    release(heap, settled)?;
-    let (head, tail) = end.turn(new, other);
-    let r = Root {
-        len,
-        shift,
-        offset: 0,
-        head,
-        tree,
-        tail,
-    };
-    new_root(heap, r)
+/// `array` with `x` added at `end`.
+#[inline(always)]
+pub(crate) fn push(heap: &mut Heap, array: Stored, x: Value, end: End) -> Result<Value, Fault> {
+    match array {
+        Stored::Empty => one(heap, x),
+        Stored::Flat(flat) => flat::push(heap, flat, x, end),
+        // A handler has asked `push_alone` first.
+        Stored::Tree(cell) => extend_apart(heap, cell, &[x], end),
+    }
 }
 
-/// `array` with `x` added at `end`. The caller gives up its reference to `array`. When
-/// nothing else holds the array or the leaf at `end`, and that leaf has room,
-/// the leaf's items move to a leaf one longer and the root changes in place,
-/// so nothing is shared or released. `x`'s reference passes in, as for
-/// [`push`].
-pub(crate) fn push_owned(
-    heap: &mut Heap,
-    array: Option<Cell>,
-    x: Value,
-    end: End,
-) -> Result<Value, Fault> {
-    let Some(cell) = array else {
-        return push(heap, None, x, end);
-    };
-    if pushed(heap, cell, &[x], end)? {
-        return Ok(Value::cell(cell));
+/// The array of `x`.
+#[inline(never)]
+fn one(heap: &mut Heap, x: Value) -> Result<Value, Fault> {
+    let made = flat::new_flat(heap, &[x]);
+    let made = made.map(Stored::value);
+    made.map_err(|why| refused(heap, why, &[x]))
+}
+
+/// Put `x`, with its reference, at `end` of the tree `array`, when nothing else holds it or
+/// the leaf there, and the leaf has room. Whether it did.
+#[inline(never)]
+pub(crate) fn push_alone(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<bool, Fault> {
+    match heap.is(array, Kind::ArrayRoot) {
+        true => pushed(heap, array, &[x], end),
+        false => Ok(false),
     }
-    let made = push(heap, array, x, end);
-    heap.release(cell)?;
-    made
 }
 
 /// Put `items`, in their order, at `end` of `array`, whose one holder gives up a reference
@@ -773,12 +925,23 @@ fn pushed(heap: &mut Heap, array: Cell, items: &[Value], end: End) -> Result<boo
         End::Front => (r.head, ROOT_HEAD),
         End::Back => (r.tail, ROOT_TAIL),
     };
-    if !heap.unique(array)? || (end == End::Front && r.offset > 0) {
+    if !heap.unique(array)? {
         return Ok(false);
     }
     let Some(leaf) = edge.as_cell() else {
         return Ok(false);
     };
+    if end == End::Front && r.offset > 0 {
+        // As in `settled`.
+        if items.len() > r.offset || !heap.unique(leaf)? {
+            return Ok(false);
+        }
+        let len = r.len.checked_add(items.len()).ok_or(Fault::Full)?;
+        put_behind(heap, leaf, r.offset, items)?;
+        let offset = r.offset.saturating_sub(items.len());
+        rewrite(heap, array, &Root { len, offset, ..r });
+        return Ok(true);
+    }
     let alone = heap.unique(leaf)? && heap.is(leaf, Kind::ArrayLeaf);
     let old = heap.data(leaf);
     let n = old.len().saturating_add(items.len());
@@ -810,87 +973,214 @@ fn pushed(heap: &mut Heap, array: Cell, items: &[Value], end: End) -> Result<boo
     Ok(true)
 }
 
-/// `array` with `items`, in their order, at `end`. The caller gives up its
-/// reference to `array` and one to each item.
-///
-/// It makes the array that pushing them one at a time does, with a leaf for
-/// each run of them where that makes one for each item. The buffer at that end
-/// takes as many as it has room for, and a full one goes into the tree before
-/// the next is begun.
-pub(crate) fn extend_owned(
+/// Put `items` in the slots of the leaf `leaf` in front of the one at `offset`, and give up
+/// all that was left behind there, which is at least as many. Nothing else holds the leaf.
+fn put_behind(heap: &mut Heap, leaf: Cell, offset: usize, items: &[Value]) -> Result<(), DeadCell> {
+    let mut gone = Slots::new();
+    let left = heap.data_mut(leaf).get_mut(..offset).unwrap_or_default();
+    let (behind, room) = left
+        .split_at_mut_checked(offset.saturating_sub(items.len()))
+        .unwrap_or_default();
+    // Those that an earlier push gave up are `Nil`.
+    for word in behind.iter_mut().filter(|w| **w != Value::NIL.bits()) {
+        gone.push(Value::from_bits(std::mem::replace(word, Value::NIL.bits())));
+    }
+    for (word, x) in room.iter_mut().zip(items) {
+        gone.push(Value::from_bits(std::mem::replace(word, x.bits())));
+    }
+    for v in gone {
+        release(heap, v)?;
+    }
+    Ok(())
+}
+
+/// `array` with `items`, in their order, at `end`.
+#[inline]
+pub(crate) fn extend(
     heap: &mut Heap,
-    array: Option<Cell>,
+    array: Stored,
     items: &[Value],
     end: End,
 ) -> Result<Value, Fault> {
-    // A whole leaf of them never fits in one that has any.
-    if items.len() < B
-        && let Some(cell) = array
-        && pushed(heap, cell, items, end)?
-    {
-        return Ok(Value::cell(cell));
+    match array {
+        Stored::Empty => from_values(heap, items),
+        Stored::Flat(flat) => flat::extend(heap, flat, items, end),
+        Stored::Tree(cell) => extend_tree(heap, cell, items, end),
     }
-    let r = parts(heap, array)?;
-    let len = r.len.checked_add(items.len()).ok_or(Fault::Full)?;
+}
+
+/// The short array `flat` with `items` at `end`, where they are more than a short array
+/// has. Its elements, with the first of `items` beside them, are as many as one has, and are
+/// one leaf. A cell that has them all is the leaf itself, whoever else holds it.
+#[inline(never)]
+fn outgrown(heap: &mut Heap, flat: Flat, items: &[Value], end: End) -> Result<Value, Fault> {
+    let cell = flat.cell();
+    if let Err(why) = heap.reserve(words_for(items.len(), 0)) {
+        let why = refused(heap, why, items);
+        return Err(refused(heap, why, &[Value::cell(cell)]));
+    }
+    let Items { near, rest } = parted(items, MOST.saturating_sub(flat.len()), end);
+    let tree = match flat::is_leaf(heap, flat) {
+        true => Value::cell(cell),
+        false => {
+            let all = flat::taken_apart(heap, flat, near, end)?;
+            leaf(heap, all.items())?
+        }
+    };
+    // In the inner tree, and not in the buffer at the other end, whose leaf a walk would come
+    // to copy at each step.
+    let r = Root {
+        len: MOST.saturating_add(rest.len()),
+        tree,
+        ..Root::EMPTY
+    };
+    let r = extended(heap, r, rest, end)?;
+    new_root(heap, r)
+}
+
+/// Some items to put at an end of something.
+struct Items<'v> {
+    /// Those nearest to it.
+    near: &'v [Value],
+    rest: &'v [Value],
+}
+
+/// `items`, of which as many as `room` says are near.
+fn parted(items: &[Value], room: usize, end: End) -> Items<'_> {
+    let room = room.min(items.len());
+    let (near, rest) = match end {
+        End::Back => items.split_at_checked(room),
+        End::Front => {
+            let split = items.split_at_checked(items.len().saturating_sub(room));
+            split.map(|(rest, near)| (near, rest))
+        }
+    }
+    .unwrap_or((items, &[]));
+    Items { near, rest }
+}
+
+/// [`extend`] of a tree.
+///
+/// It makes the array that pushing the items one at a time does, with a leaf for
+/// each run of them where that makes one for each item. The buffer at that end
+/// takes as many as it has room for, and a full one goes into the tree before
+/// the next is begun.
+#[inline(never)]
+fn extend_tree(heap: &mut Heap, cell: Cell, items: &[Value], end: End) -> Result<Value, Fault> {
+    // A whole leaf of them never fits in one that has any.
+    let put = match items.len() < B {
+        true => pushed(heap, cell, items, end),
+        false => Ok(false),
+    };
+    match put {
+        Ok(true) => Ok(Value::cell(cell)),
+        Ok(false) => extend_apart(heap, cell, items, end),
+        Err(why) => Err(refused_push(heap, why, cell, items)),
+    }
+}
+
+/// [`extend_tree`] where `items` are not put in the tree's leaf in place.
+#[inline(never)]
+fn extend_apart(heap: &mut Heap, cell: Cell, items: &[Value], end: End) -> Result<Value, Fault> {
+    let alone = heap.unique(cell)?;
+    let r = root(heap, cell)?;
+    let len = match room_for(heap, &r, items) {
+        Ok(len) => len,
+        Err(why) => return Err(refused_push(heap, why, cell, items)),
+    };
     // This holds a reference to each part of the root from here on. They are
     // the root's own when nothing else holds it.
-    let alone = match array {
-        Some(cell) => heap.unique(cell)?,
-        None => false,
-    };
     if !alone {
         for part in [r.head, r.tree, r.tail] {
             heap.own(part)?;
         }
     }
-    // As in `push`, a head that is added to holds only live items.
-    let (head, offset) = if end == End::Front && r.offset > 0 {
-        let settled = own_head(heap, &r)?;
-        release(heap, r.head)?;
-        (settled, 0)
-    } else {
-        (r.head, r.offset)
-    };
+    let r = extended(heap, Root { len, ..r }, items, end)?;
+    if alone {
+        rewrite(heap, cell, &r);
+        return Ok(Value::cell(cell));
+    }
+    heap.release(cell)?;
+    new_root(heap, r)
+}
+
+/// `why`, where what was to be put in the tree `array` is given up with it.
+#[cold]
+#[inline(never)]
+fn refused_push(heap: &mut Heap, why: Fault, array: Cell, items: &[Value]) -> Fault {
+    let why = refused(heap, why, items);
+    refused(heap, why, &[Value::cell(array)])
+}
+
+/// The length of the tree `r` with `items` in it, when there is room for them.
+fn room_for(heap: &mut Heap, r: &Root, items: &[Value]) -> Result<usize, Fault> {
+    let len = r.len.checked_add(items.len()).ok_or(Fault::Full)?;
+    heap.reserve(words_for(items.len(), r.shift))?;
+    Ok(len)
+}
+
+/// The parts of a tree with `items` at `end`, which its length counts already. The caller
+/// gives up its reference to each of `r`'s parts and to each item, and gets those of the
+/// result's parts.
+#[inline(always)]
+fn extended(heap: &mut Heap, r: Root, items: &[Value], end: End) -> Result<Root, Fault> {
+    let (mut head, mut offset, mut left) = (r.head, r.offset, items);
+    if end == End::Front && r.offset > 0 {
+        Front { head, offset, left } = settled(heap, &r, items)?;
+    }
     let (mut edge, other) = end.turn(head, r.tail);
     let (mut tree, mut shift) = (r.tree, r.shift);
-    let mut left = items;
     while !left.is_empty() {
         if slot_count(heap, edge) >= B {
             (tree, shift) = tree_push_leaf(heap, tree, shift, edge, end)?;
             edge = Value::NIL;
         }
-        let room = B.saturating_sub(slot_count(heap, edge)).min(left.len());
-        let (near, rest) = match end {
-            End::Back => left.split_at_checked(room),
-            End::Front => {
-                let split = left.split_at_checked(left.len().saturating_sub(room));
-                split.map(|(rest, near)| (near, rest))
-            }
-        }
-        .unwrap_or((left, &[]));
+        let room = B.saturating_sub(slot_count(heap, edge));
+        let Items { near, rest } = parted(left, room, end);
         edge = longer_leaf(heap, edge, near, end)?;
         left = rest;
     }
     let (head, tail) = end.turn(edge, other);
-    if let Some(cell) = array {
-        if alone {
-            if let [l, s, o, h, t, e] = heap.data_mut(cell) {
-                (*l, *s, *o) = (len as u64, shift as u64, offset as u64);
-                (*h, *t, *e) = (head.bits(), tree.bits(), tail.bits());
-            }
-            return Ok(Value::cell(cell));
-        }
-        heap.release(cell)?;
-    }
-    let r = Root {
-        len,
+    Ok(Root {
+        len: r.len,
         shift,
         offset,
         head,
         tree,
         tail,
-    };
-    new_root(heap, r)
+    })
+}
+
+/// A head that is to be added to, and what is `left` to add.
+struct Front<'v> {
+    head: Value,
+    offset: usize,
+    left: &'v [Value],
+}
+
+/// The head of `r`, which has left some items behind, with as many of `items` in their place
+/// as there is room for, or, when something else holds the leaf, with only its live items. The caller gives up its
+/// reference to the head, and gets that of the result.
+#[inline(never)]
+fn settled<'v>(heap: &mut Heap, r: &Root, items: &'v [Value]) -> Result<Front<'v>, Fault> {
+    if let Some(leaf) = r.head.as_cell()
+        && heap.unique(leaf)?
+    {
+        let Items { near, rest } = parted(items, r.offset, End::Front);
+        put_behind(heap, leaf, r.offset, near)?;
+        return Ok(Front {
+            head: r.head,
+            offset: r.offset.saturating_sub(near.len()),
+            left: rest,
+        });
+    }
+    let head = own_head(heap, r)?;
+    release(heap, r.head)?;
+    Ok(Front {
+        head,
+        offset: 0,
+        left: items,
+    })
 }
 
 /// A leaf of the items of the leaf `old`, or of none when it is `Nil`, with
@@ -900,19 +1190,27 @@ fn longer_leaf(heap: &mut Heap, old: Value, items: &[Value], end: End) -> Result
     let Some(cell) = old.as_cell() else {
         return leaf(heap, items);
     };
-    let kept = slots(heap, old);
+    let mut room = [0u64; B];
+    let kept = leaf_items(heap, old);
+    let all = kept.len().saturating_add(items.len()).min(B);
+    let (from, at) = match end {
+        End::Back => (0, kept.len()),
+        End::Front => (items.len(), 0),
+    };
+    let kept = from..from.saturating_add(kept.len());
+    for (w, v) in room.iter_mut().skip(at).zip(items) {
+        *w = v.bits();
+    }
+    if let Some(room) = room.get_mut(kept.clone()) {
+        room.copy_from_slice(leaf_items(heap, old));
+    }
     let alone = heap.unique(cell)?;
     if !alone {
-        own_all(heap, &kept)?;
+        for w in room.get(kept).unwrap_or_default() {
+            heap.own(Value::from_bits(*w))?;
+        }
     }
-    let mut all = Slots::new();
-    let (first, second) = match end {
-        End::Back => (kept.as_slice(), items),
-        End::Front => (items, kept.as_slice()),
-    };
-    all.extend_from_slice(first);
-    all.extend_from_slice(second);
-    let made = leaf(heap, &all)?;
+    let made = new_node(heap, Kind::ArrayLeaf, room.get(..all).unwrap_or_default())?;
     // What a leaf that was this array's alone held is in the new one now.
     if alone {
         heap.discard(cell)?;
@@ -1101,10 +1399,11 @@ fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Value, Fault> {
     }
     let front = head_items(heap, &r);
     let Some(m) = n.checked_sub(front.len()).filter(|m| *m > 0) else {
-        let kept = own_all(heap, front.get(..n).unwrap_or(&[]))?;
+        let kept = front.get(..n).unwrap_or(&[]);
+        heap.share_each(kept)?;
         let cut = Root {
             len: n,
-            tail: leaf(heap, &kept)?,
+            tail: leaf(heap, kept)?,
             ..Root::EMPTY
         };
         return new_root(heap, cut);
@@ -1124,8 +1423,9 @@ fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Value, Fault> {
         return new_root(heap, cut);
     };
     let tail_items = slots(heap, r.tail);
-    let kept = own_all(heap, tail_items.get(..in_tail).unwrap_or(&[]))?;
-    let tail = leaf(heap, &kept)?;
+    let kept = tail_items.get(..in_tail).unwrap_or(&[]);
+    heap.share_each(kept)?;
+    let tail = leaf(heap, kept)?;
     let head = heap.own(r.head)?;
     let tree = heap.own(r.tree)?;
     let cut = Root {
@@ -1138,198 +1438,360 @@ fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Value, Fault> {
     new_root(heap, cut)
 }
 
-/// The elements of `s` from `from` up to but not including `to`. Both are places in it.
+/// The elements of `array` from `from` up to but not including `to`. Both are places in
+/// it.
 // Out of line, with the map's two owned edits and [`concat`]. Inside the
 // interpreter's loop these four are so long that the loop keeps fewer of its
 // own values in registers, which costs 4 machine instructions at each VM
 // instruction that tests a variant, reads a field or drops a register.
 #[inline(never)]
-pub(crate) fn slice(heap: &mut Heap, s: Seq, from: usize, to: usize) -> Result<Value, Fault> {
-    let array = match s {
-        Seq::Empty => return Ok(Value::EMPTY_ARRAY),
-        Seq::Tree(array) => array,
-        // Both are at most the range's length, so each sum lands within
-        // `start..=end` and the add is exact.
-        Seq::Range { start, .. } => {
-            let [from, to] = [from, to].map(|i| start.wrapping_add_unsigned(i as u64));
-            return range(heap, from, to);
-        }
+pub(crate) fn slice(
+    heap: &mut Heap,
+    array: Stored,
+    from: usize,
+    to: usize,
+) -> Result<Value, Fault> {
+    match array {
+        Stored::Empty => Ok(Value::EMPTY_ARRAY),
+        Stored::Flat(flat) => flat::slice(heap, flat, from, to),
+        Stored::Tree(array) => slice_tree(heap, array, from, to),
+    }
+}
+
+/// [`slice`] of a tree.
+///
+/// What comes to 32 elements or fewer is copied to one cell. But one that nothing else holds,
+/// and that keeps more than it gives up, stays the tree that it is, as a walk of it does. So
+/// an array that is pushed to and cut by turns is not copied at each.
+#[inline(never)]
+fn slice_tree(heap: &mut Heap, array: Cell, from: usize, to: usize) -> Result<Value, Fault> {
+    let len = root(heap, array)?.len;
+    let kept = len.saturating_sub(from);
+    let alone = heap.unique(array)?;
+    let to_the_end = to >= len;
+    if to_the_end && alone && (kept > MOST || kept > from) {
+        return skip_in_tree(heap, array, from);
+    }
+    let cut = match to_the_end && kept > MOST {
+        true => skip_tree(heap, array, from),
+        false => slice_of_tree(heap, array, from, to),
     };
-    if from >= to {
+    heap.release(array)?;
+    cut
+}
+
+/// [`slice`] of a tree, to which the caller keeps its reference.
+fn slice_of_tree(heap: &mut Heap, array: Cell, from: usize, to: usize) -> Result<Value, Fault> {
+    let r = root(heap, array)?;
+    let n = to.saturating_sub(from);
+    if n == 0 {
         return Ok(Value::EMPTY_ARRAY);
     }
+    if n >= r.len {
+        heap.share(array)?;
+        return Ok(Value::cell(array));
+    }
+    if n <= MOST {
+        return short_slice(heap, &r, from, n);
+    }
+    heap.reserve(words_for(B, r.shift))?;
     let front = take(heap, array, to)?;
     let Some(front) = front.as_cell() else {
         return Ok(front);
     };
-    let cut = skip(heap, front, from);
+    let cut = skip_tree(heap, front, from);
     heap.release(front)?;
     cut
 }
 
-/// The elements of `s` but the first `n`.
+/// The `n` elements of the tree `r` from `from` on, as a short array.
+fn short_slice(heap: &mut Heap, r: &Root, from: usize, n: usize) -> Result<Value, Fault> {
+    let mut items = [Value::NIL; MOST];
+    let found = run(heap, r, from, items.get_mut(..n).unwrap_or_default());
+    let items = items.get(..found).unwrap_or_default();
+    heap.share_each(items)?;
+    let made = flat::new_flat(heap, items);
+    let made = made.inspect_err(|_| heap.unshare_each(items))?;
+    Ok(made.value())
+}
+
+/// The Ints of a range that starts at `start` from its element `from` up to its element
+/// `to`, both of which are at most its length.
+pub(crate) fn slice_of_range(
+    heap: &mut Heap,
+    start: i64,
+    from: u64,
+    to: u64,
+) -> Result<Value, Fault> {
+    // Each sum lands within the range's ends, and so the add is exact.
+    let [from, to] = [from, to].map(|i| start.wrapping_add_unsigned(i));
+    range(heap, from, to)
+}
+
+/// `array` without its first `n` elements.
 #[inline(always)]
-pub(crate) fn behind(heap: &mut Heap, s: Seq, n: usize) -> Result<Value, Fault> {
-    match s {
-        Seq::Empty => Ok(Value::EMPTY_ARRAY),
-        Seq::Tree(array) => skip(heap, array, n),
-        Seq::Range { start, end } => {
-            let n = (n as u64).min(range_len(start, end));
-            // `n` is at most `end - start`, so `start + n` is within `start..=end` and
-            // the add is exact.
-            range(heap, start.wrapping_add_unsigned(n), end)
-        }
+pub(crate) fn skip(heap: &mut Heap, array: Stored, n: usize) -> Result<Value, Fault> {
+    match array {
+        Stored::Empty => Ok(Value::EMPTY_ARRAY),
+        Stored::Flat(flat) => flat::skip(heap, flat, n),
+        Stored::Tree(array) => skip_in_tree(heap, array, n),
     }
 }
 
-/// Every element but the first `n`.
-fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Value, Fault> {
+/// Every element of the tree `array` but the first `n`. The caller keeps its reference.
+/// When there is no room for it nothing has changed.
+fn skip_tree(heap: &mut Heap, array: Cell, n: usize) -> Result<Value, Fault> {
     let r = root(heap, array)?;
     if n == 0 {
         heap.share(array)?;
         return Ok(Value::cell(array));
     }
-    let len = r.len.saturating_sub(n);
+    if n >= r.len {
+        return Ok(Value::EMPTY_ARRAY);
+    }
     let Some(m) = n.checked_sub(head_len(heap, &r)) else {
         // This is the cheap `[h, ..t]`. It keeps the same head leaf, tree and
         // tail, with `n` more items left behind, so nothing is copied. The
         // head is one leaf, so the offset stays below `B`.
-        let offset = r.offset.saturating_add(n);
-        let head = heap.own(r.head)?;
-        let tree = heap.own(r.tree)?;
-        let tail = heap.own(r.tail)?;
-        let cut = Root {
-            len,
-            offset,
-            head,
-            tree,
-            tail,
-            ..r
-        };
-        return new_root(heap, cut);
+        return with_more_left_behind(heap, &r, n);
     };
-    // The head is spent, so the rest comes out of the tree. Move the tree's
-    // leftmost leaf up to be the new head, whole and shared, and leave `m` of
-    // it behind. The tree is cut once per leaf instead of once per element,
-    // so walking an array cuts it every `B` steps, and the offset above
-    // covers the steps between.
-    if let Some(first) = first_leaf(heap, r.tree)
-        && m < slot_count(heap, first)
-    {
-        let taken = slot_count(heap, first);
-        // `tree_drop` of a whole leaf that is the whole tree would leave an
-        // empty leaf behind, so a tree of one leaf becomes no tree at all.
-        let (tree, shift) = if taken == node_len(heap, r.tree) {
-            (Value::NIL, 0)
-        } else {
-            let cut = tree_drop(heap, r.tree, taken)?;
-            collapse(heap, cut, r.shift)?
-        };
-        let head = heap.own(first)?;
-        let tail = heap.own(r.tail)?;
-        let cut = Root {
-            len,
-            shift,
-            offset: m,
-            head,
-            tree,
-            tail,
-        };
+    if m >= tree_len(heap, &r) {
+        // Only the tail is left, or some of it, which one cell has room for.
+        return short_slice(heap, &r, n, r.len.saturating_sub(n));
+    }
+    if r.shift > 0 {
+        let cut = skip_into_tree(heap, &r, n, m)?;
         return new_root(heap, cut);
     }
-    let Some(k) = m.checked_sub(node_len(heap, r.tree)) else {
-        let cut = tree_drop(heap, r.tree, m)?;
-        let (tree, shift) = collapse(heap, cut, r.shift)?;
-        let tail = heap.own(r.tail)?;
-        let cut = Root {
-            len,
-            shift,
-            tree,
-            tail,
-            ..Root::EMPTY
-        };
-        return new_root(heap, cut);
-    };
-    let tail = if k == 0 {
-        heap.own(r.tail)?
-    } else {
-        leaf_behind(heap, r.tail, k)?
-    };
-    let cut = Root {
-        len,
-        tail,
-        ..Root::EMPTY
-    };
-    new_root(heap, cut)
+    let cut = new_root(heap, leaf_as_head(&r, n, m))?;
+    heap.own(r.tree)?;
+    heap.own(r.tail)?;
+    Ok(cut)
 }
 
-/// [`skip`] for a caller that gives up its reference to `array`. When
-/// nothing else holds it and the head still has more than `n` items, which
-/// is every step of a walk but one in `B`, the root just leaves `n` more of
-/// them behind, in place.
-pub(crate) fn skip_owned(heap: &mut Heap, array: Cell, n: usize) -> Result<Value, Fault> {
+/// The parts of the tree `r`, which has a branch, without its first `n` elements, of which
+/// the last `m` are in its inner tree and are not all of that. Each part holds a reference of
+/// its own. There is room for their root, and when there is none, nothing has changed.
+///
+/// The tree's leftmost leaf moves up to be the new head, whole and shared, and `m` of it are
+/// left behind. The tree is cut once per leaf instead of once per element, so walking an
+/// array cuts it every `B` steps, and the offset covers the steps between.
+fn skip_into_tree(heap: &mut Heap, r: &Root, n: usize, m: usize) -> Result<Root, Fault> {
+    let first = first_leaf(heap, r.tree).filter(|leaf| m < leaf_items(heap, *leaf).len());
+    let taken = first.map_or(0, |leaf| leaf_items(heap, leaf).len());
+    heap.reserve(words_for(0, r.shift))?;
+    let (gone, offset) = match taken {
+        0 => (m, 0),
+        taken => (taken, m),
+    };
+    let (tree, shift) = if gone == node_len(heap, r.tree) {
+        (Value::NIL, 0)
+    } else {
+        let cut = tree_drop(heap, r.tree, gone)?;
+        collapse(heap, cut, r.shift)?
+    };
+    let head = heap.own(first.unwrap_or(Value::NIL))?;
+    let tail = heap.own(r.tail)?;
+    Ok(Root {
+        len: r.len.saturating_sub(n),
+        shift,
+        offset,
+        head,
+        tree,
+        tail,
+    })
+}
+
+/// [`skip_into_tree`] of one leaf, which is no tree once it is the head. No node is made, and
+/// no reference added.
+fn leaf_as_head(r: &Root, n: usize, m: usize) -> Root {
+    Root {
+        len: r.len.saturating_sub(n),
+        offset: m,
+        head: r.tree,
+        tree: Value::NIL,
+        ..*r
+    }
+}
+
+/// Leave `n` more items of the head of `array`, whose parts are `r`, behind in place.
+#[inline(always)]
+fn left_behind(heap: &mut Heap, array: Cell, r: &Root, n: usize) {
+    if let [l, _, o, ..] = heap.data_mut(array) {
+        *l = r.len.saturating_sub(n) as u64;
+        *o = r.offset.saturating_add(n) as u64;
+    }
+}
+
+/// A tree of the parts of `r` that leaves `n` more items of its head behind, of which
+/// there are more. When there is no room for it nothing has changed.
+#[inline(always)]
+fn with_more_left_behind(heap: &mut Heap, r: &Root, n: usize) -> Result<Value, Fault> {
+    let cut = Root {
+        len: r.len.saturating_sub(n),
+        offset: r.offset.saturating_add(n),
+        ..*r
+    };
+    let cut = new_root(heap, cut)?;
+    for part in [r.head, r.tree, r.tail] {
+        heap.own(part)?;
+    }
+    Ok(cut)
+}
+
+/// [`skip`] of a tree. One that nothing else holds is changed in place for as long as some
+/// of its head or its inner tree is left. While the head has more than `n` items, which is
+/// every step of a walk but one in `B`, the root just leaves `n` more of them behind.
+#[inline(always)]
+fn skip_in_tree(heap: &mut Heap, array: Cell, n: usize) -> Result<Value, Fault> {
     let r = root(heap, array)?;
-    if heap.unique(array)? && n > 0 && n < head_len(heap, &r) {
-        let len = r.len.saturating_sub(n);
-        let offset = r.offset.saturating_add(n);
-        if let [l, _, o, ..] = heap.data_mut(array) {
-            *l = len as u64;
-            *o = offset as u64;
-        }
+    if !heap.unique(array)? {
+        return skip_held(heap, array, n);
+    }
+    if n > 0 && n < head_len(heap, &r) {
+        left_behind(heap, array, &r, n);
         return Ok(Value::cell(array));
     }
-    let made = skip(heap, array, n);
+    skip_alone(heap, array, &r, n)
+}
+
+/// [`skip_in_tree`] of a tree that is not changed.
+#[inline(never)]
+fn skip_held(heap: &mut Heap, array: Cell, n: usize) -> Result<Value, Fault> {
+    let made = skip_tree(heap, array, n);
     heap.release(array)?;
     made
 }
 
-/// The first element of `array` and the array of the others, or `None` when its cell says
-/// that it has none, which no array's does. The element holds a reference of its own, and
-/// is `Nil` unless `head` asks for it. When `taken`, the caller gives up its reference to
-/// `array` where there is an element.
+/// [`skip_in_tree`] of one that nothing else holds, whose parts are `r`. What is left starts
+/// in its inner tree or behind it, or is all of it.
+#[inline(never)]
+fn skip_alone(heap: &mut Heap, array: Cell, r: &Root, n: usize) -> Result<Value, Fault> {
+    let past_head = n.checked_sub(head_len(heap, r));
+    let Some(m) = past_head.filter(|m| n > 0 && *m < tree_len(heap, r)) else {
+        return skip_held(heap, array, n);
+    };
+    if r.shift == 0 {
+        rewrite(heap, array, &leaf_as_head(r, n, m));
+        release(heap, r.head)?;
+        return Ok(Value::cell(array));
+    }
+    let cut = match skip_into_tree(heap, r, n, m) {
+        Ok(cut) => cut,
+        Err(why) => return Err(refused(heap, why, &[Value::cell(array)])),
+    };
+    rewrite(heap, array, &cut);
+    for part in [r.head, r.tree, r.tail] {
+        release(heap, part)?;
+    }
+    Ok(Value::cell(array))
+}
+
+/// The first element of the tree `array`, when nothing else holds it and it only has to
+/// leave one more item of its head behind, which is every step of a walk but one in `B`. It
+/// does. The element holds a reference of its own.
+#[inline(always)]
+pub(crate) fn leave_first(heap: &mut Heap, array: Cell) -> Result<Option<Value>, DeadCell> {
+    let Some(r) = tree(heap, array) else {
+        return Ok(None);
+    };
+    let first = match leaf_items(heap, r.head).get(r.offset..) {
+        Some([first, _, ..]) => Value::from_bits(*first),
+        Some(_) | None => return Ok(None),
+    };
+    if !heap.unique(array)? {
+        return Ok(None);
+    }
+    heap.own(first)?;
+    left_behind(heap, array, &r, 1);
+    Ok(Some(first))
+}
+
+/// The first Int of the range `array`, when it is a small one, nothing else holds the range
+/// and there are more. It then starts at the next.
+#[inline(always)]
+pub(crate) fn next_of_range(heap: &mut Heap, array: Cell) -> Result<Option<Value>, DeadCell> {
+    let Some((start, end)) = range_at(heap, array) else {
+        return Ok(None);
+    };
+    let next = start.checked_add(1).filter(|next| *next < end);
+    let (Some(first), Some(next)) = (Value::int(start), next) else {
+        return Ok(None);
+    };
+    if !heap.unique(array)? {
+        return Ok(None);
+    }
+    let [at, _] = heap.data_mut(array) else {
+        return Ok(None);
+    };
+    *at = next.cast_unsigned();
+    Ok(Some(first))
+}
+
+/// The first element of the tree `array` and the array of the others, or `None` when its
+/// cell says that it has none, which no array's does. The element holds a reference of its
+/// own, and is `Nil` unless `head` asks for it. This changes nothing in place, and the
+/// caller keeps its reference to `array`.
 #[inline(always)]
 pub(crate) fn uncons(
     heap: &mut Heap,
     array: Cell,
     head: bool,
-    taken: bool,
 ) -> Result<Option<(Value, Value)>, Fault> {
     let r = root(heap, array)?;
-    let Some(left) = r.len.checked_sub(1) else {
+    if r.len == 0 {
         return Ok(None);
-    };
-    let items = match view(heap, r.head) {
-        Some(View::Leaf(items)) => items.get(r.offset..).unwrap_or_default(),
-        Some(View::Branch { .. }) | None => &[],
-    };
-    let first = match (items.first(), head) {
-        (_, false) => Value::NIL,
-        (Some(first), true) => Value::from_bits(*first),
-        (None, true) => first(heap, array),
-    };
-    // Only the place in the head moves along, which is every step but one in `B`.
-    let near = items.len() > 1;
-    let alone = taken && heap.unique(array)?;
-    heap.own(first)?;
-    if alone && near {
-        let offset = r.offset.saturating_add(1);
-        if let [l, _, o, ..] = heap.data_mut(array) {
-            *l = left as u64;
-            *o = offset as u64;
-        }
-        return Ok(Some((first, Value::cell(array))));
     }
-    let cut = match skip(heap, array, 1) {
-        Ok(cut) => cut,
-        Err(why) => {
-            release(heap, first)?;
-            return Err(why);
-        }
+    let first = first_of(heap, &r, head)?;
+    let cut = match head_len(heap, &r) > 1 {
+        true => with_more_left_behind(heap, &r, 1),
+        false => skip_tree(heap, array, 1),
     };
-    if taken {
-        heap.release(array)?;
+    with_first(heap, first, cut)
+}
+
+/// [`uncons`], where the caller gives up its reference to `array`, unless the array has no
+/// element. One that nothing else holds may change in place.
+#[inline(never)]
+pub(crate) fn uncons_owned(
+    heap: &mut Heap,
+    array: Cell,
+    head: bool,
+) -> Result<Option<(Value, Value)>, Fault> {
+    let r = root(heap, array)?;
+    if r.len == 0 {
+        return Ok(None);
     }
-    Ok(Some((first, cut)))
+    let first = first_of(heap, &r, head)?;
+    let cut = skip_in_tree(heap, array, 1);
+    with_first(heap, first, cut)
+}
+
+/// The first element of the tree `r`, with a reference of its own, or `Nil` unless `head`
+/// asks for it.
+#[inline(always)]
+fn first_of(heap: &mut Heap, r: &Root, head: bool) -> Result<Value, DeadCell> {
+    if !head {
+        return Ok(Value::NIL);
+    }
+    let first = match leaf_items(heap, r.head).get(r.offset) {
+        Some(first) => Value::from_bits(*first),
+        None => first_past_head(heap, r),
+    };
+    heap.own(first)
+}
+
+/// `first` and the array `cut`, where there was room for that.
+#[inline(always)]
+fn with_first(
+    heap: &mut Heap,
+    first: Value,
+    cut: Result<Value, Fault>,
+) -> Result<Option<(Value, Value)>, Fault> {
+    match cut {
+        Ok(cut) => Ok(Some((first, cut))),
+        Err(why) => Err(refused(heap, why, &[first])),
+    }
 }
 
 /// Whether an array of `has` elements has the `length`.
@@ -1345,39 +1807,25 @@ pub(crate) enum Found {
     Miss,
     /// The elements, which are in the buffer.
     All,
-    /// An array that has the length, and whose elements are not all in its first leaf.
+    /// A tree that has the length, and whose elements are not all in its first leaf.
     Apart(Root),
-    /// A range that has the length, and where it starts.
-    Range(i64),
+    /// It is no tree.
+    Other,
 }
 
-/// Put the elements of the array `s` from `split.from` on in `out`, as many as there is
-/// room for, when it has a length that `split` asks for and they are all in its first
-/// leaf. No reference is added.
+/// Put the elements of `array`, when it is a tree, from `split.from` on in `out`, as many as
+/// there is room for, when it has a length that `split` asks for and they are all in its
+/// first leaf. No reference is added.
 #[inline(always)]
-pub(crate) fn split(
-    heap: &Heap,
-    s: Seq,
-    split: Split,
-    out: &mut [Value],
-) -> Result<Found, DeadCell> {
-    let r = match s {
-        Seq::Empty => Root::EMPTY,
-        Seq::Tree(cell) => root(heap, cell)?,
-        Seq::Range { start, end } => {
-            let fits = fits(range_len(start, end), split.length);
-            return Ok(if fits {
-                Found::Range(start)
-            } else {
-                Found::Miss
-            });
-        }
+pub(crate) fn split(heap: &Heap, array: Cell, split: Split, out: &mut [Value]) -> Found {
+    let Some(r) = tree(heap, array) else {
+        return Found::Other;
     };
     if !fits(r.len as u64, split.length) {
-        return Ok(Found::Miss);
+        return Found::Miss;
     }
     if out.is_empty() {
-        return Ok(Found::All);
+        return Found::All;
     }
     let head = leaf_items(heap, r.head).get(r.offset..).unwrap_or_default();
     let items = if head.is_empty() && r.tree.as_cell().is_none() {
@@ -1391,9 +1839,9 @@ pub(crate) fn split(
             for (v, word) in out.iter_mut().zip(items) {
                 *v = Value::from_bits(*word);
             }
-            Ok(Found::All)
+            Found::All
         }
-        None => Ok(Found::Apart(r)),
+        None => Found::Apart(r),
     }
 }
 
@@ -1431,13 +1879,8 @@ pub(crate) fn run(heap: &Heap, r: &Root, from: usize, out: &mut [Value]) -> usiz
 /// The items of the leaf `v`, which are none when it is no leaf.
 #[inline(always)]
 fn leaf_items(heap: &Heap, v: Value) -> &[u64] {
-    match v.as_cell() {
-        Some(cell) => match heap.is_with_data(cell, Kind::ArrayLeaf) {
-            (true, items) => items,
-            (false, _) => &[],
-        },
-        None => &[],
-    }
+    let items = v.as_cell().and_then(|cell| heap.leaf(cell));
+    items.unwrap_or_default()
 }
 
 /// The items from `i` on of the leaf under the node `n` that element `i` of it is in.
@@ -1456,10 +1899,12 @@ fn leaf_from(heap: &Heap, mut n: Value, mut i: usize) -> Option<&[u64]> {
     }
 }
 
-/// The first element of `array`, with no reference added.
+/// The first element of the tree `r` that is not in its head, with no reference added.
 #[inline(never)]
-fn first(heap: &Heap, array: Cell) -> Value {
-    get(heap, array, 0).unwrap_or(Value::NIL)
+fn first_past_head(heap: &Heap, r: &Root) -> Value {
+    let leaf = first_leaf(heap, r.tree).unwrap_or(r.tail);
+    let first = leaf_items(heap, leaf).first();
+    first.map_or(Value::NIL, |w| Value::from_bits(*w))
 }
 
 /// The tree's leftmost leaf, borrowed, or `None` when there is no tree.
@@ -1479,8 +1924,9 @@ fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
         None => Ok(Value::NIL),
         Some(Node::Leaf(items)) if m >= items.len() => Ok(heap.own(n)?),
         Some(Node::Leaf(items)) => {
-            let kept = own_all(heap, items.get(..m).unwrap_or(&[]))?;
-            leaf(heap, &kept)
+            let kept = items.get(..m).unwrap_or(&[]);
+            heap.share_each(kept)?;
+            leaf(heap, kept)
         }
         Some(Node::Branch {
             shift,
@@ -1502,7 +1948,9 @@ fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
                 return Ok(heap.own(n)?);
             };
             let cut = tree_take(heap, child, slot.within.saturating_add(1))?;
-            let mut kept = own_all(heap, children.get(..slot.child).unwrap_or(&[]))?;
+            let mut kept = children;
+            kept.truncate(slot.child);
+            heap.share_each(&kept)?;
             kept.push(cut);
             branch(heap, shift, &kept)
         }
@@ -1517,8 +1965,9 @@ fn tree_drop(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
     match node(heap, n) {
         None => Ok(Value::NIL),
         Some(Node::Leaf(items)) => {
-            let kept = own_all(heap, items.get(m..).unwrap_or(&[]))?;
-            leaf(heap, &kept)
+            let kept = items.get(m..).unwrap_or(&[]);
+            heap.share_each(kept)?;
+            leaf(heap, kept)
         }
         Some(Node::Branch {
             shift,
@@ -1532,20 +1981,72 @@ fn tree_drop(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
                 return Ok(Value::NIL);
             };
             let cut = tree_drop(heap, child, slot.within)?;
-            let mut kept: Slots = smallvec::smallvec![cut];
-            kept.extend(own_all(heap, after(&children, slot.child))?);
-            branch(heap, shift, &kept)
+            heap.share_each(after(&children, slot.child))?;
+            // The cut child is in front of those behind it.
+            let mut kept = children;
+            if let Some(child) = kept.get_mut(slot.child) {
+                *child = cut;
+            }
+            branch(heap, shift, kept.get(slot.child..).unwrap_or(&[]))
         }
     }
 }
 
-/// `l` then `r`. The two trees are merged down `l`'s right edge and `r`'s
-/// left edge, and each level is repacked when it would otherwise be more than
-/// `E_MAX` nodes looser than it could be, which keeps lookups a step per
-/// level however many joins built the array.
+/// `l` then `r`.
 // Out of line for the interpreter's loop, as [`slice`] is.
 #[inline(never)]
-pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Value, Fault> {
+pub(crate) fn concat(heap: &mut Heap, l: Stored, r: Stored) -> Result<Value, Fault> {
+    match (l, r) {
+        (Stored::Empty, one) | (one, Stored::Empty) => Ok(one.value()),
+        (Stored::Tree(l), Stored::Tree(r)) => {
+            let joined = concat_trees(heap, l, r);
+            heap.release(l)?;
+            heap.release(r)?;
+            joined
+        }
+        (Stored::Flat(a), Stored::Flat(b)) => {
+            if flat::is_leaf(heap, a) && flat::is_leaf(heap, b) {
+                return two_leaves(heap, a, b);
+            }
+            let fit = a.len().saturating_add(b.len()) <= MOST;
+            // One that is a leaf is full, so the two do not fit in one cell, and it is shared.
+            let onto_b = flat::is_leaf(heap, b);
+            if flat::has_room(heap, a, b.len()) || !(fit || onto_b) {
+                join_flat(heap, b, l, End::Back)
+            } else if onto_b || flat::has_room(heap, b, a.len()) {
+                join_flat(heap, a, r, End::Front)
+            } else {
+                flat::joined(heap, a, b)
+            }
+        }
+        (Stored::Tree(_), Stored::Flat(b)) => join_flat(heap, b, l, End::Back),
+        (Stored::Flat(a), Stored::Tree(_)) => join_flat(heap, a, r, End::Front),
+    }
+}
+
+/// The tree of two short arrays that are both leaves, whoever else holds them.
+fn two_leaves(heap: &mut Heap, a: Flat, b: Flat) -> Result<Value, Fault> {
+    let [tree, tail] = [a, b].map(|flat| Value::cell(flat.cell()));
+    let r = Root {
+        len: a.len().saturating_add(b.len()),
+        tree,
+        tail,
+        ..Root::EMPTY
+    };
+    new_root(heap, r).map_err(|why| refused(heap, why, &[tree, tail]))
+}
+
+/// `onto` with the elements of `flat` at `end`.
+fn join_flat(heap: &mut Heap, flat: Flat, onto: Stored, end: End) -> Result<Value, Fault> {
+    let all = flat::taken_apart(heap, flat, &[], end)?;
+    extend(heap, onto, all.items(), end)
+}
+
+/// The array of two trees, to which the caller keeps its references. They are merged down
+/// `l`'s right edge and `r`'s left edge, and each level is repacked when it would otherwise
+/// be more than `E_MAX` nodes looser than it could be, which keeps lookups a step per
+/// level however many joins built the array.
+fn concat_trees(heap: &mut Heap, l: Cell, r: Cell) -> Result<Value, Fault> {
     let lr = root(heap, l)?;
     let rr = root(heap, r)?;
     // Two arrays that share their nodes can be longer together than a word

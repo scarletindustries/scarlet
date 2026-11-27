@@ -149,6 +149,26 @@ fn a_word_is_its_bytes() {
     assert_eq!(a.finish(), b.finish());
 }
 
+/// An array hashes as its elements do, whatever form it has, so a map finds one by another.
+#[test]
+fn an_array_hashes_the_same_in_every_form() {
+    let mut heap = Heap::default();
+    let ints: Vec<Value> = (3..6).map(|n| Value::int(n).expect("small")).collect();
+    let forms = heap.three_in_every_form(&ints);
+    let hashes = forms.map(|v| hash(&heap, v));
+    assert_eq!(hashes, [hashes[4]; 5]);
+    // The same of elements that are no Ints.
+    let names: Vec<Value> = ["a", "b", "c"]
+        .map(|s| Value::cell(heap.string(s.as_bytes()).expect("room")))
+        .to_vec();
+    let [flat, same, turned, left, _] = heap.three_in_every_form(&names);
+    let hashes = [flat, same, turned, left].map(|v| hash(&heap, v));
+    assert_eq!(hashes, [hashes[0]; 4]);
+    let other = [names[0], names[2], names[1]];
+    let other = array::from_values(&mut heap, &other).expect("room");
+    assert_ne!(hash(&heap, other), hashes[0]);
+}
+
 /// The empty array hashes as the array of no elements that a cell once was, so no map
 /// that is keyed by one, or by something that holds one, has changed its order.
 #[test]
@@ -158,8 +178,10 @@ fn the_empty_array_hashes_as_an_array_of_length_0() {
     let words = [0, 0, 0, nil, nil, nil];
     let tree = Value::cell(heap.make(Kind::ArrayRoot, &words).expect("room"));
     let range = Value::cell(heap.make(Kind::Range, &[5, 5]).expect("room"));
+    let words = [nil, nil, nil, nil, 0];
+    let flat = Value::cell(heap.make(Kind::ArrayFlat, &words).expect("room"));
     let want = 0xb955_a07b_b007_5496;
-    for v in [Value::EMPTY_ARRAY, tree, range] {
+    for v in [Value::EMPTY_ARRAY, tree, flat, range] {
         assert_eq!(hash(&heap, v), want);
         let held = heap.tuple(&[v, Value::bool(true)]).expect("room");
         assert_eq!(hash(&heap, Value::cell(held)), 0x81aa_2ae2_bc07_0faf);

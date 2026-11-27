@@ -29,7 +29,7 @@ fn heap() -> (Heap, [Ctor; 2]) {
 
 /// A cell's words for each kind there is but a constructor's, with `n` in each
 /// that is a plain number and `h` in each that holds a value.
-fn each_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 14] {
+fn each_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 15] {
     [
         (Kind::String, vec![n, n]),
         (Kind::BigInt, vec![n, n]),
@@ -43,21 +43,23 @@ fn each_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 14] {
         (Kind::ArrayLeaf, vec![h, h, h]),
         // Its length, height and offset, then the head, tree and tail.
         (Kind::ArrayRoot, vec![n, n, n, h, h, h]),
-        // Its height, two sizes, then two children.
-        (Kind::ArrayBranch, vec![n, n, n, h, h]),
+        // Its slots, then that all of them are its elements'.
+        (Kind::ArrayFlat, vec![h, h, h, h, 4]),
         (Kind::Map, vec![n, h]),
         (Kind::MapNode, vec![n, h, h, h]),
         (Kind::MapCollision, vec![n, h, h]),
+        // Its height, two sizes, then two children.
+        (Kind::ArrayBranch, vec![n, n, n, h, h]),
     ]
 }
 
-/// The classes below the first constructor's are these kinds and one spare.
+/// The classes below the first constructor's are these kinds.
 #[test]
 fn each_kind_is_every_kind() {
     let kinds = each_kind(0, 0).map(|(kind, _)| Some(kind));
-    let all: Vec<Option<Kind>> = (1..15).map(|c| Class(c).kind()).collect();
+    let all: Vec<Option<Kind>> = (1..16).map(|c| Class(c).kind()).collect();
     assert_eq!(kinds.as_slice(), all.as_slice());
-    assert_eq!([0, 15].map(|c| Class(c).kind()), [None, None]);
+    assert_eq!(Class(0).kind(), None);
     for c in [16, 17, 255, 256, u16::MAX] {
         assert_eq!(Class(c).kind(), Some(Kind::Ctor));
     }
@@ -194,9 +196,12 @@ fn a_header_its_class_does_not_have_is_found() {
         if scan(right) > 0 {
             assert_eq!(found(right - one), misshapen, "{right:x}");
         }
-        // A class no cell has: a freed cell's, the spare one, and that of a
-        // constructor the program does not have.
-        for wrong in [0, 15, 18, u64::from(u16::MAX)] {
+        // A class no cell has, a freed cell's and that of a constructor the program does
+        // not have, and a short array's on a cell that is none.
+        for wrong in [0, 11, 18, u64::from(u16::MAX)] {
+            if wrong == right >> 48 {
+                continue;
+            }
             let h = right & !(0xFFFF << 48) | wrong << 48;
             assert_eq!(found(h), misshapen, "{right:x}");
         }
@@ -373,6 +378,101 @@ fn an_array_with_no_elements_in_a_cell_is_found() {
         let fault = AuditFault::EmptyArray { cell: cell.index() };
         let want = if empty { Err(fault) } else { Ok(()) };
         assert_eq!(audit(&heap, &[cell]), want, "{kind:?} {words:?}");
+    }
+}
+
+/// A short array's cell is 4, 8, 16 or 32 slots and a window that is no longer than they
+/// are, has an element, and has nothing in a slot that is none of its elements', whether
+/// that is a cell or not and wherever the run of them starts.
+#[test]
+fn a_short_array_laid_out_wrong_is_found() {
+    let (nil, one) = (Value::NIL.bits(), Value::bool(true).bits());
+    for slots in [4usize, 8, 16, 32] {
+        for start in [0u64, 1, 3, 31, u64::from(u32::MAX), 1 << 31] {
+            for len in 0..=slots + 1 {
+                let mut words = vec![nil; slots];
+                for i in 0..len.min(slots) {
+                    words[(start as usize + i) % slots] = one;
+                }
+                words.push(start << 32 | len as u64);
+                let mut heap = Heap::default();
+                let cell = heap.make(Kind::ArrayFlat, &words).expect("room");
+                let at = cell.index();
+                let want = match len {
+                    0 => Err(AuditFault::EmptyArray { cell: at }),
+                    _ if len > slots => Err(AuditFault::Misshapen { cell: at }),
+                    _ => Ok(()),
+                };
+                assert_eq!(audit(&heap, &[cell]), want, "{slots} {start} {len}");
+                for past in len..slots {
+                    if len == 0 {
+                        break;
+                    }
+                    let slot = (start as usize + past) % slots;
+                    let held = heap.string(b"held").expect("room");
+                    for stale in [one, Value::cell(held).bits()] {
+                        heap.data_mut(cell)[slot] = stale;
+                        let fault = AuditFault::StaleSlot { cell: at };
+                        let found = audit(&heap, &[cell, held]);
+                        assert_eq!(found, Err(fault), "{slots} {start} {len} {slot}");
+                        assert!(fault.to_string().contains("not one of its elements"));
+                    }
+                    heap.data_mut(cell)[slot] = nil;
+                    heap.release(held).expect("live");
+                }
+            }
+        }
+    }
+    for slots in [0, 1, 2, 3, 5, 7, 12, 31, 33, 64, 253, 300] {
+        let mut words = vec![one; slots];
+        words.push(slots as u64);
+        let mut heap = Heap::default();
+        let cell = heap.make(Kind::ArrayFlat, &words).expect("room");
+        let fault = AuditFault::Misshapen { cell: cell.index() };
+        assert_eq!(audit(&heap, &[cell]), Err(fault), "{slots}");
+    }
+}
+
+/// A short array's cell is a leaf of a tree only when it is full and its elements start in
+/// its first slot.
+#[test]
+fn a_leaf_that_is_not_full_and_in_order_is_found() {
+    let nil = Value::NIL.bits();
+    let one = Value::int(1).expect("small").bits();
+    for slots in [4u64, 8, 16, 32] {
+        for len in [1, slots - 1, slots] {
+            for start in [0, 1, slots - 1, slots] {
+                let place = |i: u64| (start + i) % slots;
+                let mut words = vec![nil; slots as usize];
+                for i in 0..len {
+                    words[place(i) as usize] = one;
+                }
+                words.push(start << 32 | len);
+                for under in [Kind::ArrayRoot, Kind::ArrayBranch, Kind::ArrayLeaf] {
+                    let mut heap = Heap::default();
+                    let leaf = heap.make(Kind::ArrayFlat, &words).expect("room");
+                    let held = Value::cell(leaf).bits();
+                    let holder: &[u64] = match under {
+                        Kind::ArrayRoot => &[len, 0, 0, nil, held, nil],
+                        Kind::ArrayBranch => &[5, len, held],
+                        _ => &[held],
+                    };
+                    let holder = heap.make(under, holder).expect("room");
+                    let fault = AuditFault::PartLeaf {
+                        holder: holder.index(),
+                        cell: leaf.index(),
+                    };
+                    let whole = len == 32 && start % slots == 0;
+                    let want = match whole || under == Kind::ArrayLeaf {
+                        true => Ok(()),
+                        false => Err(fault),
+                    };
+                    let what = format!("{under:?} {slots} {start} {len}");
+                    assert_eq!(audit(&heap, &[holder]), want, "{what}");
+                    assert!(fault.to_string().contains("not full or not in order"));
+                }
+            }
+        }
     }
 }
 

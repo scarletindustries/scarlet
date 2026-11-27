@@ -111,11 +111,7 @@ fn the_empty_array_equals_only_itself() {
 fn arrays_compare_in_every_form() {
     let mut heap = Heap::default();
     let ints: Vec<Value> = (3..6).map(|n| Value::int(n).expect("small")).collect();
-    let tree = array::from_values(&mut heap, &ints).expect("room");
-    let same = array::from_values(&mut heap, &ints).expect("room");
-    let range = array::range(&mut heap, 3, 6).expect("room");
-    let range_too = array::range(&mut heap, 3, 6).expect("room");
-    let equals = [tree, same, range, range_too];
+    let equals = heap.three_in_every_form(&ints);
     for a in equals {
         for b in equals {
             assert!(equal(&heap, a, b));
@@ -127,6 +123,8 @@ fn arrays_compare_in_every_form() {
         array::range(&mut heap, 3, 5).expect("room"),
         array::range(&mut heap, 4, 7).expect("room"),
         array::from_values(&mut heap, &[ints[0], ints[2], ints[1]]).expect("room"),
+        array::from_values(&mut heap, &[ints[2], ints[1], ints[2]]).expect("room"),
+        array::from_values(&mut heap, &[ints[0], ints[1], ints[0]]).expect("room"),
         Value::cell(heap.tuple(&ints).expect("room")),
         Value::cell(heap.make(Kind::Binary, &[3, 4]).expect("room")),
         Value::NIL,

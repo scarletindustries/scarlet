@@ -68,12 +68,13 @@ impl Class {
             8 => Some(Kind::Closure),
             9 => Some(Kind::ArrayLeaf),
             10 => Some(Kind::ArrayRoot),
-            11 => Some(Kind::ArrayBranch),
+            11 => Some(Kind::ArrayFlat),
             12 => Some(Kind::Map),
             13 => Some(Kind::MapNode),
             14 => Some(Kind::MapCollision),
+            15 => Some(Kind::ArrayBranch),
             FIRST.. => Some(Kind::Ctor),
-            0 | 15 => None,
+            0 => None,
         }
     }
 

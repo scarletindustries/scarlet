@@ -6,7 +6,6 @@ use super::probes::{
 };
 use super::*;
 use crate::code::{Hits, MaybeHit, Near};
-use crate::heap::AuditFailure;
 
 const FROM: Reg = Reg(FIRST.0);
 const WITH: Reg = Reg(FIRST.0 + 1);
@@ -30,7 +29,7 @@ fn len_of_kind(of: Of) -> usize {
     }
 }
 
-/// An array as it may have come to be: one leaf or a tree, with elements left behind in
+/// An array as it may have come to be: one cell or a tree, with elements left behind in
 /// front, or in both of its buffers.
 #[derive(Debug, Clone, Copy)]
 enum Grown {
@@ -43,13 +42,14 @@ enum Grown {
 
 fn grown(heap: &mut Heap, of: Of, how: Grown) -> (Value, Vec<Result<Value, i64>>) {
     let (whole, mut items) = array_of_kind(heap, of);
-    let (Of::Both(n), Some(cell)) = (of, whole.as_cell()) else {
+    let (Of::Both(n), Some(_)) = (of, whole.as_cell()) else {
         return (whole, items);
     };
     match how {
         Grown::AsItIs => (whole, items),
         Grown::Cut if n > 2 => {
-            let left = array::skip_owned(heap, cell, 2).expect("room");
+            let whole = stored(heap, whole);
+            let left = array::skip(heap, whole, 2).expect("room");
             items.drain(..2);
             (left, items)
         }
@@ -57,12 +57,23 @@ fn grown(heap: &mut Heap, of: Of, how: Grown) -> (Value, Vec<Result<Value, i64>>
             let mut a = whole;
             for i in 0..3 {
                 let x = a_cell(heap, 900 + i);
-                a = array::push_owned(heap, a.as_cell(), x, End::Front).expect("room");
+                let array = stored(heap, a);
+                a = array::push(heap, array, x, End::Front).expect("room");
                 items.insert(0, Ok(x));
             }
             (a, items)
         }
         Grown::Cut | Grown::Pushed => (whole, items),
+    }
+}
+
+/// `array` as what stores its elements.
+fn stored(heap: &Heap, array: Value) -> Stored {
+    match array::seq(heap, array).expect("an array") {
+        Seq::Empty => Stored::Empty,
+        Seq::Flat(flat) => Stored::Flat(flat),
+        Seq::Tree(cell) => Stored::Tree(cell),
+        Seq::Range { .. } => panic!("a range stores none"),
     }
 }
 
@@ -190,8 +201,9 @@ fn an_array_is_taken_apart_into_its_first_element_and_the_others() {
                     assert!(!items.is_empty(), "{what}");
                     let big = matches!(case.of, Of::Range(..));
                     let alone = case.moved && !case.held && !big;
-                    let in_front = matches!(case.how, Grown::Pushed) && items.len() > 3;
-                    if alone && in_front {
+                    let in_front = matches!(case.how, Grown::Pushed) && items.len() > 33;
+                    let short = matches!(case.of, Of::Both(n) if n <= 32);
+                    if alone && (in_front || (short && items.len() <= 32)) {
                         assert_eq!(m.rest.heap.made(), made, "{what}");
                     }
                     let mut written: Vec<Reg> = head.into_iter().collect();
@@ -269,14 +281,32 @@ fn split_of(asked: Asked, src: Arg<Reg>, first: Option<Reg>) -> (Ins<Reg>, Lists
 }
 
 fn extend_of(src: Arg<Reg>, items: &[Reg], end: End) -> (Ins<Reg>, Lists<Reg>) {
+    let items: Vec<_> = items.iter().copied().map(Arg::shared).collect();
+    extend_taking(src, &items, end)
+}
+
+fn extend_taking(src: Arg<Reg>, items: &[Arg<Reg>], end: End) -> (Ins<Reg>, Lists<Reg>) {
     let ins = Ins::ArrayExtend {
         dst: Dst(TAIL),
         src,
-        items: crate::code::ShareList(0),
+        items: crate::code::ArgList(0),
         end,
     };
     let lists = Lists {
-        regs: vec![items.into()],
+        args: vec![items.into()],
+        ..Lists::default()
+    };
+    (ins, lists)
+}
+
+/// A literal of more elements than one cell has.
+fn literal_of(items: &[Arg<Reg>]) -> (Ins<Reg>, Lists<Reg>) {
+    let ins = Ins::ArrayWide {
+        dst: Dst(TAIL),
+        elements: crate::code::ArgList(0),
+    };
+    let lists = Lists {
+        args: vec![items.into()],
         ..Lists::default()
     };
     (ins, lists)
@@ -389,10 +419,17 @@ fn an_array_is_split_when_it_has_the_length() {
                     let left = in_register(m, TAIL);
                     is_array(m, left, &items[asked.len..], &what);
                     // Only the place in its head moves along in an array that nothing
-                    // else holds.
+                    // else holds. A short one is all head.
                     let pushed = matches!(case.how, Grown::Pushed) && n > 0;
+                    let in_head = match has {
+                        ..=32 if n <= 32 => has,
+                        // The first that did not fit was pushed alone.
+                        33 | 34 if pushed => has - 32,
+                        _ if pushed => 3,
+                        _ => 0,
+                    };
                     let alone = case.moved && !case.held && !matches!(case.of, Of::Range(..));
-                    if alone && pushed && (1..3).contains(&asked.len) {
+                    if alone && (1..in_head).contains(&asked.len) {
                         assert_eq!(left.bits(), before[usize::from(FROM.0)].bits(), "{what}");
                         in_place += 1;
                     }
@@ -527,6 +564,36 @@ fn what_is_no_array_is_not_taken_apart() {
     });
 }
 
+/// A pattern that asks an array of no elements for some, which none that the loader makes
+/// does, stops. It writes nothing.
+#[test]
+fn the_empty_array_has_no_elements_to_take() {
+    let asked = |wanted| Asked {
+        len: 0,
+        more: true,
+        from: 0,
+        wanted,
+        tail: true,
+    };
+    for wanted in [0, 1, 0b111_1111] {
+        let (ins, lists) = split_of(asked(wanted), Arg::moved(FROM), None);
+        let code = asks_with(ins, lists);
+        on_a_machine(|m| {
+            let before = registers(&[(FROM, Value::EMPTY_ARRAY)]);
+            let stop = run_with(m, code, &before);
+            if wanted == 0 {
+                found(&stop);
+                let tail = in_register(m, TAIL);
+                assert_eq!(tail.bits(), Value::EMPTY_ARRAY.bits());
+            } else {
+                let none = Broken::NoArrayElement { index: 0 };
+                assert_eq!(stop, Stop::broken(none));
+                rest_is(m, &before, None, &[], "elements");
+            }
+        });
+    }
+}
+
 /// A push puts its item at the end, whoever holds the array and the item, and a kept
 /// array stays as it was. One onto an array that is taken and held by nothing else has
 /// its root.
@@ -557,13 +624,22 @@ fn an_item_is_pushed_at_either_end() {
                     true => Ins::ArrayExtend {
                         dst,
                         src,
-                        items: crate::code::ShareList(0),
+                        items: crate::code::ArgList(0),
                         end,
                     },
                 };
-                let items_of: Vec<Reg> = [WITH; 3].into_iter().chain([AWAY]).collect();
+                // Of those that name one register only the last may take it.
+                let items_of = [
+                    Arg::shared(WITH),
+                    Arg::shared(WITH),
+                    item,
+                    Arg {
+                        reg: AWAY,
+                        moved: item_moved,
+                    },
+                ];
                 let lists = Lists {
-                    regs: vec![items_of.into()],
+                    args: vec![items_of.into()],
                     ..Lists::default()
                 };
                 let body = vec![ins, Ins::Bad { why: WhyId(0) }];
@@ -586,9 +662,13 @@ fn an_item_is_pushed_at_either_end() {
                         End::Back => items.splice(kept.len().., new),
                     };
                     let mut written = vec![dst.0];
-                    if item_moved && !many {
+                    if item_moved {
                         written.push(WITH);
                         assert_eq!(in_register(m, WITH).bits(), Value::NIL.bits(), "{what}");
+                    }
+                    if item_moved && many {
+                        written.push(AWAY);
+                        assert_eq!(in_register(m, AWAY).bits(), Value::NIL.bits(), "{what}");
                     }
                     checked(m, &before, case, &written, &kept, &what);
                     let pushed = in_register(m, dst.0);
@@ -596,6 +676,113 @@ fn an_item_is_pushed_at_either_end() {
                     all_given_up(m, &what);
                 });
             }
+        }
+    }
+}
+
+/// Two arrays of any kind are joined in their order, whoever holds them and whichever of
+/// them the instruction takes, and what goes on holding one holds it as it was. Two short
+/// ones that fit in one cell are one, which is either's when that is taken, has slots for
+/// the other and nothing else holds it.
+#[test]
+fn arrays_are_joined_in_their_order() {
+    let mut in_place = 0;
+    let kinds = || {
+        ARRAYS
+            .into_iter()
+            .chain([Of::Both(4), Of::Both(5), Of::Both(17)])
+    };
+    for left in kinds() {
+        for right in kinds() {
+            if len_of_kind(left) + len_of_kind(right) > 1200 {
+                continue;
+            }
+            for bits in 0..16u8 {
+                let holds = |bit: u8| bits >> bit & 1 == 1;
+                let (takes, held) = ([holds(0), holds(1)], [holds(2), holds(3)]);
+                let arg = |reg, moved| Arg { reg, moved };
+                let join = Ins::ArrayConcat {
+                    dst: Dst([TAIL, FROM, WITH][usize::from(bits) % 3]),
+                    a: arg(FROM, takes[0]),
+                    b: arg(WITH, takes[1]),
+                };
+                let Ins::ArrayConcat { dst, .. } = join else {
+                    panic!("a join")
+                };
+                // A register that is read after it is not the result's.
+                let keeps = [(FROM, takes[0]), (WITH, takes[1])];
+                if keeps.contains(&(dst.0, false)) {
+                    continue;
+                }
+                let code = asks(join);
+                on_a_machine(|m| {
+                    let what = format!("{left:?} {right:?} {join:?} {held:?}");
+                    m.rest.heap = Heap::new(code.ctors.clone());
+                    m.rest.globals = Vec::new();
+                    let heap = &mut m.rest.heap;
+                    let (a, a_items) = array_of_kind(heap, left);
+                    let (b, b_items) = array_of_kind(heap, right);
+                    for (v, held) in [(a, held[0]), (b, held[1])] {
+                        if held {
+                            m.rest.globals.push(heap.own(v).expect("live"));
+                        }
+                    }
+                    let made = heap.made();
+                    run_with(m, code, &registers(&[(FROM, a), (WITH, b)]));
+                    counted(m, &what);
+                    let made = m.rest.heap.made() - made;
+                    let items = [a_items.clone(), b_items.clone()].concat();
+                    let joined = in_register(m, dst.0);
+                    is_array(m, joined, &items, &what);
+                    let short = |of: Of| matches!(of, Of::Both(1..=32));
+                    let s = m.rest.seq(joined).expect("an array");
+                    if short(left) && short(right) {
+                        let flat = matches!(s, Seq::Flat(_));
+                        assert_eq!(flat, items.len() <= 32, "{what}");
+                        if made == 0 {
+                            in_place += 1;
+                            let whose = [a, b].map(Value::bits);
+                            assert!(whose.contains(&joined.bits()), "{what}");
+                        }
+                        let room = |n: usize| n.next_power_of_two().max(4) - n;
+                        let (n, k) = (a_items.len(), b_items.len());
+                        let has = |i: usize| takes[i] && !held[i];
+                        let fits = (has(0) && room(n) >= k) || (has(1) && room(k) >= n);
+                        if flat {
+                            assert_eq!(made == 0, fits, "{what}");
+                        }
+                    }
+                    for (v, items, i) in [(a, &a_items, 0), (b, &b_items, 1)] {
+                        if held[i] || !takes[i] {
+                            is_array(m, v, items, &what);
+                        }
+                    }
+                    counted(m, &what);
+                    all_given_up(m, &what);
+                });
+            }
+        }
+    }
+    assert!(in_place > 50, "{in_place}");
+    // One that is joined to itself, which is kept or not.
+    for of in ARRAYS {
+        for moved in [false, true] {
+            let code = asks(Ins::ArrayConcat {
+                dst: Dst(TAIL),
+                a: Arg::shared(FROM),
+                b: Arg { reg: FROM, moved },
+            });
+            on_a_machine(|m| {
+                let what = format!("{of:?} {moved}");
+                m.rest.heap = Heap::new(code.ctors.clone());
+                m.rest.globals = Vec::new();
+                let (a, items) = array_of_kind(&mut m.rest.heap, of);
+                run_with(m, code, &registers(&[(FROM, a)]));
+                counted(m, &what);
+                let twice = in_register(m, TAIL);
+                is_array(m, twice, &[items.clone(), items].concat(), &what);
+                all_given_up(m, &what);
+            });
         }
     }
 }
@@ -653,22 +840,29 @@ fn a_freed_element_stops_the_run() {
         }
         for (ins, lists) in all {
             let code = asks_with(ins, lists);
-            for how in [Grown::AsItIs, Grown::Pushed] {
+            for (how, n) in [(Grown::AsItIs, 9), (Grown::Pushed, 9), (Grown::AsItIs, 40)] {
                 on_a_machine(|m| {
                     m.rest.heap = Heap::new(code.ctors.clone());
                     m.rest.globals = Vec::new();
                     let heap = &mut m.rest.heap;
                     let freed = Value::cell(a_freed_cell(heap, 2));
-                    let mut whole = array::from_values(heap, &[freed; 9]).expect("room");
+                    let mut whole = array::from_values(heap, &vec![freed; n]).expect("room");
                     if matches!(how, Grown::Pushed) {
                         for _ in 0..9 {
-                            whole = array::push_owned(heap, whole.as_cell(), freed, End::Front)
-                                .expect("room");
+                            let array = stored(heap, whole);
+                            whole = array::push(heap, array, freed, End::Front).expect("room");
                         }
                     }
                     let before = registers(&[(FROM, whole)]);
                     let stop = run_with(m, code, &before);
-                    assert_eq!(stop, Stop::broken(Broken::DeadCell), "{ins:?} {how:?}");
+                    // One that only moves out is not looked at.
+                    let moves = moved && n < 32 && matches!(ins, Ins::ArrayUncons { .. });
+                    let want = if moves {
+                        Broken::NoArm
+                    } else {
+                        Broken::DeadCell
+                    };
+                    assert_eq!(stop, Stop::broken(want), "{ins:?} {how:?}");
                 });
             }
         }
@@ -700,8 +894,8 @@ fn a_freed_element_stops_the_run() {
 #[test]
 fn an_element_that_is_counted_and_not_there_stops_the_run() {
     for (n, wanted, from, missing) in [
-        (9usize, 0b11u8, 8usize, 9usize),
-        (9, 0b1, 11, 11),
+        (33usize, 0b11u8, 32usize, 33usize),
+        (33, 0b1, 35, 35),
         (40, 0b111_1111, 36, 40),
         (40, 0b1010, 37, 40),
     ] {
@@ -730,34 +924,24 @@ fn an_element_that_is_counted_and_not_there_stops_the_run() {
     }
 }
 
-/// Nothing that the registers and the globals hold has fewer references than it should.
-/// There may be some too many.
-fn none_lost(m: &Machine<'_, '_>, what: &str) {
-    let roots = m.stack.iter().chain(&m.rest.globals).copied();
-    match m.rest.heap.audit(roots) {
-        Ok(()) => {}
-        Err(AuditFailure::Found(AuditFault::Miscounted { count, holders, .. })) => {
-            assert!(i64::from(count) > i64::from(holders), "{what}");
-        }
-        Err(other) => panic!("{what}: {other:?}"),
-    }
-}
-
-/// With no room for what it makes, each of these stops. The array stays in its register,
-/// or the register has given it up, and no register names a cell that is gone. What is
-/// kept elsewhere is as it was.
+/// With no room for what it makes, each of these stops, and every reference is counted. The
+/// array stays in its register, or the register has given it up, and no register names a
+/// cell that is gone. What is kept elsewhere is as it was.
 #[test]
 fn an_instruction_with_no_room_leaves_every_register_right() {
     let arrays = [
-        Of::Both(8),
+        Of::Both(1),
+        Of::Both(4),
+        Of::Both(16),
+        Of::Both(32),
         Of::Both(33),
         Of::Both(70),
         Of::Range(-3, 9),
         Of::Range((1 << 50) - 4, (1 << 50) + 9),
         Of::Range(i64::MAX - 9, i64::MAX),
     ];
-    let asked = |wanted, from, tail| Asked {
-        len: 8,
+    let asked = |len, wanted, from, tail| Asked {
+        len,
         more: true,
         from,
         wanted,
@@ -780,22 +964,69 @@ fn an_instruction_with_no_room_leaves_every_register_right() {
                     reg: WITH,
                     moved: item_moved,
                 };
+                let set = Ins::ArraySet {
+                    dst: Hit(TAIL),
+                    src,
+                    index: Src(AT),
+                    value: item,
+                    miss: miss(),
+                };
                 let mut all = vec![push_of(src, item, End::Front)];
                 all.push(push_of(src, item, End::Back));
+                all.push((set, Lists::default()));
+                // Of the items in one register the last takes it.
+                for (n, end) in [
+                    (3, End::Front),
+                    (3, End::Back),
+                    (40, End::Front),
+                    (40, End::Back),
+                ] {
+                    let mut items: Vec<_> = many[..n].iter().copied().map(Arg::shared).collect();
+                    let last = items.iter_mut().rfind(|a| a.reg == WITH);
+                    last.expect("there").moved = item_moved;
+                    all.push(extend_taking(src, &items, end));
+                }
+                for n in [33, 70] {
+                    let of = many.iter().copied().cycle().take(n).map(Arg::shared);
+                    let mut items: Vec<_> = of.chain([src, item]).collect();
+                    items.rotate_right(3);
+                    let last = items.iter().rposition(|a| a.reg == WITH).expect("there");
+                    items.iter_mut().for_each(|a| a.moved &= a.reg == FROM);
+                    items[last].moved = item_moved;
+                    all.push(literal_of(&items));
+                }
                 // The item is in the others' registers too.
                 if !item_moved {
                     all.extend([
                         uncons_of(None, src),
                         uncons_of(Some(TO[0]), src),
-                        split_of(asked(0b11, 0, true), src, None),
-                        split_of(asked(0b1011, 4, true), src, None),
-                        split_of(asked(0b101_0101, 1, true), src, None),
-                        split_of(asked(0b111_1111, 0, false), src, None),
-                        extend_of(src, &many[..3], End::Front),
-                        extend_of(src, &many[..3], End::Back),
-                        extend_of(src, &many, End::Front),
-                        extend_of(src, &many, End::Back),
+                        split_of(asked(1, 0b1, 0, true), src, None),
+                        split_of(asked(8, 0b11, 0, true), src, None),
+                        split_of(asked(8, 0b1011, 4, true), src, None),
+                        split_of(asked(8, 0b101_0101, 1, true), src, None),
+                        split_of(asked(8, 0b111_1111, 0, false), src, None),
                     ]);
+                    let slice = |dst| Ins::ArraySlice {
+                        dst: MaybeHit::new(dst),
+                        src,
+                        start: Src(AT),
+                        end: Src(UNTIL),
+                        miss: miss(),
+                    };
+                    all.push((slice(Some(TAIL)), Lists::default()));
+                    for (a, b) in [(FROM, SHORT), (SHORT, FROM), (FROM, FROM)] {
+                        // Of two operands in one register only the last may take it.
+                        let takes = |reg, last| Arg {
+                            reg,
+                            moved: moved && reg == FROM && (last || a != b),
+                        };
+                        let join = Ins::ArrayConcat {
+                            dst: Dst(TAIL),
+                            a: takes(a, false),
+                            b: takes(b, true),
+                        };
+                        all.push((join, Lists::default()));
+                    }
                 }
                 for (ins, lists) in all {
                     full += with_no_room(case, ins, lists, item_moved);
@@ -803,36 +1034,97 @@ fn an_instruction_with_no_room_leaves_every_register_right() {
             }
         }
     }
-    assert!(full > 2000, "{full}");
+    assert!(full > 4000, "{full}");
 }
+
+/// A literal of more elements than one cell has is a tree of them. Each register that gives
+/// its value up is empty then, and holds it otherwise.
+#[test]
+fn a_long_literal_takes_what_its_registers_give_up() {
+    let regs = [&[FROM, WITH, AWAY, TAIL], &TO[..]].concat();
+    for n in [33usize, 64, 65, 70, 1100] {
+        let used: Vec<Reg> = regs.iter().copied().cycle().take(n).collect();
+        for takes in 0..5usize {
+            let last = |i: usize| used.iter().rposition(|r| *r == used[i]) == Some(i);
+            let takes = |i: usize| match takes {
+                0 => false,
+                1 => true,
+                _ => (i + takes).is_multiple_of(takes),
+            };
+            let items: Vec<_> = (0..n)
+                .map(|i| Arg {
+                    reg: used[i],
+                    moved: last(i) && takes(i),
+                })
+                .collect();
+            let (ins, lists) = literal_of(&items);
+            let code = asks_with(ins, lists);
+            on_a_machine(|m| {
+                m.rest.heap = Heap::new(code.ctors.clone());
+                m.rest.globals = Vec::new();
+                let heap = &mut m.rest.heap;
+                let cells = (0..).map(|i| a_cell(heap, i));
+                let given: Vec<_> = regs.iter().copied().zip(cells).collect();
+                let before = registers(&given);
+                found(&run_with(m, code, &before));
+                let what = format!("{n} {items:?}");
+                let want: Vec<_> = used.iter().map(|r| Ok(before[usize::from(r.0)])).collect();
+                let made = in_register(m, TAIL);
+                assert!(matches!(array::seq(&m.rest.heap, made), Some(Seq::Tree(_))));
+                is_array(m, made, &want, &what);
+                let gone: Vec<Reg> = items.iter().filter(|a| a.moved).map(|a| a.reg).collect();
+                rest_is(m, &before, Some(TAIL), &gone, &what);
+                counted(m, &what);
+                all_given_up(m, &what);
+            });
+        }
+    }
+}
+
+/// Where an index is, the end of a slice, and a short array.
+const AT: Reg = Reg(FIRST.0 + 11);
+const UNTIL: Reg = Reg(FIRST.0 + 12);
+const SHORT: Reg = Reg(FIRST.0 + 13);
 
 /// Run `ins` on heaps with a little more room each time, until one has enough. Gives how
 /// many had not.
 fn with_no_room(case: Case, ins: Ins<Reg>, lists: Lists<Reg>, item_moved: bool) -> usize {
     let code = asks_with(ins, lists);
+    let twice = matches!(ins, Ins::ArrayConcat { a, b, .. } if a.reg == FROM && b.reg == FROM);
     let mut full = 0;
-    for more in 0.. {
+    // Each word for a short cell, and fewer of them further on.
+    for more in (0..).map(|i: usize| i + i / 24 * i / 2) {
         let mut done = false;
         on_a_machine(|m| {
             let what = format!("{case:?} {ins:?} {more}");
-            set_up(m, code, case);
-            a_cell(&mut m.rest.heap, 5);
+            let (mut before, items) = set_up(m, code, case);
+            let heap = &mut m.rest.heap;
+            // What two trees are joined to has no bound to ask for before there is some of it.
+            let of = array::seq(heap, before[usize::from(FROM.0)]);
+            let joins_trees = twice && matches!(of, Some(Seq::Tree(_)));
+            let short: Vec<Value> = (0..3).map(|i| a_cell(heap, 60 + i)).collect();
+            let short_items: Vec<_> = short.iter().copied().map(Ok).collect();
+            let given = [
+                (WITH, a_cell(heap, 5)),
+                (AT, small(1)),
+                (UNTIL, small(items.len() as i64 - 1)),
+                (SHORT, array::from_values(heap, &short).expect("room")),
+            ];
+            for (reg, v) in given {
+                before[usize::from(reg.0)] = v;
+            }
             let limit = m.rest.heap.words_used() + more;
-            m.rest.heap = Heap::limited_for(limit, code.ctors.clone());
-            m.rest.globals = Vec::new();
-            let (mut before, items) = set_up_in(m, case);
-            before[usize::from(WITH.0)] = a_cell(&mut m.rest.heap, 5);
+            m.rest.heap.limit_to(limit);
             let stop = run_with(m, code, &before);
             if stop != Stop::HeapFull {
                 found(&stop);
+                counted(m, &what);
                 done = true;
                 return;
             }
             full += 1;
-            // One that adds many leaves stops between two of them, and what it has of the
-            // array by then is lost. Nothing can come by that any more.
-            if !matches!(ins, Ins::ArrayExtend { .. }) {
-                none_lost(m, &what);
+            if !joins_trees {
+                counted(m, &what);
             }
             for (i, v) in before.iter().enumerate().skip(usize::from(FIRST.0)) {
                 let from = case.moved && i == usize::from(FROM.0);
@@ -852,21 +1144,16 @@ fn with_no_room(case: Case, ins: Ins<Reg>, lists: Lists<Reg>, item_moved: bool) 
                     is_array(m, kept, &items, &what);
                 }
             }
-            for v in std::mem::take(&mut m.stack) {
-                m.rest.release(v).expect("live");
-            }
-            for v in std::mem::take(&mut m.rest.globals) {
-                m.rest.release(v).expect("live");
-            }
-            let pushes = matches!(ins, Ins::ArrayPush { .. } | Ins::ArrayExtend { .. });
-            if matches!(case.of, Of::Range(..)) && !pushes {
-                assert_eq!(m.rest.heap.live(), 0, "{what}");
+            let left = in_register(m, SHORT);
+            is_array(m, left, &short_items, &what);
+            if !joins_trees {
+                all_given_up(m, &what);
             }
         });
         if done {
             return full;
         }
-        assert!(more < 2000, "{case:?} {ins:?}");
+        assert!(more < 9000, "{case:?} {ins:?}");
     }
     full
 }
@@ -945,8 +1232,8 @@ fn a_cell_with_no_elements_stops_what_takes_it_apart() {
 }
 
 /// The empty array grows and is joined as any other is, takes no reference, and is left
-/// in its register. Nothing is made where the other side is a tree or empty, which is
-/// then the join. A range is built as a tree.
+/// in its register. Nothing is made where the other side stores its elements or is empty,
+/// which is then the join. A range is built as an array that does.
 #[test]
 fn the_empty_array_is_grown_and_joined() {
     let empty = Value::EMPTY_ARRAY;
@@ -971,7 +1258,7 @@ fn the_empty_array_is_grown_and_joined() {
                     let what = format!("{ins:?}");
                     run_with(m, code, &before);
                     counted(m, &what);
-                    assert_eq!(m.rest.heap.made() - made, n.min(1) * 2, "{what}");
+                    assert_eq!(m.rest.heap.made() - made, n.min(1), "{what}");
                     let items = [Ok(x), Ok(y)];
                     let grown = in_register(m, TAIL);
                     is_array(m, grown, &items[..n], &what);
@@ -982,8 +1269,8 @@ fn the_empty_array_is_grown_and_joined() {
     }
     let join = Ins::ArrayConcat {
         dst: Dst(TAIL),
-        a: Src(FROM),
-        b: Src(WITH),
+        a: Arg::shared(FROM),
+        b: Arg::shared(WITH),
     };
     let code = asks_with(join, Lists::default());
     for of in ARRAYS {
@@ -1005,7 +1292,7 @@ fn the_empty_array_is_grown_and_joined() {
                 let s = m.rest.seq(other).expect("an array");
                 if let Seq::Range { .. } = s {
                     let s = m.rest.seq(joined).expect("an array");
-                    assert!(matches!(s, Seq::Tree(_)), "{what}");
+                    assert!(matches!(s, Seq::Flat(_)), "{what}");
                 } else {
                     assert_eq!(m.rest.heap.made(), made, "{what}");
                     assert_eq!(joined.bits(), other.bits(), "{what}");
@@ -1014,6 +1301,23 @@ fn the_empty_array_is_grown_and_joined() {
                 all_given_up(m, &what);
             });
         }
+    }
+}
+
+/// The loader gives no array instruction without elements. One that has none makes no cell.
+#[test]
+fn an_array_of_no_elements_is_no_cell() {
+    let elements = crate::code::ArgList(1);
+    let wide = Ins::ArrayWide {
+        dst: Dst(r(0)),
+        elements,
+    };
+    for ins in [array_of(0, &[]), wide] {
+        after(1, vec![ins, ret(0)], |m, got| {
+            let got = got.expect("the function returns");
+            assert_eq!(got.bits(), Value::EMPTY_ARRAY.bits());
+            assert_eq!(m.rest.heap.made(), 0);
+        });
     }
 }
 

@@ -1,15 +1,56 @@
 use super::*;
 
-// What follows takes an array as the value that holds it, which is a tree's cell or the
-// empty array.
+// What follows takes an array as the value that holds it.
 
-fn root(heap: &Heap, array: Value) -> Root {
-    parts(heap, array.as_cell()).expect("a live array")
+impl Heap {
+    /// `three` values as an array of each form there is: a cell whose elements start in its
+    /// first slot, twice, and one whose do not, what is left of a longer array, and last
+    /// the range of 3, 4 and 5, which is one of them when those are the values.
+    pub(crate) fn three_in_every_form(&mut self, three: &[Value]) -> [Value; 5] {
+        // One reference for each array there is of each of them, and for those dropped again.
+        for v in three {
+            for _ in 0..50 {
+                self.own(*v).expect("live");
+            }
+        }
+        let flat = from_values(self, three).expect("room");
+        let same = from_values(self, three).expect("room");
+        let mut turned = from_values(self, &three[2..]).expect("room");
+        for x in [three[1], three[0]] {
+            turned = push(self, turned, x, End::Front).expect("room");
+        }
+        let mut left = from_values(self, three).expect("room");
+        for _ in 0..40 {
+            left = push(self, left, three[0], End::Front).expect("room");
+        }
+        left = skip(self, left, 40).expect("room");
+        assert!(is_flat(self, turned) && !is_flat(self, left));
+        let range = range(self, 3, 6).expect("room");
+        [flat, same, turned, left, range]
+    }
 }
 
-fn elements(heap: &Heap, array: Value) -> Vec<Value> {
-    let cell = array.as_cell();
-    cell.map_or_else(Vec::new, |cell| super::elements(heap, cell))
+/// `array` as what stores its elements.
+pub(super) fn stored(heap: &Heap, array: Value) -> Stored {
+    match seq(heap, array).expect("an array") {
+        Seq::Empty => Stored::Empty,
+        Seq::Flat(flat) => Stored::Flat(flat),
+        Seq::Tree(cell) => Stored::Tree(cell),
+        Seq::Range { .. } => panic!("a range stores none"),
+    }
+}
+
+pub(super) fn is_flat(heap: &Heap, array: Value) -> bool {
+    matches!(stored(heap, array), Stored::Flat(_))
+}
+
+/// The parts of a tree.
+pub(super) fn root(heap: &Heap, array: Value) -> Root {
+    tree(heap, array.as_cell().expect("a cell")).expect("a tree")
+}
+
+pub(super) fn elements(heap: &Heap, array: Value) -> Vec<Value> {
+    super::elements(heap, seq(heap, array).expect("an array")).expect("no range")
 }
 
 fn len(heap: &Heap, array: Value) -> usize {
@@ -18,81 +59,123 @@ fn len(heap: &Heap, array: Value) -> usize {
 }
 
 fn get(heap: &Heap, array: Value, i: usize) -> Option<Value> {
-    super::get(heap, array.as_cell()?, i)
+    match stored(heap, array) {
+        Stored::Empty => None,
+        Stored::Flat(flat) => flat.get(heap, i),
+        Stored::Tree(cell) => super::get(heap, cell, i),
+    }
 }
 
-fn set(heap: &mut Heap, array: Value, i: usize, x: Value) -> Result<Value, Fault> {
-    super::set(heap, array.as_cell(), i, x)
+pub(super) fn set(heap: &mut Heap, array: Value, i: usize, x: Value) -> Result<Value, Fault> {
+    let array = stored(heap, array);
+    super::set(heap, array, i, x)
 }
 
-fn push(heap: &mut Heap, array: Value, x: Value, end: End) -> Result<Value, Fault> {
-    super::push(heap, array.as_cell(), x, end)
+pub(super) fn push(heap: &mut Heap, array: Value, x: Value, end: End) -> Result<Value, Fault> {
+    let array = stored(heap, array);
+    super::push(heap, array, x, end)
 }
 
-fn push_owned(heap: &mut Heap, array: Value, x: Value, end: End) -> Result<Value, Fault> {
-    super::push_owned(heap, array.as_cell(), x, end)
+pub(super) fn extend(
+    heap: &mut Heap,
+    array: Value,
+    items: &[Value],
+    end: End,
+) -> Result<Value, Fault> {
+    let array = stored(heap, array);
+    super::extend(heap, array, items, end)
 }
 
-fn extend_owned(heap: &mut Heap, array: Value, items: &[Value], end: End) -> Result<Value, Fault> {
-    super::extend_owned(heap, array.as_cell(), items, end)
+pub(super) fn skip(heap: &mut Heap, array: Value, n: usize) -> Result<Value, Fault> {
+    let array = stored(heap, array);
+    super::skip(heap, array, n)
+}
+
+pub(super) fn slice(heap: &mut Heap, array: Value, from: usize, to: usize) -> Result<Value, Fault> {
+    let array = stored(heap, array);
+    super::slice(heap, array, from, to)
 }
 
 fn concat(heap: &mut Heap, l: Value, r: Value) -> Result<Value, Fault> {
-    match (l.as_cell(), r.as_cell()) {
-        (Some(l), Some(r)) => super::concat(heap, l, r),
-        (Some(_), None) => Ok(heap.own(l)?),
-        (None, _) => Ok(heap.own(r)?),
-    }
+    let (l, r) = (stored(heap, l), stored(heap, r));
+    super::concat(heap, l, r)
 }
 
-fn take(heap: &mut Heap, array: Value, n: usize) -> Result<Value, Fault> {
-    match array.as_cell() {
-        Some(cell) => super::take(heap, cell, n),
-        None => Ok(array),
-    }
+// The same, of an array that the caller keeps its reference to.
+
+fn pushed_on(heap: &mut Heap, array: Value, x: Value, end: End) -> Result<Value, Fault> {
+    heap.own(array)?;
+    push(heap, array, x, end)
 }
 
-fn skip(heap: &mut Heap, array: Value, n: usize) -> Result<Value, Fault> {
-    match array.as_cell() {
-        Some(cell) => super::skip(heap, cell, n),
-        None => Ok(array),
-    }
+fn without(heap: &mut Heap, array: Value, n: usize) -> Result<Value, Fault> {
+    heap.own(array)?;
+    skip(heap, array, n)
 }
 
-fn skip_owned(heap: &mut Heap, array: Value, n: usize) -> Result<Value, Fault> {
-    match array.as_cell() {
-        Some(cell) => super::skip_owned(heap, cell, n),
-        None => Ok(array),
-    }
+fn front(heap: &mut Heap, array: Value, n: usize) -> Result<Value, Fault> {
+    cut(heap, array, 0, n)
 }
 
-fn slice(heap: &mut Heap, array: Value, from: usize, to: usize) -> Result<Value, Fault> {
-    let s = array.as_cell().map_or(Seq::Empty, Seq::Tree);
-    super::slice(heap, s, from, to)
+pub(super) fn cut(heap: &mut Heap, array: Value, from: usize, to: usize) -> Result<Value, Fault> {
+    let to = to.min(len(heap, array));
+    heap.own(array)?;
+    slice(heap, array, from, to)
 }
 
-fn uncons(
+fn joined(heap: &mut Heap, l: Value, r: Value) -> Result<Value, Fault> {
+    heap.own(l)?;
+    heap.own(r)?;
+    concat(heap, l, r)
+}
+
+/// The first element and the others, as the instruction does it. When `taken`, the array's
+/// reference passes in.
+pub(super) fn uncons(
     heap: &mut Heap,
     array: Value,
     head: bool,
     taken: bool,
 ) -> Result<Option<(Value, Value)>, Fault> {
-    match array.as_cell() {
-        Some(cell) => {
-            let found = super::uncons(heap, cell, head, taken)?;
-            Ok(Some(found.expect("a tree that is not empty")))
+    let Some(cell) = array.as_cell() else {
+        return Ok(None);
+    };
+    if taken && let Some(first) = flat::take_first(heap, cell) {
+        let left = if first.only {
+            heap.discard(cell)?;
+            Value::EMPTY_ARRAY
+        } else {
+            array
+        };
+        if !head {
+            release(heap, first.value)?;
         }
-        None => Ok(None),
+        return Ok(Some((if head { first.value } else { Value::NIL }, left)));
     }
+    if taken && let Some(first) = leave_first(heap, cell)? {
+        if !head {
+            release(heap, first)?;
+        }
+        return Ok(Some((if head { first } else { Value::NIL }, array)));
+    }
+    let found = match stored(heap, array) {
+        Stored::Empty => None,
+        Stored::Flat(flat) => flat::uncons(heap, flat, head)?,
+        Stored::Tree(cell) if taken => return super::uncons_owned(heap, cell, head),
+        Stored::Tree(cell) => super::uncons(heap, cell, head)?,
+    };
+    if taken {
+        heap.release(cell)?;
+    }
+    Ok(Some(found.expect("an array that is not empty")))
 }
 
 fn split_of(heap: &Heap, array: Value, split: Split, out: &mut [Value]) -> Found {
-    let s = seq(heap, array).expect("an array");
-    super::split(heap, s, split, out).expect("a live array")
+    super::split(heap, array.as_cell().expect("a cell"), split, out)
 }
 
 /// What an operation gave, as something to compare.
-fn word(made: Result<Value, Fault>) -> Result<u64, Fault> {
+pub(super) fn word(made: Result<Value, Fault>) -> Result<u64, Fault> {
     made.map(Value::bits)
 }
 
@@ -106,7 +189,7 @@ fn ints(heap: &Heap, array: Value) -> Vec<i64> {
         .collect()
 }
 
-fn int(v: Value) -> Option<i64> {
+pub(super) fn int(v: Value) -> Option<i64> {
     match v.view() {
         crate::value::View::Int(n) => Some(n),
         _ => None,
@@ -118,12 +201,22 @@ fn array_of(heap: &mut Heap, range: std::ops::Range<i64>) -> Value {
     from_values(heap, &items).expect("room")
 }
 
-/// Check every invariant of the tree. That is each node's height, each
-/// leaf's and branch's slot count, each running total, and the root's
-/// length.
-fn check(heap: &Heap, array: Value) {
+/// Check every invariant of an array. A short one's cell is laid out as it says. Of a tree
+/// that is each node's height, each leaf's and branch's slot count, each running total,
+/// and the root's length.
+pub(super) fn check(heap: &Heap, array: Value) {
+    let Some(cell) = array.as_cell() else {
+        assert_eq!(array.bits(), Value::EMPTY_ARRAY.bits());
+        return;
+    };
+    if is_flat(heap, array) {
+        assert!(flat::laid_out(heap.data(cell)).is_ok());
+        assert_eq!(elements(heap, array).len(), len(heap, array));
+        return;
+    }
     let r = root(heap, array);
     for buf in [r.head, r.tail] {
+        check_leaf(heap, buf);
         let n = slots(heap, buf).len();
         assert!(
             buf.as_cell().is_none() || (1..=B).contains(&n),
@@ -146,11 +239,18 @@ fn check(heap: &Heap, array: Value) {
     assert_eq!(elements(heap, array).len(), r.len);
 }
 
+/// A short array's cell that is a leaf is full, and starts in its first slot.
+fn check_leaf(heap: &Heap, leaf: Value) {
+    let flat = leaf.as_cell().and_then(|cell| Flat::of(heap, cell));
+    assert!(flat.is_none_or(|flat| flat::is_leaf(heap, flat)));
+}
+
 fn check_node(heap: &Heap, n: Value, shift: usize) -> usize {
     match node(heap, n).expect("a node") {
         Node::Leaf(items) => {
             assert_eq!(shift, 0, "a leaf above the bottom");
             assert!((1..=B).contains(&items.len()));
+            check_leaf(heap, n);
             items.len()
         }
         Node::Branch {
@@ -207,7 +307,7 @@ fn pushing_at_either_end_leaves_the_old_array_alone() {
         } else {
             (End::Back, 100 + i)
         };
-        let next = push(&mut heap, a, Value::int(x).expect("small"), end).expect("room");
+        let next = pushed_on(&mut heap, a, Value::int(x).expect("small"), end).expect("room");
         release(&mut heap, a).expect("a live cell");
         a = next;
         match end {
@@ -228,7 +328,7 @@ fn pushing_at_either_end_leaves_the_old_array_alone() {
 /// hold, and keep every reference counted. The items are strings, which
 /// are cells, so a lost or extra reference shows in the live count.
 #[test]
-fn an_owned_push_leaves_every_kept_version_alone() {
+fn a_push_leaves_every_kept_version_alone() {
     let mut heap = Heap::default();
     let text = |heap: &Heap, v: Value| {
         let mut out = Vec::new();
@@ -252,14 +352,14 @@ fn an_owned_push_leaves_every_kept_version_alone() {
             kept.push((a, want.iter().cloned().collect()));
         }
         if i % 17 == 0 && !want.is_empty() {
-            a = skip_owned(&mut heap, a, 1).expect("room");
+            a = skip(&mut heap, a, 1).expect("room");
             want.pop_front();
             continue;
         }
         let end = if i % 3 == 0 { End::Front } else { End::Back };
         let name = format!("s{i}");
         let x = Value::cell(heap.string(name.as_bytes()).expect("room"));
-        a = push_owned(&mut heap, a, x, end).expect("room");
+        a = push(&mut heap, a, x, end).expect("room");
         match end {
             End::Front => want.push_front(name),
             End::Back => want.push_back(name),
@@ -275,7 +375,7 @@ fn an_owned_push_leaves_every_kept_version_alone() {
     for (k, _) in kept {
         release(&mut heap, k).expect("a live cell");
     }
-    assert_eq!(heap.live(), 0, "an owned push lost track of a reference");
+    assert_eq!(heap.live(), 0, "a push lost track of a reference");
 }
 
 #[test]
@@ -284,18 +384,18 @@ fn take_and_skip_cut_anywhere() {
     let mut a = array_of(&mut heap, 0..10);
     for i in 0..40 {
         let next =
-            push(&mut heap, a, Value::int(-1 - i).expect("small"), End::Front).expect("room");
+            pushed_on(&mut heap, a, Value::int(-1 - i).expect("small"), End::Front).expect("room");
         release(&mut heap, a).expect("a live cell");
         a = next;
     }
     let tail = array_of(&mut heap, 10..1500);
-    let joined = concat(&mut heap, a, tail).expect("room");
+    let joined = joined(&mut heap, a, tail).expect("room");
     let all = ints(&heap, joined);
     for n in [0, 1, 5, 39, 40, 41, 50, 51, 700, 1539, 1540, 1541, 5000] {
-        let t = take(&mut heap, joined, n).expect("room");
+        let t = front(&mut heap, joined, n).expect("room");
         check(&heap, t);
         assert_eq!(ints(&heap, t), all[..n.min(all.len())], "take {n}");
-        let s = skip(&mut heap, joined, n).expect("room");
+        let s = without(&mut heap, joined, n).expect("room");
         check(&heap, s);
         assert_eq!(ints(&heap, s), all[n.min(all.len())..], "skip {n}");
         release(&mut heap, t).expect("a live cell");
@@ -326,11 +426,14 @@ fn walking_an_array_from_the_front_copies_no_leaf() {
     for i in 0..n {
         assert_eq!(get(&heap, cur, 0).and_then(int), Some(i), "head at {i}");
         assert_eq!(len(&heap, cur), (n - i) as usize);
-        let head = root(&heap, cur).head.as_cell();
-        if heads.last() != Some(&head) {
-            heads.push(head);
+        // What is left of the tail is one cell, which holds its elements itself.
+        if !is_flat(&heap, cur) {
+            let head = root(&heap, cur).head.as_cell();
+            if heads.last() != Some(&head) {
+                heads.push(head);
+            }
         }
-        let next = skip(&mut heap, cur, 1).expect("room");
+        let next = without(&mut heap, cur, 1).expect("room");
         check(&heap, next);
         release(&mut heap, cur).expect("a live cell");
         cur = next;
@@ -356,32 +459,34 @@ fn an_array_walked_part_way_behaves_like_the_rest_of_it() {
     let whole = array_of(&mut heap, 0..200);
     let other = array_of(&mut heap, 200..260);
     for k in [1, 5, 31, 32, 33, 40, 64, 100] {
-        let s = skip(&mut heap, whole, k).expect("room");
+        let s = without(&mut heap, whole, k).expect("room");
         check(&heap, s);
         let rest: Vec<i64> = (k as i64..200).collect();
         assert_eq!(ints(&heap, s), rest, "skip {k}");
         assert_eq!(get(&heap, s, 0).and_then(int), Some(k as i64));
         assert_eq!(get(&heap, s, 3).and_then(int), Some(k as i64 + 3));
 
-        let t = take(&mut heap, s, 7).expect("room");
+        let t = front(&mut heap, s, 7).expect("room");
         check(&heap, t);
         assert_eq!(ints(&heap, t), rest[..7], "take after skip {k}");
 
-        let again = skip(&mut heap, s, 9).expect("room");
+        let again = without(&mut heap, s, 9).expect("room");
         check(&heap, again);
         assert_eq!(ints(&heap, again), rest[9..], "skip twice {k}");
 
-        let joined = concat(&mut heap, s, other).expect("room");
+        let joined = joined(&mut heap, s, other).expect("room");
         check(&heap, joined);
         let want: Vec<i64> = rest.iter().copied().chain(200..260).collect();
         assert_eq!(ints(&heap, joined), want, "concat after skip {k}");
 
-        let front = push(&mut heap, s, Value::int(-1).expect("small"), End::Front).expect("room");
+        let front =
+            pushed_on(&mut heap, s, Value::int(-1).expect("small"), End::Front).expect("room");
         check(&heap, front);
         let want: Vec<i64> = std::iter::once(-1).chain(rest.iter().copied()).collect();
         assert_eq!(ints(&heap, front), want, "push front after skip {k}");
 
-        let back = push(&mut heap, s, Value::int(-1).expect("small"), End::Back).expect("room");
+        let back =
+            pushed_on(&mut heap, s, Value::int(-1).expect("small"), End::Back).expect("room");
         check(&heap, back);
         let want: Vec<i64> = rest.iter().copied().chain(std::iter::once(-1)).collect();
         assert_eq!(ints(&heap, back), want, "push back after skip {k}");
@@ -405,7 +510,7 @@ fn concat_keeps_the_tree_balanced() {
         for &y in &sizes {
             let l = array_of(&mut heap, 0..x);
             let r = array_of(&mut heap, x..x + y);
-            let j = concat(&mut heap, l, r).expect("room");
+            let j = joined(&mut heap, l, r).expect("room");
             check(&heap, j);
             assert_eq!(ints(&heap, j), (0..x + y).collect::<Vec<_>>(), "{x} ++ {y}");
             for c in [l, r, j] {
@@ -418,7 +523,7 @@ fn concat_keeps_the_tree_balanced() {
     for i in 0..300 {
         let piece = array_of(&mut heap, i * 7..i * 7 + (i % 40));
         want.extend(i * 7..i * 7 + (i % 40));
-        let next = concat(&mut heap, acc, piece).expect("room");
+        let next = joined(&mut heap, acc, piece).expect("room");
         release(&mut heap, acc).expect("a live cell");
         release(&mut heap, piece).expect("a live cell");
         acc = next;
@@ -434,8 +539,8 @@ fn concat_keeps_the_tree_balanced() {
     assert_eq!(heap.live(), 0);
 }
 
-/// Where everything in `array` sits: its root's numbers, and each node's own
-/// slots and totals.
+/// Where everything in `array` sits: a short one's slots, or a root's numbers and
+/// each node's own slots and totals.
 fn shape(heap: &Heap, array: Value) -> String {
     fn of(heap: &Heap, v: Value) -> String {
         match node(heap, v) {
@@ -450,6 +555,13 @@ fn shape(heap: &Heap, array: Value) -> String {
                 format!("{shift}{sizes:?}({})", each.join(" "))
             }
         }
+    }
+    if let Stored::Flat(flat) = stored(heap, array) {
+        let slots = heap.data(flat.cell()).len() - 1;
+        return format!("{} of {slots}", flat.len());
+    }
+    if array.as_cell().is_none() {
+        return "none".to_string();
     }
     let r = root(heap, array);
     let [head, tree, tail] = [r.head, r.tree, r.tail].map(|v| of(heap, v));
@@ -486,7 +598,7 @@ fn a_run_of_items_is_added_as_they_are_one_at_a_time() {
                         heap.own(b).expect("a live cell");
                     }
                     let items = strings(&mut heap, "x", more);
-                    let run = extend_owned(&mut heap, a, &items, end).expect("room");
+                    let run = extend(&mut heap, a, &items, end).expect("room");
                     let mut each = b;
                     let items = strings(&mut heap, "x", more);
                     let in_turn: Vec<Value> = match end {
@@ -494,11 +606,14 @@ fn a_run_of_items_is_added_as_they_are_one_at_a_time() {
                         End::Back => items,
                     };
                     for x in in_turn {
-                        each = push_owned(&mut heap, each, x, end).expect("room");
+                        each = push(&mut heap, each, x, end).expect("room");
                     }
                     let what = format!("{n} and {more}");
                     check(&heap, run);
-                    assert_eq!(shape(&heap, run), shape(&heap, each), "{what}");
+                    // A run that is all there is is packed, with nothing in front.
+                    if n > 0 || end == End::Back {
+                        assert_eq!(shape(&heap, run), shape(&heap, each), "{what}");
+                    }
                     let named = |v: Vec<String>| -> Vec<String> {
                         v.into_iter().map(|s| s.replace('b', "a")).collect()
                     };
@@ -507,11 +622,8 @@ fn a_run_of_items_is_added_as_they_are_one_at_a_time() {
                         assert_eq!((shape(&heap, a), texts(&heap, a)), before, "{what}");
                         release(&mut heap, a).expect("a live cell");
                         release(&mut heap, b).expect("a live cell");
-                    } else if more > 0 {
-                        assert!(
-                            n == 0 || run.bits() == a.bits(),
-                            "{what}: the root changes in place"
-                        );
+                    } else if more > 0 && n > 32 {
+                        assert_eq!(run.bits(), a.bits(), "{what}: the root changes in place");
                     }
                     release(&mut heap, run).expect("a live cell");
                     release(&mut heap, each).expect("a live cell");
@@ -532,7 +644,7 @@ fn a_run_of_32_items_makes_one_leaf() {
     let mut a = from_values(&mut heap, &items).expect("room");
     let made = heap.made();
     for _ in 1..40 {
-        a = extend_owned(&mut heap, a, &items, End::Back).expect("room");
+        a = extend(&mut heap, a, &items, End::Back).expect("room");
     }
     check(&heap, a);
     assert_eq!(len(&heap, a), 1280);
@@ -541,7 +653,7 @@ fn a_run_of_32_items_makes_one_leaf() {
     // The one leaf that a run adds to is in a branch of its own by then, and
     // nothing above it is copied.
     let before = heap.made();
-    a = extend_owned(&mut heap, a, &items, End::Front).expect("room");
+    a = extend(&mut heap, a, &items, End::Front).expect("room");
     assert_eq!(heap.made() - before, 1);
     release(&mut heap, a).expect("a live cell");
     assert_eq!(heap.live(), 0);
@@ -556,9 +668,9 @@ fn a_run_is_added_past_the_items_left_behind() {
             for more in [2, 40, 100] {
                 let mut heap = Heap::default();
                 let mut a = array_of(&mut heap, 0..100);
-                a = skip_owned(&mut heap, a, dropped).expect("room");
+                a = skip(&mut heap, a, dropped).expect("room");
                 let items: Vec<Value> = (0..more).map(|i| small(1000 + i)).collect();
-                a = extend_owned(&mut heap, a, &items, end).expect("room");
+                a = extend(&mut heap, a, &items, end).expect("room");
                 check(&heap, a);
                 let old = (dropped as i64)..100;
                 let new = 1000..1000 + more;
@@ -574,61 +686,349 @@ fn a_run_is_added_past_the_items_left_behind() {
     }
 }
 
-/// The owned forms give up the caller's reference, so on an array that
-/// was already freed they stop instead of freeing it again.
+/// A push in front of items left behind puts the new ones over them, and makes no cell, when
+/// nothing else holds the array or the leaf. Whatever was left behind is given up then, as
+/// it is when the live items are copied to a leaf of their own.
 #[test]
-fn an_owned_push_or_skip_of_a_freed_array_is_a_dead_cell() {
-    let mut heap = Heap::default();
-    let live = array_of(&mut heap, 0..3);
-    let cells = heap.live();
-    let a = array_of(&mut heap, 0..40);
-    release(&mut heap, a).expect("a live cell");
-    assert_eq!(heap.live(), cells);
-    let x = Value::int(7).expect("small");
-    assert_eq!(
-        word(push_owned(&mut heap, a, x, End::Back)),
-        Err(Fault::DeadCell)
-    );
-    assert_eq!(word(skip_owned(&mut heap, a, 1)), Err(Fault::DeadCell));
-    for (head, taken) in [(true, true), (false, true), (true, false), (false, false)] {
-        let first = uncons(&mut heap, a, head, taken);
-        assert!(matches!(first, Err(Fault::DeadCell)));
-    }
-    // So they do with more items than a leaf has room for, which are not tried for a leaf.
-    for n in [0, 1, 2, B - 1, B, B + 8] {
-        for end in [End::Front, End::Back] {
-            let run = extend_owned(&mut heap, a, &vec![x; n], end);
-            assert_eq!(word(run), Err(Fault::DeadCell), "{n}");
+fn a_push_at_the_front_gives_up_what_is_left_behind() {
+    for dropped in 1..=31usize {
+        for run in [1, 2, 3, 30, 31, 40] {
+            for holds in ["nothing", "the array", "the leaf"] {
+                let mut heap = Heap::default();
+                let handle = |heap: &mut Heap, i: usize| {
+                    Value::cell(heap.make(Kind::Handle, &[i as u64]).expect("room"))
+                };
+                let items: Vec<Value> = (0..70).map(|i| handle(&mut heap, i)).collect();
+                // The head is a leaf of 32 once one element is taken off.
+                let mut a = from_values(&mut heap, &items).expect("room");
+                a = skip(&mut heap, a, dropped).expect("room");
+                let leaf = root(&heap, a).head;
+                match holds {
+                    "the array" => heap.own(a).map(drop),
+                    "the leaf" => heap.own(leaf).map(drop),
+                    _ => Ok(()),
+                }
+                .expect("live");
+                assert_eq!(heap.take_released(), []);
+                let more: Vec<Value> = (0..run).map(|i| handle(&mut heap, 100 + i)).collect();
+                let made = heap.made();
+                let longer = extend(&mut heap, a, &more, End::Front).expect("room");
+                let what = format!("{dropped} {run} {holds}");
+                check(&heap, longer);
+                let want: Vec<Value> = more.iter().chain(&items[dropped..]).copied().collect();
+                let got = elements(&heap, longer);
+                assert!(
+                    got.iter()
+                        .map(|v| v.bits())
+                        .eq(want.iter().map(|v| v.bits()))
+                );
+                let mut now = heap.take_released();
+                now.sort_unstable();
+                if holds == "nothing" {
+                    assert_eq!(heap.made() == made, run <= dropped, "{what}");
+                    assert_eq!(now, (0..dropped as u64).collect::<Vec<_>>(), "{what}");
+                    // The others go into the places that are `Nil` now.
+                    if run < dropped {
+                        let one = handle(&mut heap, 200);
+                        let made = heap.made();
+                        let longer = push(&mut heap, longer, one, End::Front).expect("room");
+                        check(&heap, longer);
+                        assert_eq!(heap.made(), made, "{what}");
+                        assert_eq!(elements(&heap, longer)[1].bits(), want[0].bits());
+                        assert_eq!(heap.take_released(), []);
+                    }
+                } else {
+                    assert_eq!(now, [], "{what}");
+                }
+                let held = match holds {
+                    "the array" => a,
+                    "the leaf" => leaf,
+                    _ => Value::NIL,
+                };
+                if holds == "the array" {
+                    let old = elements(&heap, a);
+                    assert!(
+                        old.iter()
+                            .map(|v| v.bits())
+                            .eq(items[dropped..].iter().map(|v| v.bits()))
+                    );
+                }
+                release(&mut heap, longer).expect("live");
+                release(&mut heap, held).expect("live");
+                assert_eq!(heap.live(), 0, "{what}");
+            }
         }
     }
-    assert_eq!(word(concat(&mut heap, a, live)), Err(Fault::DeadCell));
-    assert_eq!(word(concat(&mut heap, live, a)), Err(Fault::DeadCell));
-    assert_eq!(word(slice(&mut heap, a, 1, 2)), Err(Fault::DeadCell));
-    assert_eq!(word(skip(&mut heap, a, 1)), Err(Fault::DeadCell));
-    assert_eq!(word(skip(&mut heap, a, 0)), Err(Fault::DeadCell));
-    release(&mut heap, live).expect("a live cell");
+}
+
+/// A slice to the end of a tree that nothing else holds is the tree, with its start moved
+/// up, unless that leaves 32 or fewer and gives up as many. What is then left is copied to
+/// one cell, and so is what is left of a tree that something else holds.
+#[test]
+fn a_slice_off_the_front_of_a_tree_stays_the_tree() {
+    for n in [33usize, 34, 40, 63, 64, 65, 66, 97, 100] {
+        for from in 0..n {
+            for held in [false, true] {
+                let mut heap = Heap::default();
+                let items: Vec<Value> =
+                    (0..n).map(|i| string(&mut heap, &format!("{i}"))).collect();
+                let a = from_values(&mut heap, &items).expect("room");
+                if held {
+                    heap.own(a).expect("live");
+                }
+                let r = root(&heap, a);
+                let made = heap.made();
+                let cut = slice(&mut heap, a, from, n).expect("room");
+                let what = format!("{n} {from} {held}");
+                check(&heap, cut);
+                let left: Vec<String> = (from..n).map(|i| i.to_string()).collect();
+                assert_eq!(texts(&heap, cut), left, "{what}");
+                let kept = n - from;
+                let in_tail = from >= n - leaf_items(&heap, r.tail).len();
+                let tree = kept > B || (kept > from && !held && !in_tail);
+                assert_eq!(!is_flat(&heap, cut), tree || from == 0, "{what}");
+                if tree && !held && r.shift == 0 {
+                    assert_eq!(cut.bits(), a.bits(), "{what}");
+                    assert_eq!(heap.made(), made, "{what}");
+                }
+                release(&mut heap, cut).expect("live");
+                if held {
+                    assert_eq!(texts(&heap, a).len(), n, "{what}");
+                    check(&heap, a);
+                    release(&mut heap, a).expect("live");
+                }
+                assert_eq!(heap.live(), 0, "{what}");
+            }
+        }
+    }
+}
+
+/// An array that is pushed to and cut again by turns, at any ends of it, makes few cells for
+/// each turn, whatever its length, and at 32 and 33 too.
+#[test]
+fn an_array_that_hovers_is_not_copied_each_time() {
+    for n in 28..=70usize {
+        for by in 1..=4usize {
+            for built in [End::Front, End::Back] {
+                for (put, cuts) in [
+                    (End::Back, "slice"),
+                    (End::Back, "walk"),
+                    (End::Front, "walk"),
+                ] {
+                    let mut heap = Heap::default();
+                    let mut a = Value::EMPTY_ARRAY;
+                    let mut want = std::collections::VecDeque::new();
+                    for i in 0..n as i64 {
+                        a = push(&mut heap, a, small(i), built).expect("room");
+                        match built {
+                            End::Front => want.push_front(i),
+                            End::Back => want.push_back(i),
+                        }
+                    }
+                    let made = heap.made();
+                    let turns = 400;
+                    for t in 0..turns {
+                        let items: Vec<i64> = (0..by as i64).map(|i| 1000 + t * 10 + i).collect();
+                        let more: Vec<Value> = items.iter().map(|i| small(*i)).collect();
+                        a = extend(&mut heap, a, &more, put).expect("room");
+                        match put {
+                            End::Back => want.extend(items),
+                            End::Front => items.into_iter().rev().for_each(|i| want.push_front(i)),
+                        }
+                        a = match cuts {
+                            "slice" => slice(&mut heap, a, by, n + by),
+                            _ => skip(&mut heap, a, by),
+                        }
+                        .expect("room");
+                        want.drain(..by);
+                        check(&heap, a);
+                        assert!(ints(&heap, a).iter().eq(&want));
+                    }
+                    let each = (heap.made() - made) as f64 / turns as f64;
+                    let what = format!("{n} {by} {built:?} {put:?} {cuts}: {each}");
+                    assert!(each <= 3.2, "{what}");
+                    release(&mut heap, a).expect("live");
+                    assert_eq!(heap.live(), 0);
+                }
+            }
+        }
+    }
+}
+
+/// A push on a tree of as many elements as a word counts is refused, and has given up what
+/// it was handed.
+#[test]
+fn a_push_on_the_longest_tree_gives_up_what_it_was_handed() {
+    let mut heap = Heap::default();
+    let seven = string(&mut heap, "seven");
+    let mut half = from_values(&mut heap, &[seven]).expect("room");
+    // All the powers of two below 2^64 together.
+    let mut all = Value::EMPTY_ARRAY;
+    for _ in 0..64 {
+        heap.own(half).expect("live");
+        all = concat(&mut heap, all, half).expect("room");
+        let twice = joined(&mut heap, half, half);
+        release(&mut heap, half).expect("live");
+        half = twice.unwrap_or(Value::EMPTY_ARRAY);
+    }
+    assert_eq!(len(&heap, all), usize::MAX);
+    for i in [-1, -2, -3, -1000, i64::MIN] {
+        let cell = all.as_cell().expect("a cell");
+        assert!(matches!(near(&heap, cell, i), Near::Past), "{i}");
+        let wrote = set_alone(&mut heap, cell, i, small(1));
+        assert!(matches!(wrote, Ok(Wrote::Past)), "{i}");
+    }
+    let live = heap.live();
+    for held in [false, true] {
+        for end in [End::Front, End::Back] {
+            for n in [1, 2, 40] {
+                heap.own(all).expect("live");
+                let kept = held.then(|| heap.own(all).expect("live"));
+                let items: Vec<Value> = (0..n).map(|_| string(&mut heap, "x")).collect();
+                let pushed = extend(&mut heap, all, &items, end);
+                assert_eq!(word(pushed), Err(Fault::Full), "{held} {end:?} {n}");
+                assert_eq!(heap.live(), live, "{held} {end:?} {n}");
+                if let Some(kept) = kept {
+                    release(&mut heap, kept).expect("live");
+                }
+            }
+        }
+    }
+    assert_eq!(heap.audit([all].into_iter()), Ok(()));
+    // And when it is its holder's alone.
+    let x = string(&mut heap, "x");
+    let pushed = push(&mut heap, all, x, End::Back);
+    assert_eq!(word(pushed), Err(Fault::Full));
     assert_eq!(heap.live(), 0);
 }
 
+/// A step of a walk that takes the array and nothing else holds moves a leaf of a tree of
+/// two up to be its head with no cell made.
+#[test]
+fn a_walk_past_the_head_changes_the_root_in_place() {
+    for head in [false, true] {
+        let mut heap = Heap::default();
+        let items: Vec<Value> = (0..40)
+            .map(|i| string(&mut heap, &format!("{i}")))
+            .collect();
+        let a = from_values(&mut heap, &items).expect("room");
+        let made = heap.made();
+        let found = super::uncons_owned(&mut heap, a.as_cell().expect("a cell"), head);
+        let (first, left) = found.expect("room").expect("one");
+        assert_eq!(left.bits(), a.bits());
+        assert_eq!(heap.made(), made);
+        check(&heap, left);
+        assert_eq!(texts(&heap, left).len(), 39);
+        assert_eq!(head, first.as_cell().is_some());
+        release(&mut heap, first).expect("live");
+        release(&mut heap, left).expect("live");
+        assert_eq!(heap.live(), 0);
+    }
+}
+
+/// A tree that loses none of its elements is the array it was, and needs no room.
+#[test]
+fn a_cut_of_nothing_makes_no_cell() {
+    let mut heap = Heap::default();
+    let items: Vec<Value> = (0..100).map(small).collect();
+    let a = from_values(&mut heap, &items).expect("room");
+    heap.limit_to(heap.words_used());
+    let made = heap.made();
+    for held in [false, true] {
+        if held {
+            heap.own(a).expect("live");
+        }
+        for whole in [skip(&mut heap, a, 0), slice(&mut heap, a, 0, 100)] {
+            assert_eq!(word(whole), Ok(a.bits()), "{held}");
+            assert_eq!(heap.made(), made, "{held}");
+        }
+        assert!(root(&heap, a).head.as_cell().is_none());
+        assert_eq!(heap.unique(a.as_cell().expect("a cell")), Ok(!held));
+    }
+}
+
+/// Everything that is handed an array gives up the caller's reference, so on one that
+/// was already freed it stops instead of freeing it again.
+#[test]
+fn whatever_is_done_to_a_freed_array_is_a_dead_cell() {
+    let mut heap = Heap::default();
+    let live = array_of(&mut heap, 0..3);
+    let cells = heap.live();
+    let x = Value::int(7).expect("small");
+    for n in [1, 5, 32, 40] {
+        let a = array_of(&mut heap, 0..n);
+        let freed = stored(&heap, a);
+        release(&mut heap, a).expect("a live cell");
+        assert_eq!(heap.live(), cells);
+        let dead = Err(Fault::DeadCell);
+        for end in [End::Front, End::Back] {
+            assert_eq!(word(super::push(&mut heap, freed, x, end)), dead, "{n}");
+            // So they do with more items than a leaf has room for, which are not
+            // tried for a leaf.
+            for k in [0, 1, 2, B - 1, B, B + 8] {
+                let run = super::extend(&mut heap, freed, &vec![x; k], end);
+                assert_eq!(word(run), dead, "{n} {k}");
+            }
+        }
+        assert_eq!(word(super::set(&mut heap, freed, 0, x)), dead, "{n}");
+        for from in [0, 1] {
+            assert_eq!(word(super::skip(&mut heap, freed, from + 1)), dead);
+            assert_eq!(word(super::slice(&mut heap, freed, from, 1)), dead);
+        }
+        let kept = stored(&heap, live);
+        for (l, r) in [(freed, kept), (kept, freed), (freed, freed)] {
+            heap.own(live).expect("live");
+            assert_eq!(word(super::concat(&mut heap, l, r)), dead);
+        }
+        let first = match freed {
+            Stored::Flat(flat) => flat::uncons(&mut heap, flat, true).map(|_| ()),
+            Stored::Tree(cell) => super::uncons(&mut heap, cell, true).map(|_| ()),
+            Stored::Empty => Ok(()),
+        };
+        if n > 32 {
+            assert_eq!(first, dead.map(|_: u64| ()));
+            let cell = a.as_cell().expect("a tree");
+            assert_eq!(leave_first(&mut heap, cell).map(|v| v.is_none()), Ok(true));
+        }
+        let cell = a.as_cell().expect("a cell");
+        assert_eq!(heap.live(), cells, "{n}");
+        assert!(flat::take_first(&mut heap, cell).is_none());
+        let wrote = flat::set_alone(&mut heap, cell, 0, x);
+        assert!(matches!(wrote, Near::Other));
+        assert!(!flat::push_alone(&mut heap, cell, x, End::Back));
+    }
+}
+
 /// With no room for the tail, the first element is left with the references it had, and
-/// the array is still there.
+/// the array is still there, unless it was taken. One that is taken and nothing else holds
+/// needs room only where its tree has a branch, and is given up where there is none.
 #[test]
 fn a_first_element_with_no_room_for_the_others_is_left_as_it_was() {
-    let three = |heap: &mut Heap| {
-        let all = ["a", "b", "c"].map(|name| string(heap, name));
-        (all, from_values(heap, &all).expect("room"))
-    };
-    let mut room = Heap::default();
-    three(&mut room);
-    for taken in [false, true] {
-        let mut heap = Heap::limited(room.words_used());
-        let ([first, ..], a) = three(&mut heap);
-        let got = uncons(&mut heap, a, true, taken);
-        assert!(matches!(got, Err(Fault::Full)));
-        let first = first.as_cell().expect("a string");
-        assert_eq!(heap.unique(first), Ok(true));
-        assert_eq!(heap.unique(a.as_cell().expect("a tree")), Ok(true));
-        assert_eq!(texts(&heap, a), ["a", "b", "c"]);
+    let names: Vec<String> = (0..100).map(|i| format!("s{i}")).collect();
+    for n in [3, 32, 40, 100] {
+        let whole = |heap: &mut Heap| {
+            let all: Vec<Value> = names[..n].iter().map(|s| string(heap, s)).collect();
+            (all[0], from_values(heap, &all).expect("room"))
+        };
+        let mut room = Heap::default();
+        whole(&mut room);
+        for taken in [false, true] {
+            let mut heap = Heap::limited(room.words_used());
+            let (first, a) = whole(&mut heap);
+            let got = uncons(&mut heap, a, true, taken);
+            if taken {
+                assert_eq!(matches!(got, Err(Fault::Full)), n == 100, "{n}");
+                if n == 100 {
+                    assert_eq!(heap.live(), 0);
+                }
+                continue;
+            }
+            assert!(matches!(got, Err(Fault::Full)));
+            let first = first.as_cell().expect("a string");
+            assert_eq!(heap.unique(first), Ok(true));
+            assert_eq!(heap.unique(a.as_cell().expect("a cell")), Ok(true));
+            assert_eq!(texts(&heap, a), names[..n]);
+        }
     }
 }
 
@@ -643,7 +1043,7 @@ fn what_is_no_tree_has_no_elements() {
     let leaf = leaf(&mut heap, &[small(1)]).expect("room");
     for v in [freed, Value::cell(other), range, leaf] {
         let cell = v.as_cell().expect("a cell");
-        assert!(super::elements(&heap, cell).is_empty());
+        assert!(elements_of_tree(&heap, cell).is_empty());
         assert_eq!(Seq::Tree(cell).len(&heap), 0);
         assert!(super::get(&heap, cell, 0).is_none());
         let found = seq(&heap, v);
@@ -657,27 +1057,28 @@ fn what_is_no_tree_has_no_elements() {
     }
 }
 
-/// A freed array cannot be shared back to life, so an owned push does not
-/// take it for one it may change in place.
+/// A freed array cannot be shared back to life, so a push does not take it for one it may
+/// change in place.
 #[test]
-fn an_owned_push_onto_a_freed_array_is_a_dead_cell_after_a_share_is_refused() {
-    let mut heap = Heap::default();
-    let a = array_of(&mut heap, 0..3);
-    release(&mut heap, a).expect("a live cell");
-    assert_eq!(heap.own(a).map(Value::bits), Err(DeadCell));
-    let x = Value::int(7).expect("small");
-    assert_eq!(
-        word(push_owned(&mut heap, a, x, End::Back)),
-        Err(Fault::DeadCell)
-    );
-    assert_eq!(heap.live(), 0);
+fn a_push_onto_a_freed_array_is_a_dead_cell_after_a_share_is_refused() {
+    for n in [3, 40] {
+        let mut heap = Heap::default();
+        let a = array_of(&mut heap, 0..n);
+        let freed = stored(&heap, a);
+        release(&mut heap, a).expect("a live cell");
+        assert_eq!(heap.own(a).map(Value::bits), Err(DeadCell));
+        let x = Value::int(7).expect("small");
+        let pushed = super::push(&mut heap, freed, x, End::Back);
+        assert_eq!(word(pushed), Err(Fault::DeadCell));
+        assert_eq!(heap.live(), 0);
+    }
 }
 
-fn small(n: i64) -> Value {
+pub(super) fn small(n: i64) -> Value {
     Value::int(n).expect("small")
 }
 
-fn text(heap: &Heap, v: Value) -> String {
+pub(super) fn text(heap: &Heap, v: Value) -> String {
     let mut out = Vec::new();
     if let Some(c) = v.as_cell() {
         heap.read_string(c, &mut out);
@@ -685,14 +1086,14 @@ fn text(heap: &Heap, v: Value) -> String {
     String::from_utf8(out).expect("UTF-8")
 }
 
-fn texts(heap: &Heap, a: Value) -> Vec<String> {
+pub(super) fn texts(heap: &Heap, a: Value) -> Vec<String> {
     elements(heap, a)
         .into_iter()
         .map(|v| text(heap, v))
         .collect()
 }
 
-fn string(heap: &mut Heap, s: &str) -> Value {
+pub(super) fn string(heap: &mut Heap, s: &str) -> Value {
     Value::cell(heap.string(s.as_bytes()).expect("room"))
 }
 
@@ -706,7 +1107,7 @@ fn a_write_to_an_array_with_one_holder_makes_no_cell() {
         let mut a = array_of(&mut heap, 0..n);
         // A head too, so all three parts of the root are written.
         for k in 0..3 {
-            a = push_owned(&mut heap, a, small(-100 - k), End::Front).expect("room");
+            a = push(&mut heap, a, small(-100 - k), End::Front).expect("room");
         }
         let mut want = ints(&heap, a);
         let made = heap.made();
@@ -734,8 +1135,8 @@ fn a_write_to_a_held_array_copies_one_node_a_level() {
     let mut heap = Heap::default();
     // The size, an index, and the nodes from the root to its slot.
     for (n, i, path) in [
-        (1, 0, 2),
-        (32, 31, 2),
+        (1, 0, 1),
+        (32, 31, 1),
         (33, 0, 2),
         (33, 32, 2),
         (1025, 500, 3),
@@ -772,7 +1173,7 @@ fn a_write_to_a_held_array_copies_one_node_a_level() {
 fn a_write_under_a_root_of_its_own_copies_only_what_is_shared() {
     let mut heap = Heap::default();
     let a = array_of(&mut heap, 0..2000);
-    let b = push(&mut heap, a, small(2000), End::Back).expect("room");
+    let b = pushed_on(&mut heap, a, small(2000), End::Back).expect("room");
     let made = heap.made();
     let c = set(&mut heap, b, 100, small(-1)).expect("room");
     assert_eq!(c.bits(), b.bits(), "the root was this array's alone");
@@ -826,7 +1227,7 @@ fn a_write_to_an_array_walked_part_way_counts_from_its_own_front() {
     let mut heap = Heap::default();
     for k in [1, 5, 31, 32, 33, 70] {
         let whole = array_of(&mut heap, 0..200);
-        let rest = skip(&mut heap, whole, k).expect("room");
+        let rest = without(&mut heap, whole, k).expect("room");
         let wrote = set(&mut heap, rest, 0, small(-1)).expect("room");
         let wrote = set(&mut heap, wrote, 3, small(-3)).expect("room");
         check(&heap, wrote);
@@ -837,7 +1238,7 @@ fn a_write_to_an_array_walked_part_way_counts_from_its_own_front() {
         assert_eq!(ints(&heap, whole), (0..200).collect::<Vec<_>>());
         release(&mut heap, whole).expect("a live cell");
         let made = heap.made();
-        let alone = skip_owned(&mut heap, wrote, 2).expect("room");
+        let alone = skip(&mut heap, wrote, 2).expect("room");
         let alone = set(&mut heap, alone, 0, small(-9)).expect("room");
         want.drain(..2);
         want[0] = -9;
@@ -900,24 +1301,24 @@ fn writes_among_other_edits_leave_every_kept_version_alone() {
                 0 | 1 => {
                     let name = format!("b{step}");
                     let x = string(&mut heap, &name);
-                    a = push_owned(&mut heap, a, x, End::Back).expect("room");
+                    a = push(&mut heap, a, x, End::Back).expect("room");
                     want.push(name);
                 }
                 2 => {
                     let name = format!("f{step}");
                     let x = string(&mut heap, &name);
-                    a = push_owned(&mut heap, a, x, End::Front).expect("room");
+                    a = push(&mut heap, a, x, End::Front).expect("room");
                     want.insert(0, name);
                 }
                 3 if !want.is_empty() => {
-                    a = skip_owned(&mut heap, a, 1).expect("room");
+                    a = skip(&mut heap, a, 1).expect("room");
                     want.remove(0);
                 }
                 4 if next(8) == 0 => {
                     let more: Vec<String> = (0..next(90)).map(|k| format!("j{step}.{k}")).collect();
                     let items: Vec<Value> = more.iter().map(|s| string(&mut heap, s)).collect();
                     let piece = from_values(&mut heap, &items).expect("room");
-                    let joined = concat(&mut heap, a, piece).expect("room");
+                    let joined = joined(&mut heap, a, piece).expect("room");
                     release(&mut heap, a).expect("a live cell");
                     release(&mut heap, piece).expect("a live cell");
                     a = joined;
@@ -928,7 +1329,7 @@ fn writes_among_other_edits_leave_every_kept_version_alone() {
                         (0..next(90)).map(|k| format!("r{step}.{k}")).collect();
                     let run: Vec<Value> = names.iter().map(|s| string(&mut heap, s)).collect();
                     let end = if next(2) == 0 { End::Front } else { End::Back };
-                    a = extend_owned(&mut heap, a, &run, end).expect("room");
+                    a = extend(&mut heap, a, &run, end).expect("room");
                     let at = if end == End::Front { 0 } else { want.len() };
                     want.splice(at..at, names);
                 }
@@ -976,18 +1377,24 @@ fn writes_among_other_edits_leave_every_kept_version_alone() {
                     let mut out = [Value::NIL; 4];
                     let out = &mut out[..n.min(4)];
                     let fitting = fits(want.len() as u64, length);
-                    match split_of(&heap, a, split, out) {
-                        Found::Miss => assert!(!fitting),
-                        Found::All => {
-                            near += 1;
-                            assert!(fitting);
+                    if let Stored::Flat(flat) = stored(&heap, a) {
+                        if fitting {
+                            flat.read_run(&heap, from, out);
                         }
-                        Found::Apart(r) => {
-                            apart += 1;
-                            assert!(fitting);
-                            assert_eq!(run(&heap, &r, from, out), out.len());
+                    } else {
+                        match split_of(&heap, a, split, out) {
+                            Found::Miss => assert!(!fitting),
+                            Found::All => {
+                                near += 1;
+                                assert!(fitting);
+                            }
+                            Found::Other => panic!("not a tree"),
+                            Found::Apart(r) => {
+                                apart += 1;
+                                assert!(fitting);
+                                assert_eq!(run(&heap, &r, from, out), out.len());
+                            }
                         }
-                        Found::Range(_) => panic!("seed {seed} step {step}"),
                     }
                     if fitting {
                         for (i, v) in out.iter().enumerate() {
@@ -1031,17 +1438,17 @@ fn grown(heap: &mut Heap, n: i64) -> Vec<Value> {
     let whole = array_of(heap, 0..n);
     let (mut back, mut front) = (array_of(heap, 0..0), array_of(heap, 0..0));
     for i in 0..n {
-        back = push_owned(heap, back, small(i), End::Back).expect("room");
-        front = push_owned(heap, front, small(n - 1 - i), End::Front).expect("room");
+        back = push(heap, back, small(i), End::Back).expect("room");
+        front = push(heap, front, small(n - 1 - i), End::Front).expect("room");
     }
     // One element is left in what was its first leaf.
     let more = array_of(heap, -31..n);
-    let cut = skip_owned(heap, more, 31).expect("room");
+    let cut = skip(heap, more, 31).expect("room");
     let mut pushed = array_of(heap, -31..n);
-    pushed = push_owned(heap, pushed, small(-32), End::Front).expect("room");
-    pushed = skip_owned(heap, pushed, 32).expect("room");
+    pushed = push(heap, pushed, small(-32), End::Front).expect("room");
+    pushed = skip(heap, pushed, 32).expect("room");
     let (a, b) = (array_of(heap, 0..n / 3), array_of(heap, n / 3..n));
-    let joined = concat(heap, a, b).expect("room");
+    let joined = joined(heap, a, b).expect("room");
     for part in [a, b] {
         release(heap, part).expect("a live cell");
     }
@@ -1058,6 +1465,20 @@ fn a_run_of_elements_is_found_over_any_leaves() {
         for a in grown(&mut heap, n) {
             check(&heap, a);
             let n = usize::try_from(n).expect("small");
+            if is_flat(&heap, a) {
+                for from in 0..n {
+                    let mut out = vec![Value::NIL; (n - from).min(4)];
+                    let Stored::Flat(flat) = stored(&heap, a) else {
+                        panic!("no short array");
+                    };
+                    flat.read_run(&heap, from, &mut out);
+                    let got: Vec<_> = out.iter().map(|v| int(*v)).collect();
+                    let want: Vec<_> = (from..n).take(4).map(|i| Some(i as i64)).collect();
+                    assert_eq!(got, want, "{n} {from}");
+                }
+                release(&mut heap, a).expect("a live cell");
+                continue;
+            }
             let r = root(&heap, a);
             for from in (0..n).filter(|i| *i < 70 || *i > n - 40 || *i % 97 == 0) {
                 for m in [1, 2, 4, 8, 16, 40] {
@@ -1083,7 +1504,7 @@ fn a_run_of_elements_is_found_over_any_leaves() {
                             assert!(same, "{n} {from} {m}");
                         }
                         Found::Apart(_) => assert!(from + m > leaf, "{n} {from} {m}"),
-                        Found::Miss | Found::Range(_) => panic!("{n} {from} {m}"),
+                        Found::Miss | Found::Other => panic!("{n} {from} {m}"),
                     }
                 }
             }
@@ -1097,7 +1518,7 @@ fn a_run_of_elements_is_found_over_any_leaves() {
 #[test]
 fn a_run_ends_where_the_elements_do() {
     let mut heap = Heap::default();
-    for n in [3, 40] {
+    for n in [33, 40] {
         let a = array_of(&mut heap, 0..n);
         let mut r = root(&heap, a);
         r.len += 5;
@@ -1109,44 +1530,34 @@ fn a_run_ends_where_the_elements_do() {
     }
 }
 
-/// A write gives up the caller's reference, so on an array that was
-/// already freed it stops instead of writing into the freed cell. A
-/// node freed behind the array's back stops it the same way.
+/// A node freed behind the array's back stops a write to it.
 #[test]
-fn a_write_to_a_freed_array_or_through_a_freed_node_is_a_dead_cell() {
+fn a_write_through_a_freed_node_is_a_dead_cell() {
     let mut heap = Heap::default();
-    let a = array_of(&mut heap, 0..40);
-    release(&mut heap, a).expect("a live cell");
-    assert_eq!(word(set(&mut heap, a, 0, small(7))), Err(Fault::DeadCell));
-    assert_eq!(heap.live(), 0);
-
-    let b = array_of(&mut heap, 0..3);
+    let b = array_of(&mut heap, 0..35);
     let tail = root(&heap, b).tail.as_cell().expect("a tail leaf");
     heap.release(tail).expect("a live cell");
-    assert_eq!(word(set(&mut heap, b, 1, small(7))), Err(Fault::DeadCell));
+    assert_eq!(word(set(&mut heap, b, 33, small(7))), Err(Fault::DeadCell));
 
     // A share does not bring a freed leaf back as one to copy.
-    let c = array_of(&mut heap, 0..3);
+    let c = array_of(&mut heap, 0..35);
     let tail = root(&heap, c).tail.as_cell().expect("a tail leaf");
     heap.release(tail).expect("a live cell");
     assert_eq!(heap.share(tail), Err(DeadCell));
-    assert_eq!(word(set(&mut heap, c, 1, small(7))), Err(Fault::DeadCell));
+    assert_eq!(word(set(&mut heap, c, 33, small(7))), Err(Fault::DeadCell));
 }
 
 /// A push that cannot change the array in place builds a new one and
 /// then gives the old one up. When something freed the tail's leaf behind
 /// the array's back, the push stops there.
 #[test]
-fn an_owned_push_onto_an_array_with_a_freed_leaf_is_a_dead_cell() {
+fn a_push_onto_an_array_with_a_freed_leaf_is_a_dead_cell() {
     let mut heap = Heap::default();
-    let a = array_of(&mut heap, 0..3);
+    let a = array_of(&mut heap, 0..35);
     let tail = root(&heap, a).tail.as_cell().expect("a tail leaf");
     heap.release(tail).expect("a live cell");
     let x = Value::int(7).expect("small");
-    assert_eq!(
-        word(push_owned(&mut heap, a, x, End::Back)),
-        Err(Fault::DeadCell)
-    );
+    assert_eq!(word(push(&mut heap, a, x, End::Back)), Err(Fault::DeadCell));
 }
 
 /// An array that `grow` made is walked to its end by its first element and the others, by
@@ -1191,7 +1602,7 @@ fn a_walk_does_not_grow_faster_than_its_array() {
                     End::Back => i,
                     End::Front => n - 1 - i,
                 };
-                a = push_owned(heap, a, small(x), end).expect("room");
+                a = push(heap, a, small(x), end).expect("room");
             }
             a
         }
@@ -1233,17 +1644,25 @@ fn an_array_of_no_elements_is_never_a_cell() {
         assert_eq!(word(range(&mut heap, start, end)), empty);
     }
     for (start, end) in [(3, 6), (i64::MAX - 3, i64::MAX), (i64::MIN, i64::MIN + 3)] {
-        let s = Seq::Range { start, end };
-        for n in [3, 4, 1000, usize::MAX] {
-            assert_eq!(word(behind(&mut heap, s, n)), empty);
-        }
+        assert_eq!(range_len(start, end), 3);
         for at in 0..=3 {
-            assert_eq!(word(super::slice(&mut heap, s, at, at)), empty);
+            assert_eq!(word(slice_of_range(&mut heap, start, at, at)), empty);
         }
     }
+    for x in 0..3 {
+        assert_eq!(word(super::slice(&mut heap, Stored::Empty, x, x)), empty);
+        assert_eq!(word(super::skip(&mut heap, Stored::Empty, x)), empty);
+    }
+    let joined = super::concat(&mut heap, Stored::Empty, Stored::Empty);
+    assert_eq!(word(joined), empty);
+    let none = flat::new_flat(&mut heap, &[]).map(Stored::value);
+    assert_eq!(word(none), empty);
     assert_eq!(word(new_root(&mut heap, Root::EMPTY)), empty);
     for end in [End::Front, End::Back] {
-        assert_eq!(word(super::extend_owned(&mut heap, None, &[], end)), empty);
+        assert_eq!(
+            word(super::extend(&mut heap, Stored::Empty, &[], end)),
+            empty
+        );
     }
     // A leaf of no items is no node, and neither is a branch of no children.
     let nil = Ok(Value::NIL.bits());
@@ -1254,26 +1673,23 @@ fn an_array_of_no_elements_is_never_a_cell() {
         let mut heap = Heap::default();
         for a in grown(&mut heap, n) {
             let len = usize::try_from(n).expect("small");
-            let cell = a.as_cell().expect("a tree");
+            let cell = a.as_cell().expect("a cell");
             let made = heap.made();
             // All of it is it, and is shared.
-            let whole = slice(&mut heap, a, 0, len).expect("room");
+            let whole = cut(&mut heap, a, 0, len).expect("room");
             assert_eq!(whole.bits(), a.bits());
             release(&mut heap, whole).expect("live");
-            assert_eq!(word(super::take(&mut heap, cell, 0)), empty);
+            assert_eq!(word(front(&mut heap, a, 0)), empty);
             for past in [0, 1, 1000, usize::MAX - len] {
-                assert_eq!(word(super::skip(&mut heap, cell, len + past)), empty);
-                heap.own(a).expect("live");
-                let shared = super::skip_owned(&mut heap, cell, len + past);
-                assert_eq!(word(shared), empty);
+                assert_eq!(word(without(&mut heap, a, len + past)), empty);
             }
             for at in [0, 1, len / 2, len] {
-                assert_eq!(word(slice(&mut heap, a, at, at)), empty);
+                assert_eq!(word(cut(&mut heap, a, at, at)), empty);
             }
-            assert_eq!(word(slice(&mut heap, a, 1, 0)), empty);
+            assert_eq!(word(cut(&mut heap, a, 1, 0)), empty);
             assert_eq!(heap.made(), made);
             assert_eq!(heap.unique(cell), Ok(true));
-            let gone = super::skip_owned(&mut heap, cell, len);
+            let gone = skip(&mut heap, a, len);
             assert_eq!(word(gone), empty);
             assert_eq!(heap.made(), made);
         }
@@ -1299,9 +1715,9 @@ fn what_is_left_of_one_element_is_the_empty_array() {
                 let none = Value::EMPTY_ARRAY;
                 let mut a = match way {
                     0 => from_values(&mut heap, &[x]),
-                    1 => push_owned(&mut heap, none, x, End::Back),
-                    2 => push_owned(&mut heap, none, x, End::Front),
-                    3 => extend_owned(&mut heap, none, &[x], End::Front),
+                    1 => push(&mut heap, none, x, End::Back),
+                    2 => push(&mut heap, none, x, End::Front),
+                    3 => extend(&mut heap, none, &[x], End::Front),
                     _ => {
                         let mut all = vec![small(0); 40];
                         all.push(x);
@@ -1310,7 +1726,7 @@ fn what_is_left_of_one_element_is_the_empty_array() {
                 }
                 .expect("room");
                 let spare = len(&heap, a) - 1;
-                a = skip_owned(&mut heap, a, spare).expect("room");
+                a = skip(&mut heap, a, spare).expect("room");
                 if held {
                     heap.own(a).expect("live");
                 }
@@ -1334,30 +1750,31 @@ fn what_is_left_of_one_element_is_the_empty_array() {
     }
 }
 
-/// The empty array is grown into the same array as it was when it was a cell.
+/// The empty array is grown into the same array by a run of items and one at a time.
 #[test]
 fn the_empty_array_grows_into_the_array_it_did() {
     for n in [1, 2, 31, 32, 33, 64, 65, 1100] {
         for end in [End::Front, End::Back] {
             let mut heap = Heap::default();
             let items: Vec<Value> = (0..n).map(small).collect();
-            let run = extend_owned(&mut heap, Value::EMPTY_ARRAY, &items, end).expect("room");
+            let run = extend(&mut heap, Value::EMPTY_ARRAY, &items, end).expect("room");
             let mut each = Value::EMPTY_ARRAY;
             for i in 0..n {
                 let x = match end {
                     End::Back => i,
                     End::Front => n - 1 - i,
                 };
-                each = push_owned(&mut heap, each, small(x), end).expect("room");
+                each = push(&mut heap, each, small(x), end).expect("room");
                 check(&heap, each);
             }
-            assert_eq!(shape(&heap, run), shape(&heap, each));
+            // A run that is all there is is packed, with nothing in front.
+            if n <= 32 || end == End::Back {
+                assert_eq!(shape(&heap, run), shape(&heap, each));
+            }
             assert_eq!(ints(&heap, run), (0..n).collect::<Vec<_>>());
-            // The first item goes to the buffer at that end.
-            let one = push(&mut heap, Value::EMPTY_ARRAY, small(7), end).expect("room");
-            let r = root(&heap, one);
-            let (near, far) = end.turn(r.head, r.tail);
-            assert!(near.as_cell().is_some() && far.as_cell().is_none());
+            assert_eq!(ints(&heap, each), (0..n).collect::<Vec<_>>());
+            let one = pushed_on(&mut heap, Value::EMPTY_ARRAY, small(7), end).expect("room");
+            assert!(is_flat(&heap, one));
             for a in [one, run, each] {
                 release(&mut heap, a).expect("live");
             }
@@ -1369,14 +1786,22 @@ fn the_empty_array_grows_into_the_array_it_did() {
 /// A cell of no elements, which nothing makes, has no first element, and it says so
 /// rather than give a tail that counts below none.
 #[test]
-fn a_root_of_no_elements_has_no_first_one() {
+fn a_cell_of_no_elements_has_no_first_one() {
     let mut heap = Heap::default();
     let cell = a_root_of_none(&mut heap);
-    for (head, taken) in [(true, true), (false, true), (true, false), (false, false)] {
-        let found = super::uncons(&mut heap, cell, head, taken);
-        assert!(matches!(found, Ok(None)));
+    let none = [Value::NIL.bits(); 4].into_iter().chain([0]);
+    let words: Vec<u64> = none.collect();
+    let flat = heap.make(Kind::ArrayFlat, &words).expect("room");
+    for head in [true, false] {
+        assert!(matches!(super::uncons(&mut heap, cell, head), Ok(None)));
+        let of = Flat::of(&heap, flat).expect("a short array's cell");
+        assert_eq!(of.len(), 0);
+        assert!(matches!(flat::uncons(&mut heap, of, head), Ok(None)));
+        assert!(flat::take_first(&mut heap, flat).is_none());
+        assert!(matches!(leave_first(&mut heap, cell), Ok(None)));
     }
     assert_eq!(heap.unique(cell), Ok(true));
+    assert_eq!(heap.unique(flat), Ok(true));
 }
 
 /// Nothing happens to the empty array when it is written, and what was to go in is given
@@ -1386,38 +1811,9 @@ fn a_write_to_the_empty_array_gives_up_the_value() {
     let mut heap = Heap::default();
     for i in [0, 1, usize::MAX] {
         let x = string(&mut heap, "never stored");
-        let same = super::set(&mut heap, None, i, x);
+        let same = super::set(&mut heap, Stored::Empty, i, x);
         assert_eq!(word(same), Ok(Value::EMPTY_ARRAY.bits()));
         assert_eq!(heap.live(), 0);
-    }
-}
-
-/// An empty array has the lengths it fits and no elements, as any array has.
-#[test]
-fn the_empty_array_is_split_as_any_is() {
-    let heap = Heap::default();
-    for len in [0, 1, 2, u32::MAX] {
-        for more in [false, true] {
-            let asked = Split {
-                length: Length { len, more },
-                from: 0,
-            };
-            let found = split_of(&heap, Value::EMPTY_ARRAY, asked, &mut []);
-            match len {
-                0 => assert!(matches!(found, Found::All)),
-                _ => assert!(matches!(found, Found::Miss)),
-            }
-        }
-    }
-    // Asked for an element that it does not have, it has none to find.
-    let asked = Split {
-        length: Length { len: 0, more: true },
-        from: 0,
-    };
-    let mut out = [Value::NIL; 2];
-    match split_of(&heap, Value::EMPTY_ARRAY, asked, &mut out) {
-        Found::Apart(r) => assert_eq!(run(&heap, &r, 0, &mut out), 0),
-        Found::All | Found::Miss | Found::Range(_) => panic!("not apart"),
     }
 }
 
@@ -1432,7 +1828,7 @@ fn there_and_back(n: i64, end: End, held: bool) -> (usize, usize) {
         if held {
             heap.own(before).expect("live");
         }
-        a = push_owned(&mut heap, a, small(i), end).expect("room");
+        a = push(&mut heap, a, small(i), end).expect("room");
         if held {
             release(&mut heap, before).expect("live");
         }
@@ -1471,16 +1867,22 @@ fn a_build_from_the_empty_array_does_not_grow_faster_than_it() {
             for n in [250, 1000, 4000] {
                 let (built, walked) = there_and_back(n, end, held);
                 let (built_2, walked_2) = there_and_back(2 * n, end, held);
-                assert!(built_2 <= built * 2 + 40, "{n} {built} {built_2}");
+                // What is short is one cell each time, and not two.
+                assert!(built_2 <= built * 2 + 100, "{n} {built} {built_2}");
                 assert!(walked_2 <= walked * 2 + 40, "{n} {walked} {walked_2}");
             }
         }
     }
-    // The first push is a root and a leaf, and each after it a leaf.
+    // A short array is in one cell of 4, 8, 16 and 32 slots in turn. The 33rd push is a root
+    // and a leaf, and each after it a leaf.
     for end in [End::Front, End::Back] {
-        for n in 1..=32 {
-            let made = usize::try_from(n).expect("small") + 1;
-            assert_eq!(there_and_back(n, end, false).0, made, "{end:?} {n}");
+        for (from, cells) in [(1, 1), (5, 2), (9, 3), (17, 4), (33, 6), (34, 7)] {
+            let to = if from < 33 { 2 * from - 2 } else { from };
+            for n in from..=to.max(from) {
+                let (built, walked) = there_and_back(n, end, false);
+                assert_eq!(built, cells, "{end:?} {n}");
+                assert!(n > 32 || walked == 0, "{end:?} {n}");
+            }
         }
     }
 }

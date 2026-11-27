@@ -113,7 +113,8 @@ fn array(heap: &Heap, seq: Seq, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
                 int(s, i128::from(n));
             }
         }
-        Seq::Tree(t) => queue(todo, array::elements(heap, t)),
+        Seq::Flat(f) => todo.extend(f.items(heap).rev()),
+        Seq::Tree(t) => queue(todo, array::elements_of_tree(heap, t)),
     }
 }
 
@@ -182,7 +183,7 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
             }
             queue(todo, parts);
         }
-        Kind::ArrayRoot | Kind::Range => {
+        Kind::ArrayFlat | Kind::ArrayRoot | Kind::Range => {
             if let Some(seq) = array::seq(heap, Value::cell(cell)) {
                 array(heap, seq, s, todo);
             }

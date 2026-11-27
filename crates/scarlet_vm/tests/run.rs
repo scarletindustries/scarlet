@@ -129,7 +129,7 @@ fn a_value_passed_on_is_still_there_for_what_reads_it_later() {
 /// register hands its reference to the branch's result, so the push after
 /// it finds one holder and writes in place both times. Before a copy could
 /// take its source, the first spelling left the array held twice and the
-/// push copied it: 4 cells against 3.
+/// push copied it.
 #[test]
 fn two_spellings_of_a_branch_make_the_same_number_of_cells() {
     prints(
@@ -165,7 +165,7 @@ fn two_spellings_of_a_branch_make_the_same_number_of_cells() {
          \tprintln(a == b)\n\
          \tprintln(a)\n\
          }\n",
-        "1\n1\n3\n3\nTrue\n[1, 2, 3, 9]\n",
+        "1\n1\n1\n1\nTrue\n[1, 2, 3, 9]\n",
     );
 }
 
@@ -222,7 +222,7 @@ fn a_value_taken_on_one_path_and_dropped_on_the_other_is_freed_once() {
          \tprintln(middle - start)\n\
          \tprintln(end - middle)\n\
          }\n",
-        "[1, 2, 3, 9]\n[0, 1, 2, 9]\n3\n5\n",
+        "[1, 2, 3, 9]\n[0, 1, 2, 9]\n1\n2\n",
     );
 }
 
@@ -552,9 +552,9 @@ fn divide_and_negate_are_right_at_both_ends_of_the_small_range() {
     );
 }
 
-/// The join of an empty array and a range is a tree, so a push on it, or a write to it,
-/// while something else holds it costs the same however long it is. A push on a range
-/// that is held builds the range as a tree each time.
+/// The join of an empty array and a range stores its elements, so a push on it, or a write
+/// to it, while something else holds it costs the same however long it is. A push on a range
+/// that is held builds the array of its elements each time.
 #[test]
 fn a_range_joined_to_the_empty_array_is_built_once() {
     prints(
@@ -593,7 +593,107 @@ fn a_range_joined_to_the_empty_array_is_built_once() {
          400 300 200200 700\n\
          400 300 200200 700\n\
          400 400 2000200 700\n\
-         7100 3400 200200 700\n",
+         7000 3400 200200 700\n",
+    );
+}
+
+/// An array that is pushed to and then loses as many again, a window, a queue or a stack of
+/// 30, 31, 32, 33 or 64, makes about one cell for each turn at most, and so does the join of
+/// two arrays of 32. What is printed is the cells of 1,000 turns in units of 120, so that 8
+/// is about one a turn.
+#[test]
+fn an_array_that_hovers_about_one_cell_makes_one_a_turn_at_most() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         \n\
+         fn build(n Int, xs Array(Int)) Array(Int) { if n == 0 { xs } else { build(n - 1, [..xs, n]) } }\n\
+         \n\
+         fn window(n Int, k Int, xs Array(Int)) Int {\n\
+         \tif n == 0 { array::length(xs) } else {\n\
+         \t\tys = [..xs, n]\n\
+         \t\twindow(n - 1, k, ys[1..k + 1] or [])\n\
+         \t}\n\
+         }\n\
+         \n\
+         fn pairs(n Int, k Int, xs Array(Int)) Int {\n\
+         \tif n == 0 { array::length(xs) } else {\n\
+         \t\tys = [..xs, n, n]\n\
+         \t\tpairs(n - 1, k, ys[2..k + 2] or [])\n\
+         \t}\n\
+         }\n\
+         \n\
+         fn front(n Int, xs Array(Int)) Int {\n\
+         \tif n == 0 { array::length(xs) } else {\n\
+         \t\tys = [n, ..xs]\n\
+         \t\tmatch ys {\n\
+         \t\t\t[_, ..t] -> front(n - 1, t)\n\
+         \t\t\t[] -> 0\n\
+         \t\t}\n\
+         \t}\n\
+         }\n\
+         \n\
+         fn threes(n Int, xs Array(Int)) Int {\n\
+         \tif n == 0 { array::length(xs) } else {\n\
+         \t\tys = [n, n, n, ..xs]\n\
+         \t\tmatch ys {\n\
+         \t\t\t[_, _, _, ..t] -> threes(n - 1, t)\n\
+         \t\t\t_ -> 0\n\
+         \t\t}\n\
+         \t}\n\
+         }\n\
+         \n\
+         fn cost(k Int, f fn(Array(Int)) Int) Int {\n\
+         \txs = build(k, [])\n\
+         \tmade = internal::cells_made()\n\
+         \tn = f(xs)\n\
+         \t{ internal::cells_made() - made + n * 0 } / 120\n\
+         }\n\
+         \n\
+         fn joins(n Int, xs Array(Int), acc Int) Int {\n\
+         \tif n == 0 { acc } else { joins(n - 1, xs, acc + array::length([..xs, ..xs])) }\n\
+         }\n\
+         \n\
+         pub fn main() {\n\
+         \tarray::each([30, 31, 32, 33, 64], fn(k) {\n\
+         \t\ta = cost(k, fn(xs) window(1000, k, xs))\n\
+         \t\tb = cost(k, fn(xs) pairs(1000, k, xs))\n\
+         \t\tc = cost(k, fn(xs) front(1000, xs))\n\
+         \t\td = cost(k, fn(xs) threes(1000, xs))\n\
+         \t\tprintln(\"${k}: ${a} ${b} ${c} ${d}\")\n\
+         \t})\n\
+         \tprintln(cost(32, fn(xs) joins(1000, xs, 0)))\n\
+         }\n",
+        "30: 0 0 0 8\n31: 0 9 0 8\n32: 8 9 8 8\n33: 8 8 8 8\n64: 8 8 8 8\n8\n",
+    );
+}
+
+/// An index below 0 is in no array, however long that is. Neither write makes the elements
+/// of the range.
+#[test]
+fn an_index_below_0_misses_in_the_longest_arrays() {
+    prints(
+        "import scarlet/array\n\
+         fn all(xs Array(Int), acc Array(Int), n Int) Array(Int) {\n\
+         \tif n == 0 { [..xs, ..acc] } else { all([..xs, ..xs], [..xs, ..acc], n - 1) }\n\
+         }\n\
+         fn read(xs Array(Int), i Int) {\n\
+         \tset = match array::set(xs, i, 8) { Ok(_) -> \"wrote\"\n Err(_) -> \"missed\" }\n\
+         \tput = array::put(xs, i, 9)[i] or 0\n\
+         \tprintln(\"${xs[i] or 0} ${set} ${put}\")\n\
+         }\n\
+         fn reads(xs Array(Int)) {\n\
+         \tprintln(array::length(xs))\n\
+         \tarray::each([-1, -2, -3, -5, -1000], fn(i) read(xs, i))\n\
+         }\n\
+         pub fn main() {\n\
+         \treads(all([7], [], 63))\n\
+         \treads(-9223372036854775807..9223372036854775807)\n\
+         }\n",
+        "18446744073709551615\n\
+         0 missed 0\n0 missed 0\n0 missed 0\n0 missed 0\n0 missed 0\n\
+         18446744073709551614\n\
+         0 missed 0\n0 missed 0\n0 missed 0\n0 missed 0\n0 missed 0\n",
     );
 }
 
@@ -1777,7 +1877,7 @@ fn an_update_writes_a_record_in_place_when_nothing_else_holds_it() {
             1000,
             "1 b [0] 1.5 1001",
         ),
-        ("O(P(..made(n), a: 7), o.n + 1)", 5000, "7 b [1] 0.5 1001"),
+        ("O(P(..made(n), a: 7), o.n + 1)", 4000, "7 b [1] 0.5 1001"),
         ("O(P(..o.p, a: n), o.n)", 2000, "1 b [0] 0.5 0"),
     ] {
         prints(&src(step), &format!("{cells}\n{shown}\n"));
@@ -2218,7 +2318,7 @@ fn the_listing_shows_the_empty_array() {
 }
 
 /// Nothing that gives an empty array makes a cell for it, and what is grown from one
-/// makes its own two cells and no more.
+/// makes its own cell and no more.
 #[test]
 fn the_empty_array_makes_no_cell() {
     let made = |what: &str| {
@@ -2276,14 +2376,13 @@ fn the_empty_array_makes_no_cell() {
     for what in nothing {
         assert_eq!(made(what), "0\n", "{what}");
     }
-    // The array that is taken apart has two cells, one of two has two more for what is
-    // left of it, and a range has one. A `filter` and a `map` make a closure for their
-    // loop.
+    // The array that is taken apart has one cell, and so has a range. A `filter` and a `map`
+    // make a closure for their loop.
     for (what, cells) in [
-        ("rest([n])", 2),
+        ("rest([n])", 1),
         ("rest(n..n + 1)", 1),
-        ("drop([n, n], 2)", 4),
-        ("drop(build(1, []), 1)", 2),
+        ("drop([n, n], 2)", 1),
+        ("drop(build(1, []), 1)", 1),
         ("array::filter(xs, fn(x) x > 1)", 1),
         ("array::map(xs, fn(x) x + 1)", 1),
     ] {

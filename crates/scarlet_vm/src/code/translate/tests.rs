@@ -2226,7 +2226,7 @@ fn what_a_probe_finds_has_the_register_of_what_dies() {
             "Ret(move r2)",
             "Drop(r2)",
             "r2 = Const(true)",
-            "r2 = Array(r2)",
+            "r2 = Array(move r2)",
             "Jump -> 4",
         ]
     );
@@ -2558,14 +2558,14 @@ fn a_spread_pushes_what_is_beside_it() {
     assert_eq!(f("[..xs, b]")[0], "r2 = ArrayPush(move r2, move r4, Back)");
     assert_eq!(
         f("[b, a, ..xs]")[0],
-        "r2 = ArrayExtend(move r2, r4, r3, Front)"
+        "r2 = ArrayExtend(move r2, move r4, move r3, Front)"
     );
     let both = f("[a, ..xs, b, a]");
     assert_eq!(
         both[..2],
         [
             "r2 = ArrayPush(move r2, r3, Front)",
-            "r2 = ArrayExtend(move r2, r4, r3, Back)",
+            "r2 = ArrayExtend(move r2, move r4, move r3, Back)",
         ],
         "{both:?}"
     );

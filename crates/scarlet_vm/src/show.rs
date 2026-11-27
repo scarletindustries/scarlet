@@ -106,8 +106,15 @@ fn value<'t>(
                 None => return Err(Stop::broken(Broken::ClosureCell)),
             },
             Some(Kind::Tuple) => tuple(heap, code, cell, layout, out, todo)?,
-            Some(Kind::ArrayRoot | Kind::Range) => match array::seq(heap, v) {
-                Some(Seq::Tree(cell)) => array(heap, code, cell, layout, out, todo)?,
+            Some(Kind::ArrayFlat | Kind::ArrayRoot | Kind::Range) => match array::seq(heap, v) {
+                Some(Seq::Flat(f)) => {
+                    let elements: Vec<Value> = f.items(heap).collect();
+                    array(heap, code, &elements, layout, out, todo)?;
+                }
+                Some(Seq::Tree(t)) => {
+                    let elements = array::elements_of_tree(heap, t);
+                    array(heap, code, &elements, layout, out, todo)?;
+                }
                 Some(Seq::Range { start, end }) => range(start, end, layout, out)?,
                 Some(Seq::Empty) | None => return Err(Stop::broken(Broken::ArrayCell)),
             },
@@ -286,12 +293,11 @@ fn tuple<'t>(
 fn array<'t>(
     heap: &Heap,
     code: &'t Code,
-    cell: Cell,
+    elements: &[Value],
     layout: Layout,
     out: &mut Vec<u8>,
     todo: &mut Vec<Piece<'t>>,
 ) -> Result<(), Stop> {
-    let elements = array::elements(heap, cell);
     match layout {
         Layout::Open(n) if elements.iter().all(|e| small(heap, *e)) => {
             six_to_a_line(elements.len(), n, out, |i, out| match elements.get(i) {
@@ -426,6 +432,7 @@ fn small(heap: &Heap, v: Value) -> bool {
             Some(
                 Kind::Ctor
                 | Kind::Tuple
+                | Kind::ArrayFlat
                 | Kind::ArrayRoot
                 | Kind::ArrayLeaf
                 | Kind::ArrayBranch

@@ -401,15 +401,15 @@ instructions! {
     /// `start..end`, a range of Ints that stores only its two ends.
     Range { dst: Dst<R>, start: Src<R>, end: Src<R> },
     /// A new array of `elements`.
-    Array { dst: Dst<R>, elements: Shares<R, 8> },
-    ArrayWide { dst: Dst<R>, elements: ShareList },
+    Array { dst: Dst<R>, elements: Args<R, 8> },
+    ArrayWide { dst: Dst<R>, elements: ArgList },
     /// How many elements the array in `src` has.
     ArrayLen { dst: Dst<R>, src: Src<R> },
     /// `[x, ..xs]` or `[..xs, x]`, which is the array in `src` with `item` at `end`.
     /// When it takes `src` it may change the array in place.
     ArrayPush { dst: Dst<R>, src: Arg<R>, item: Arg<R>, end: End },
     /// The same with each of `items`, in their order.
-    ArrayExtend { dst: Dst<R>, src: Arg<R>, items: ShareList, end: End },
+    ArrayExtend { dst: Dst<R>, src: Arg<R>, items: ArgList, end: End },
     /// The first element of the array in `src` and the array of the others. When the
     /// array has no element the run continues at `miss`, and nothing is written and
     /// nothing is taken. When it takes `src` it may change the array in place.
@@ -427,14 +427,15 @@ instructions! {
         miss: R::To,
     },
     ArraySplitWide { elements: HitList, tail: MaybeHit<R>, src: Arg<R>, miss: R::To },
-    /// `[..a, ..b]`.
-    ArrayConcat { dst: Dst<R>, a: Src<R>, b: Src<R> },
+    /// `[..a, ..b]`. One that it takes may change in place.
+    ArrayConcat { dst: Dst<R>, a: Arg<R>, b: Arg<R> },
     /// Element `index` of the array in `src`. When the array has no such index the run
     /// continues at `miss`.
     ArrayGet { dst: MaybeHit<R>, src: Src<R>, index: Src<R>, miss: R::To },
     /// The elements of the array in `src` from `start` up to `end`. When that range is
-    /// not inside it the run continues at `miss`.
-    ArraySlice { dst: MaybeHit<R>, src: Src<R>, start: Src<R>, end: Src<R>, miss: R::To },
+    /// not inside it the run continues at `miss`, and nothing is taken. When it takes `src`
+    /// it may change the array in place.
+    ArraySlice { dst: MaybeHit<R>, src: Arg<R>, start: Src<R>, end: Src<R>, miss: R::To },
     /// The array in `src` with `value` at `index`. When the array has no such
     /// index, nothing is written and nothing is taken, and the run continues at
     /// `miss`. When it takes `src` the write may change the array in place.

@@ -12,6 +12,7 @@ use super::{
     ARENA_CELL_WORDS, Cell, FREED, Heap, Index, Kind, LEAST_WORDS, UNCOUNTED, class, count, freed,
     held, scan, size, space,
 };
+use crate::array::flat::{self, Flat, Wrong};
 use crate::value::Value;
 use crate::word::{high_u32, low_u32, to_usize};
 
@@ -39,6 +40,11 @@ pub(crate) enum AuditFault {
     NoFunction { cell: Index },
     /// An array's cell, or a node's, has no elements. The array with none is no cell.
     EmptyArray { cell: Index },
+    /// A short array's cell has something in a slot that is none of its elements'.
+    StaleSlot { cell: Index },
+    /// A short array's cell is a leaf of the tree that `holder` is of, and not all its slots
+    /// are items in their order.
+    PartLeaf { holder: Index, cell: Index },
     /// A cell's count is not the number of references to it.
     Miscounted {
         cell: Index,
@@ -86,8 +92,8 @@ const CONSTANT: u32 = u32::MAX - 2;
 
 impl Heap {
     /// Check that the arena is made of whole cells, that each header says
-    /// what a cell of its class is, that no array's cell is empty, that every
-    /// reference is to a live cell and carries its variant, that every count is
+    /// what a cell of its class is, that no array's cell is empty or holds more
+    /// than its elements, that every reference is to a live cell and carries its variant, that every count is
     /// the number of references to its cell, and that the free lists and the
     /// boxes hold exactly what they should. `roots` is every reference held
     /// outside the heap.
@@ -137,6 +143,7 @@ impl Heap {
             let values = data.get(held(class(self.header(cell)), data.len()));
             for w in values.unwrap_or(&[]) {
                 holds(Some(cell), Value::from_bits(*w))?;
+                self.audit_leaf(cell, Value::from_bits(*w))?;
             }
         }
 
@@ -182,6 +189,7 @@ impl Heap {
             | Kind::BinarySlice
             | Kind::Tuple
             | Kind::Closure
+            | Kind::ArrayFlat
             | Kind::ArrayLeaf
             | Kind::ArrayRoot
             | Kind::ArrayBranch
@@ -200,6 +208,12 @@ impl Heap {
             Kind::ArrayRoot => match words {
                 [len, _, _, _, _, _] => *len == 0,
                 _ => return Err(misshapen),
+            },
+            Kind::ArrayFlat => match flat::laid_out(words) {
+                Ok(()) => false,
+                Err(Wrong::Slots) => return Err(misshapen),
+                Err(Wrong::Stale) => return Err(AuditFault::StaleSlot { cell }),
+                Err(Wrong::Empty) => true,
             },
             Kind::ArrayLeaf => words.is_empty(),
             Kind::ArrayBranch => match words {
@@ -246,6 +260,22 @@ impl Heap {
                 variant,
             };
             Err(wrong)
+        }
+    }
+
+    /// What `holder` holds may be there, when that is a node of an array's tree.
+    fn audit_leaf(&self, holder: Index, held: Value) -> Result<(), AuditFault> {
+        let class = class(self.header(holder));
+        if !class.is(Kind::ArrayRoot) && !class.is(Kind::ArrayBranch) {
+            return Ok(());
+        }
+        let flat = held.as_cell().and_then(|cell| Flat::of(self, cell));
+        match flat {
+            Some(flat) if !flat::is_leaf(self, flat) => Err(AuditFault::PartLeaf {
+                holder,
+                cell: flat.cell().index(),
+            }),
+            Some(_) | None => Ok(()),
         }
     }
 
@@ -381,6 +411,17 @@ impl fmt::Display for AuditFault {
             AuditFault::EmptyArray { cell: Index(cell) } => {
                 write!(f, "the array's cell {cell} has no elements")
             }
+            AuditFault::StaleSlot { cell: Index(cell) } => write!(
+                f,
+                "the array's cell {cell} holds something that is not one of its elements"
+            ),
+            AuditFault::PartLeaf {
+                holder: Index(holder),
+                cell: Index(cell),
+            } => write!(
+                f,
+                "cell {holder} has the array's cell {cell} as a leaf, which is not full or not in order"
+            ),
             AuditFault::Miscounted {
                 cell: Index(cell),
                 count,

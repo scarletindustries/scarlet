@@ -151,9 +151,8 @@ pub(super) fn is_element(m: &Machine<'_, '_>, v: Value, want: &Result<Value, i64
 pub(super) fn elements(m: &mut Machine<'_, '_>, v: Value) -> Vec<Value> {
     let s = m.rest.seq(v).expect("an array");
     let n = usize::try_from(s.len(&m.rest.heap)).expect("short");
-    (0..n)
-        .map(|i| m.rest.element(s, i).expect("live").expect("there"))
-        .collect()
+    let mut at = |i: usize| m.rest.index(v, small(i as i64)).expect("live");
+    (0..n).map(|i| at(i).expect("there")).collect()
 }
 
 pub(super) fn is_array(m: &mut Machine<'_, '_>, v: Value, want: &[Result<Value, i64>], what: &str) {
@@ -247,53 +246,99 @@ fn a_read_finds_the_element_or_goes_on_at_its_miss() {
 }
 
 /// A slice finds the elements from the one index up to the other, when both are in the
-/// array and in order, and makes nothing otherwise, or when it is put nowhere.
+/// array and in order, and makes nothing otherwise, or when it is put nowhere. One that
+/// takes an array of 32 or fewer that nothing else holds makes no cell, unless it leaves a
+/// quarter of the slots or less, which then go to one of fewer. What goes on
+/// holding the array holds it as it was, and where there is no slice nothing is taken.
 #[test]
 fn a_slice_finds_the_elements_or_goes_on_at_its_miss() {
+    let mut in_place = 0;
     for of in ARRAYS {
         let len = match of {
             Of::Both(n) => n,
             Of::Range(a, b) => usize::try_from(b.saturating_sub(a).max(0)).expect("few"),
         };
-        for from in indices(len) {
-            for to in indices(len) {
-                for dst in [None, Some(AWAY), Some(FROM), Some(AT), Some(TO)] {
-                    let what = format!("{of:?}[{from}..{to}] to {dst:?}");
-                    let code = asks(Ins::ArraySlice {
-                        dst: MaybeHit::new(dst),
-                        src: Src(FROM),
-                        start: Src(AT),
-                        end: Src(TO),
-                        miss: miss(),
-                    });
-                    on_a_machine(|m| {
-                        let heap = &mut m.rest.heap;
-                        let (xs, items) = array_of_kind(heap, of);
-                        let (a, b) = (number(heap, &from), number(heap, &to));
-                        let old = a_cell(heap, 77);
-                        let regs = registers(&[(FROM, xs), (AT, a), (TO, b), (AWAY, old)]);
-                        let made = heap.made();
-                        let stop = run_with(m, code, &regs);
-                        let ends = index(&from, len + 1).zip(index(&to, len + 1));
-                        let want = ends.filter(|(a, b)| a <= b);
-                        assert_eq!(found(&stop), want.is_some(), "{what}");
-                        let wrote = dst.filter(|_| want.is_some());
-                        rest_is(m, &regs, wrote, &[], &what);
-                        match (wrote, want) {
-                            (Some(dst), Some((a, b))) => {
-                                let got = in_register(m, dst);
-                                counted(m, &what);
-                                is_array(m, got, &items[a..b], &what);
-                            }
-                            _ => assert_eq!(m.rest.heap.made(), made, "{what}"),
-                        }
-                        counted(m, &what);
-                        all_given_up(m, &what);
-                    });
+        let indices = indices(len);
+        for (n, from) in indices.iter().enumerate() {
+            for (k, to) in indices.iter().enumerate() {
+                let some = [AWAY, FROM, AT, TO][(n + k) % 4];
+                for dst in [None, Some(AWAY), Some(FROM), Some(some)] {
+                    for bits in 0..4u8 {
+                        let [moved, held] = [0, 1].map(|i| bits >> i & 1 == 1);
+                        in_place += a_slice_of(of, len, [from, to], dst, [moved, held]);
+                    }
                 }
             }
         }
     }
+    assert!(in_place > 40, "{in_place}");
+}
+
+/// Gives how many it made in place.
+fn a_slice_of(
+    of: Of,
+    len: usize,
+    [from, to]: [&BigInt; 2],
+    dst: Option<Reg>,
+    [moved, held]: [bool; 2],
+) -> usize {
+    let what = format!("{of:?}[{from}..{to}] to {dst:?}, takes {moved}, held {held}");
+    let code = asks(Ins::ArraySlice {
+        dst: MaybeHit::new(dst),
+        src: Arg { reg: FROM, moved },
+        start: Src(AT),
+        end: Src(TO),
+        miss: miss(),
+    });
+    let mut in_place = 0;
+    on_a_machine(|m| {
+        let heap = &mut m.rest.heap;
+        let (xs, items) = array_of_kind(heap, of);
+        let (a, b) = (number(heap, from), number(heap, to));
+        let old = a_cell(heap, 77);
+        if held {
+            m.rest.globals.push(heap.own(xs).expect("live"));
+        }
+        let regs = registers(&[(FROM, xs), (AT, a), (TO, b), (AWAY, old)]);
+        let made = heap.made();
+        let stop = run_with(m, code, &regs);
+        let ends = index(from, len + 1).zip(index(to, len + 1));
+        let want = ends.filter(|(a, b)| a <= b);
+        assert_eq!(found(&stop), want.is_some(), "{what}");
+        let wrote = dst.filter(|_| want.is_some());
+        let taken = moved && want.is_some();
+        let gone = if taken { vec![FROM] } else { Vec::new() };
+        // The empty array has no reference to take, so it may be left where it is.
+        let mut left = regs.clone();
+        let empty = in_register(m, FROM).bits() == Value::EMPTY_ARRAY.bits();
+        if taken && wrote != Some(FROM) && empty {
+            m.stack[usize::from(FROM.0)] = Value::NIL;
+        }
+        left[usize::from(FROM.0)] = if taken { Value::NIL } else { xs };
+        rest_is(m, &left, wrote, &gone, &what);
+        match (wrote, want) {
+            (Some(dst), Some((a, b))) => {
+                let got = in_register(m, dst);
+                counted(m, &what);
+                is_array(m, got, &items[a..b], &what);
+                let short = matches!(of, Of::Both(n) if n <= 32);
+                if short && moved && !held {
+                    let slots = |n: usize| n.next_power_of_two().clamp(4, 32);
+                    let few = b > a && (b - a) * 4 <= slots(len) && slots(b - a) < slots(len);
+                    let cells = m.rest.heap.made() - made;
+                    assert_eq!(cells, usize::from(few), "{what}");
+                    in_place += usize::from(!few && b - a > 0 && b - a < len);
+                }
+            }
+            _ => assert_eq!(m.rest.heap.made(), made, "{what}"),
+        }
+        if held || (!moved && wrote != Some(FROM)) {
+            is_array(m, xs, &items, &what);
+        }
+        counted(m, &what);
+        all_given_up(m, &what);
+    });
+    in_place
 }
 
 /// A write finds the array with the value in its place, and nothing else changes: not
@@ -462,6 +507,7 @@ fn a_lookup_finds_the_value_or_goes_on_at_its_miss() {
 #[test]
 fn a_probe_of_the_wrong_kind_stops() {
     let (src, index) = (Src(FROM), Src(AT));
+    let taken = |moved| Arg { reg: FROM, moved };
     let some = |dst: bool| MaybeHit::new(dst.then_some(AWAY));
     for dst in [false, true] {
         let array = [
@@ -473,14 +519,14 @@ fn a_probe_of_the_wrong_kind_stops() {
             },
             Ins::ArraySlice {
                 dst: some(dst),
-                src,
+                src: taken(dst),
                 start: index,
                 end: Src(TO),
                 miss: miss(),
             },
             Ins::ArraySlice {
                 dst: some(dst),
-                src,
+                src: taken(dst),
                 start: Src(TO),
                 end: index,
                 miss: miss(),
@@ -597,7 +643,7 @@ fn a_probe_that_finds_a_freed_cell_stops() {
     });
     let cut = asks(Ins::ArraySlice {
         dst: MaybeHit::new(Some(AWAY)),
-        src: Src(FROM),
+        src: Arg::shared(FROM),
         start: Src(AT),
         end: Src(TO),
         miss: miss(),
@@ -623,4 +669,106 @@ fn a_probe_that_finds_a_freed_cell_stops() {
             assert_eq!(in_register(m, AWAY).bits(), Value::NIL.bits());
         });
     }
+}
+
+/// An index below 0 is in no array, and neither is one that is past the end, of arrays so
+/// long that the first, taken for a number that is never below 0, would be in them: a range
+/// of nearly all the `i64`s, and a tree that is made of joins with itself.
+#[test]
+fn an_index_below_0_is_in_no_array_however_long() {
+    let below = [-1i64, -2, -3, -1000, -(1 << 49), -(1 << 50)];
+    for tree in [false, true] {
+        for at in below {
+            for moved in [false, true] {
+                let src = Arg { reg: FROM, moved };
+                let value = Arg::shared(WITH);
+                let (index, miss) = (Src(AT), miss());
+                let all = [
+                    Ins::ArrayGet {
+                        dst: MaybeHit::new(Some(AWAY)),
+                        src: Src(FROM),
+                        index,
+                        miss,
+                    },
+                    Ins::ArrayGet {
+                        dst: MaybeHit::new(None),
+                        src: Src(FROM),
+                        index,
+                        miss,
+                    },
+                    Ins::ArraySet {
+                        dst: Hit(AWAY),
+                        src,
+                        index,
+                        value,
+                        miss,
+                    },
+                    Ins::ArraySlice {
+                        dst: MaybeHit::new(Some(AWAY)),
+                        src,
+                        start: index,
+                        end: index,
+                        miss,
+                    },
+                ];
+                for ins in all {
+                    let code = asks(ins);
+                    on_a_machine(|m| {
+                        let heap = &mut m.rest.heap;
+                        let seven = a_cell(heap, 7);
+                        let whole = match tree {
+                            true => longest(heap, seven),
+                            false => {
+                                heap.release(seven.as_cell().expect("a cell"))
+                                    .expect("live");
+                                array::range(heap, i64::MIN + 1, i64::MAX).expect("room")
+                            }
+                        };
+                        let given = [
+                            (FROM, whole),
+                            (AT, number(heap, &BigInt::from(at))),
+                            (AWAY, a_cell(heap, 77)),
+                            (WITH, a_cell(heap, 78)),
+                        ];
+                        let regs = registers(&given);
+                        let made = m.rest.heap.made();
+                        let stop = run_with(m, code, &regs);
+                        let what = format!("{ins:?} {tree} {at}");
+                        assert!(!found(&stop), "{what}");
+                        rest_is(m, &regs, None, &[], &what);
+                        assert_eq!(m.rest.heap.made(), made, "{what}");
+                        counted(m, &what);
+                        all_given_up(m, &what);
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// An array of `item` 2^64 - 1 times, whose reference passes to it.
+fn longest(heap: &mut Heap, item: Value) -> Value {
+    let stored = |heap: &Heap, v| match array::seq(heap, v).expect("an array") {
+        Seq::Empty | Seq::Range { .. } => Stored::Empty,
+        Seq::Flat(flat) => Stored::Flat(flat),
+        Seq::Tree(cell) => Stored::Tree(cell),
+    };
+    // All the powers of two below 2^64 together.
+    let mut power = array::from_values(heap, &[item]).expect("room");
+    let mut all = Value::EMPTY_ARRAY;
+    for i in 0..64 {
+        heap.own(power).expect("live");
+        let (a, b) = (stored(heap, all), stored(heap, power));
+        all = array::concat(heap, a, b).expect("room");
+        if i == 63 {
+            break;
+        }
+        heap.own(power).expect("live");
+        let half = stored(heap, power);
+        power = array::concat(heap, half, half).expect("room");
+    }
+    heap.release(power.as_cell().expect("a cell"))
+        .expect("live");
+    assert_eq!(array::seq(heap, all).map(|s| s.len(heap)), Some(u64::MAX));
+    all
 }

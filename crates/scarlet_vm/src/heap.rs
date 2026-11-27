@@ -65,10 +65,12 @@ use crate::word::{low_byte, low_u16, low_u32, to_usize};
 
 mod audit;
 mod ctors;
+mod flat;
 
 pub(crate) use audit::{AuditFailure, AuditFault};
 use ctors::Class;
 pub(crate) use ctors::{Ctor, Ctors, Layout, Numbering, TooManyCtors};
+pub(crate) use flat::{Alone, Run};
 
 /// The most words a heap holds: the arena's and the boxes' together, which
 /// is 16 GiB. A cell's index then fits in the 31 bits below [`DYING`].
@@ -201,18 +203,23 @@ pub(crate) enum Kind {
     /// capture's value word, in order. Each capture holds one reference. A
     /// function with none is a value word of its own, and needs no cell.
     Closure = 8,
-    /// An array's root, one of its leaves, or one of its branches.
-    /// [`crate::array`] has their layout; the heap only knows which of their
+    /// A long array's leaf or its root. [`crate::array`] has their layout; the heap only knows which of their
     /// words hold references.
     ArrayLeaf = 9,
     ArrayRoot = 10,
-    ArrayBranch = 11,
+    /// A short array: its slots, each a value word, and behind them a word that
+    /// says which of them are its elements ([`crate::array`]). Each slot holds one
+    /// reference.
+    // One bit from a leaf's, so that one test asks whether a cell is either.
+    ArrayFlat = 11,
     /// A map's root, one of its nodes, or a list of keys whose whole hashes
     /// are equal. [`crate::map`] has their layout. Each holds references in
     /// every word after its first.
     Map = 12,
     MapNode = 13,
     MapCollision = 14,
+    /// A branch of a long array's tree.
+    ArrayBranch = 15,
     /// A constructor with fields: each field's value word, in order. Each field
     /// holds one reference. Which constructor it is, is the header's class.
     Ctor = 16,
@@ -227,6 +234,7 @@ impl Kind {
     const fn scan(self) -> Scan {
         match self {
             Kind::Ctor | Kind::Tuple | Kind::Closure | Kind::ArrayLeaf => Scan::All,
+            Kind::ArrayFlat => Scan::AllButLast,
             Kind::BinarySlice => Scan::First,
             Kind::String
             | Kind::BigInt
@@ -246,6 +254,7 @@ impl Kind {
 #[derive(Clone, Copy)]
 enum Scan {
     All,
+    AllButLast,
     First,
     /// None, so the kind is asked.
     Ask,
@@ -257,6 +266,7 @@ impl Scan {
     fn of(self, n: usize) -> usize {
         match self {
             Scan::All => n,
+            Scan::AllButLast => n.saturating_sub(1),
             Scan::First => n.min(1),
             Scan::Ask => 0,
         }
@@ -585,6 +595,15 @@ impl Heap {
             return self.grow(space);
         }
         Ok(at)
+    }
+
+    /// Make room for cells of so many words in all. They are then made with no need to
+    /// ask for any, so that what makes several is refused before it has made one. The
+    /// room is at the arena's end, so one that freed cells would have served may be
+    /// refused when the heap is within those words of its limit.
+    #[inline]
+    pub(crate) fn reserve(&mut self, words: usize) -> Result<(), Fault> {
+        self.room(words).map(drop)
     }
 
     /// [`Self::room`] when the arena has to ask the system for it, or has
@@ -1442,7 +1461,7 @@ impl Heap {
         let field = self.boxed(index, h).get(i)?;
         match class(h).scan() {
             Scan::All => Some(Value::from_bits(*field)),
-            Scan::First | Scan::Ask => None,
+            Scan::AllButLast | Scan::First | Scan::Ask => None,
         }
     }
 
@@ -1452,7 +1471,7 @@ impl Heap {
         let index = cell.index();
         let words: &[u64] = match class(self.header(index)).scan() {
             Scan::All => self.words(index, 1),
-            Scan::First | Scan::Ask => &[],
+            Scan::AllButLast | Scan::First | Scan::Ask => &[],
         };
         words.iter().map(|w| Value::from_bits(*w))
     }
@@ -1849,9 +1868,12 @@ fn class(h: u64) -> Class {
     Class(low_u16(h >> CLASS_SHIFT))
 }
 
+/// The bits of a header that say how many holders its cell has and what it is.
+const CLASS_AND_COUNT: u64 = with_class(COUNT, Class(0xFFFF));
+
 /// The header `h`, of a cell of `class` instead.
-fn with_class(h: u64, class: Class) -> u64 {
-    h & !(0xFFFF << CLASS_SHIFT) | u64::from(class.0) << CLASS_SHIFT
+const fn with_class(h: u64, class: Class) -> u64 {
+    h & !(0xFFFF << CLASS_SHIFT) | (class.0 as u64) << CLASS_SHIFT
 }
 
 /// Whether `h` is the header of a cell in the arena that holds no values and
@@ -1933,6 +1955,7 @@ fn held(class: Class, len: usize) -> std::ops::Range<usize> {
             | Kind::Closure
             | Kind::Tuple
             | Kind::ArrayLeaf
+            | Kind::ArrayFlat
             | Kind::BinarySlice
             | Kind::String
             | Kind::BigInt

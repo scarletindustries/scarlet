@@ -35,6 +35,11 @@ impl Heap {
         }
     }
 
+    /// Hold no more than `limit` words from here on.
+    pub(crate) fn limit_to(&mut self, limit: usize) {
+        self.limit = limit.min(LIMIT_WORDS);
+    }
+
     /// A new cell of `shape`, given `values`, wherever there is room.
     fn given<const N: usize>(&mut self, shape: Shape<N>, values: &[Value]) -> Result<Cell, Fault> {
         match self.in_freed(shape, values.iter().copied()) {
@@ -1638,6 +1643,41 @@ fn a_cell_that_is_not_all_values_has_no_fields() {
             assert_eq!(heap.values(cell).count(), 0, "{kind:?} {n}");
         }
     }
+}
+
+/// The word behind a short array's slots is no field, and a cell that has one is not read
+/// as one of only values. One too long for the arena, which no short array is, has no field.
+#[test]
+fn the_word_behind_the_slots_of_a_short_array_is_no_value() {
+    let mut heap = Heap::default();
+    let nil = Value::NIL.bits();
+    for n in [5, 9, 253] {
+        let cell = heap.make(Kind::ArrayFlat, &vec![nil; n]).expect("room");
+        assert!(heap.field(cell, n - 2).is_some(), "{n}");
+        assert!(heap.field(cell, n - 1).is_none(), "{n}");
+        assert_eq!(heap.values(cell).count(), 0, "{n}");
+    }
+    let long = heap.make(Kind::ArrayFlat, &vec![nil; 400]).expect("room");
+    assert!(heap.field(long, 0).is_none());
+    assert_eq!(heap.values(long).count(), 0);
+}
+
+/// Values shared together are all shared, or none is where one is a freed cell.
+#[test]
+fn values_are_shared_together_or_not_at_all() {
+    let mut heap = Heap::default();
+    let [a, b, gone] = [0, 1, 2].map(|i| heap.tuple(&[int(i)]).expect("room"));
+    heap.release(gone).expect("live");
+    let held = |heap: &Heap| [a, b].map(|cell| heap.held_by(cell));
+    let values = [a, b, gone].map(Value::cell);
+    let shared = heap.share_each(&[values[0], int(7), values[1], values[2], values[0]]);
+    assert_eq!(shared, Err(DeadCell));
+    assert_eq!(held(&heap), [Some(1), Some(1)]);
+    assert_eq!(
+        heap.share_each(&[values[0], int(7), values[1], values[0]]),
+        Ok(())
+    );
+    assert_eq!(held(&heap), [Some(3), Some(2)]);
 }
 
 /// Take apart a constructor of `N` fields, each a cell of its own, that has one

@@ -10,7 +10,7 @@ use scarlet_ir::core_ir::{ConstId, FuncIdx, HttpTypes, IoErrors, JsonTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
-use crate::array::{self, Root, Seq};
+use crate::array::{self, Root, Seq, Stored};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
 use crate::code::{
@@ -1383,60 +1383,59 @@ impl<'c> Rest<'c, '_> {
     /// The elements of the array `v`, with no reference added, or `None` when it is a
     /// range, which stores none.
     fn stored(&self, v: Value) -> Result<Option<Vec<Value>>, Stop> {
-        Ok(match self.seq(v)? {
-            Seq::Empty => Some(Vec::new()),
-            Seq::Tree(a) => Some(array::elements(&self.heap, a)),
-            Seq::Range { .. } => None,
-        })
+        Ok(array::elements(&self.heap, self.seq(v)?))
     }
 
-    /// Element `i` of `s`, holding its own reference, or `None` past the end.
-    /// A range's element is made from its start.
+    /// Element `i` of a range, holding its own reference, or `None` past the end. It is made
+    /// from the range's start.
     #[inline(never)]
-    pub(super) fn element(&mut self, s: Seq, i: usize) -> Result<Option<Value>, Stop> {
-        match s {
-            Seq::Empty => Ok(None),
-            Seq::Tree(a) => match array::get(&self.heap, a, i) {
-                Some(v) => Ok(Some(self.share(v)?)),
-                None => Ok(None),
-            },
-            Seq::Range { start, end } if (i as u64) < array::range_len(start, end) => {
-                // An i128 holds any i64 plus any index, so this is exact.
-                let n = i128::from(start).saturating_add(i as i128);
-                Ok(Some(bigint::int(&mut self.heap, n).map_err(fault)?))
-            }
-            Seq::Range { .. } => Ok(None),
+    fn of_range(&mut self, start: i64, end: i64, i: usize) -> Result<Option<Value>, Stop> {
+        if i as u64 >= array::range_len(start, end) {
+            return Ok(None);
         }
+        // An i128 holds any i64 plus any index, so this is exact.
+        let n = i128::from(start).saturating_add(i as i128);
+        Ok(Some(bigint::int(&mut self.heap, n).map_err(fault)?))
     }
 
-    /// `s` as a tree, holding one reference, or `None` when it is empty. That is
-    /// the tree itself, or a range's elements built into one.
+    /// The array of the Ints from `start` up to `end`.
     #[inline(never)]
-    pub(super) fn tree(&mut self, s: Seq) -> Result<Option<Cell>, Stop> {
-        match s {
-            Seq::Empty => Ok(None),
-            Seq::Tree(a) => {
-                self.heap.share(a)?;
-                Ok(Some(a))
-            }
-            Seq::Range { start, end } => {
-                let mut items = Vec::new();
-                for n in start..end {
-                    items.push(bigint::int(&mut self.heap, n).map_err(fault)?);
-                }
-                let built = array::from_values(&mut self.heap, &items).map_err(fault)?;
-                Ok(built.as_cell())
+    pub(super) fn built(&mut self, start: i64, end: i64) -> Result<Stored, Stop> {
+        let mut items = Vec::new();
+        for n in start..end {
+            match bigint::int(&mut self.heap, n) {
+                Ok(n) => items.push(n),
+                Err(why) => return Err(self.give_back(items, fault(why))),
             }
         }
+        array::stored(&mut self.heap, &items).map_err(fault)
     }
 
     /// Element `index` of the array `a`, holding its own reference, or `None`
     /// when it has none.
-    #[inline(never)]
+    // A range is asked first, because the other two are nearly always found without this.
+    #[inline(always)]
     pub(super) fn index(&mut self, a: Value, index: Value) -> Result<Option<Value>, Stop> {
+        if let Some((start, end)) = a.as_cell().and_then(|c| array::range_at(&self.heap, c))
+            && let Some(i) = index.small_int()
+        {
+            return match usize::try_from(i) {
+                Ok(i) => self.of_range(start, end, i),
+                Err(_) => Ok(None),
+            };
+        }
         let s = self.seq(a)?;
-        match self.position(index)? {
-            Some(i) => self.element(s, i),
+        let Some(i) = self.position_in(index)? else {
+            return Ok(None);
+        };
+        let found = match s {
+            Seq::Empty => None,
+            Seq::Flat(flat) => flat.get(&self.heap, i),
+            Seq::Tree(a) => array::get(&self.heap, a, i),
+            Seq::Range { start, end } => return self.of_range(start, end, i),
+        };
+        match found {
+            Some(v) => Ok(Some(self.share(v)?)),
             None => Ok(None),
         }
     }
@@ -1469,11 +1468,20 @@ impl<'c> Rest<'c, '_> {
         }
     }
 
+    /// [`Self::position`], where the Int is nearly always a small one.
+    #[inline(always)]
+    pub(super) fn position_in(&self, v: Value) -> Result<Option<usize>, Stop> {
+        match v.small_int() {
+            Some(i) => Ok(usize::try_from(i).ok()),
+            None => self.position(v),
+        }
+    }
+
     /// The Int `v` as a position in an array, or `None` when it names none.
     /// That is when it is negative, or a big int, which is past the end of
     /// any array.
     #[inline(never)]
-    pub(super) fn position(&self, v: Value) -> Result<Option<usize>, Stop> {
+    fn position(&self, v: Value) -> Result<Option<usize>, Stop> {
         match v.view() {
             View::Int(i) => Ok(usize::try_from(i).ok()),
             View::Cell(cell) if self.heap.is(cell, Kind::BigInt) => Ok(None),
@@ -1487,51 +1495,30 @@ impl<'c> Rest<'c, '_> {
         }
     }
 
-    /// The first element of the array `v` and the array of the others, or `None` when
-    /// it has no element. The element is `Nil` when it is not asked for,
-    /// which is what `head` says. When `taken`, `v`'s reference passes in on a hit, so
-    /// an array nothing else holds can change in place.
-    #[inline(always)]
-    pub(super) fn uncons(
-        &mut self,
-        v: Value,
-        head: bool,
-        taken: bool,
-    ) -> Result<Option<(Value, Value)>, Stop> {
-        match self.seq(v)? {
-            Seq::Empty => Ok(None),
-            Seq::Tree(a) => {
-                let found = array::uncons(&mut self.heap, a, head, taken).map_err(fault)?;
-                found.ok_or_else(empty_cell).map(Some)
-            }
-            s @ Seq::Range { .. } => self.uncons_range(s, v, head, taken).map(Some),
-        }
-    }
-
-    /// [`Self::uncons`] of a range.
+    /// The first element of a range and the range of the others, or `None` when it has
+    /// none, which no range does. The element is `Nil` when it is not asked for, which is
+    /// what `head` says.
     #[inline(never)]
-    fn uncons_range(
+    pub(super) fn uncons_range(
         &mut self,
-        s: Seq,
-        v: Value,
+        start: i64,
+        end: i64,
         head: bool,
-        taken: bool,
-    ) -> Result<(Value, Value), Stop> {
-        if s.len(&self.heap) == 0 {
-            return Err(empty_cell());
+    ) -> Result<Option<(Value, Value)>, Stop> {
+        if start >= end {
+            return Ok(None);
         }
-        let left = array::behind(&mut self.heap, s, 1).map_err(fault)?;
+        let len = array::range_len(start, end);
+        let left = array::slice_of_range(&mut self.heap, start, 1, len);
+        let left = left.map_err(fault)?;
         let first = match head {
-            true => match self.element(s, 0) {
+            true => match self.of_range(start, end, 0) {
                 Ok(first) => first,
                 Err(stop) => return Err(self.give_back([left], stop)),
             },
             false => None,
         };
-        if taken {
-            self.release(v)?;
-        }
-        Ok((first.unwrap_or(Value::NIL), left))
+        Ok(Some((first.unwrap_or(Value::NIL), left)))
     }
 
     /// `stop`, where what holds `values` has not been written yet and never will be.
@@ -1548,22 +1535,6 @@ impl<'c> Rest<'c, '_> {
             }
         }
         stop
-    }
-
-    /// The array `v` without its first `n` elements. When `taken`, `v`'s reference
-    /// passes in, even where there is no room for the array.
-    pub(super) fn behind(&mut self, v: Value, n: usize, taken: bool) -> Result<Value, Stop> {
-        let s = self.seq(v)?;
-        if let Seq::Tree(a) = s
-            && taken
-        {
-            return array::skip_owned(&mut self.heap, a, n).map_err(fault);
-        }
-        let left = array::behind(&mut self.heap, s, n);
-        if taken {
-            self.release(v)?;
-        }
-        left.map_err(fault)
     }
 
     /// How many elements the array `v` has.
@@ -1831,22 +1802,6 @@ impl<'c> Rest<'c, '_> {
         array::range(&mut self.heap, start, end).map_err(fault)
     }
 
-    /// `[..a, ..b]`.
-    #[inline(never)]
-    pub(super) fn array_concat(&mut self, a: Value, b: Value) -> Result<Value, Stop> {
-        let (l, r) = (self.seq(a)?, self.seq(b)?);
-        let (l, r) = match (self.tree(l)?, self.tree(r)?) {
-            (Some(l), Some(r)) => (l, r),
-            // A range that is all of the join is a tree by now. Kept as a range it
-            // would be built as one again by each push on it and each write to it.
-            (one, None) | (None, one) => return Ok(one.map_or(Value::EMPTY_ARRAY, Value::cell)),
-        };
-        let joined = array::concat(&mut self.heap, l, r).map_err(fault);
-        self.heap.release(l)?;
-        self.heap.release(r)?;
-        joined
-    }
-
     /// Where `of[start..end]` is, when that range is inside the array.
     #[inline(always)]
     pub(super) fn span(&self, of: Value, start: Value, end: Value) -> Result<Option<Span>, Stop> {
@@ -1856,14 +1811,6 @@ impl<'c> Rest<'c, '_> {
         };
         let inside = from <= to && to as u64 <= of.len(&self.heap);
         Ok(inside.then_some(Span { of, from, to }))
-    }
-
-    /// The elements at `span`.
-    #[inline(always)]
-    pub(super) fn slice(&mut self, span: Span) -> Result<Value, Stop> {
-        let Span { of, from, to } = span;
-        let cut = array::slice(&mut self.heap, of, from, to);
-        cut.map_err(fault)
     }
 
     /// `v` with one more reference, for when it goes somewhere new.
@@ -1910,7 +1857,7 @@ pub(super) fn not_an_array(v: Value) -> Stop {
 /// The stop for an array's cell that has no elements.
 #[cold]
 #[inline(never)]
-fn empty_cell() -> Stop {
+pub(super) fn empty_cell() -> Stop {
     Stop::broken(Broken::EmptyCell)
 }
 
@@ -1958,9 +1905,9 @@ fn shift(
 
 /// Some elements that an array has: those from `from` up to `to`.
 pub(super) struct Span {
-    of: Seq,
-    from: usize,
-    to: usize,
+    pub(super) of: Seq,
+    pub(super) from: usize,
+    pub(super) to: usize,
 }
 
 /// A `scarlet/json.Doc` taken apart into the binaries it holds, borrowed, and

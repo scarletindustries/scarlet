@@ -3,7 +3,7 @@ use crate::OsHost;
 use crate::bigint;
 use crate::code::{
     Args, BinaryId, EntryPc, Hit, HitList, IntTable, Length, Lists, MaybeHit, Pc, PlaceList,
-    ReadsClosure, Shares, Split, SplitWide, Table, TextId, Why, WhyId,
+    ReadsClosure, Shared, Shares, Split, SplitWide, Table, TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
 use crate::heap::{AuditFault, Cell, Ctors, Fault, Kind, Numbering};
@@ -554,7 +554,7 @@ fn an_audit_finds_a_freed_cell_handed_out_again() {
     after_running(HOLDS_A_CELL, |m, ended| {
         let cell = held_by_a_global(m);
         m.rest.heap.release(cell).expect("the global's reference");
-        let data = vec![Value::NIL.bits(); 6];
+        let data = vec![Value::NIL.bits(); 5];
         let again = m.rest.heap.make(Kind::Binary, &data).expect("room");
         assert_eq!(again, cell);
         assert_eq!(m.rest.heap.audit(m.rest.globals.iter().copied()), Ok(()));
@@ -1012,7 +1012,7 @@ fn array_of(dst: u8, elements: &[u8]) -> Ins<Reg> {
     let elements: Vec<Reg> = elements.iter().copied().map(r).collect();
     Ins::Array {
         dst: Dst(r(dst)),
-        elements: Shares::new(&elements).expect("a few elements"),
+        elements: Args::new(&elements).expect("a few elements"),
     }
 }
 
@@ -1056,6 +1056,8 @@ fn a_cell_of_each_kind(heap: &mut Heap) -> Vec<(Cell, usize)> {
         (Kind::Tuple, 253, 253),
         (Kind::Tuple, 300, 300),
         (Kind::ArrayLeaf, 5, 5),
+        (Kind::ArrayFlat, 5, 4),
+        (Kind::ArrayFlat, 33, 32),
         (Kind::ArrayRoot, 5, 0),
         (Kind::ArrayBranch, 5, 0),
         (Kind::Map, 5, 0),
@@ -1611,7 +1613,7 @@ fn a_list_of_registers_is_given_up() {
 fn what_an_instruction_takes_leaves_its_register() {
     let (dst, own, to) = (Dst(r(5)), Room(40), EntryPc(START));
     let (whole, value, n) = (Arg::moved(r(0)), Arg::moved(r(2)), Src(r(1)));
-    let (shares, args) = (crate::code::ShareList(0), crate::code::ArgList(0));
+    let (some, args) = (crate::code::ArgList(1), crate::code::ArgList(0));
     let (a, b, c) = (Taken(r(0)), Taken(r(2)), Taken(r(3)));
     let all_moved = [whole, value, Arg::moved(r(3))];
     let three = Args::new(&[r(0), r(2), r(3)]).expect("three");
@@ -1635,8 +1637,37 @@ fn what_an_instruction_takes_leaves_its_register() {
         Ins::ArrayExtend {
             dst,
             src: whole,
-            items: shares,
+            items: some,
             end: End::Front,
+        },
+        Ins::ArrayExtend {
+            dst,
+            src: Arg::shared(r(0)),
+            items: some,
+            end: End::Back,
+        },
+        Ins::ArrayConcat {
+            dst,
+            a: Arg::shared(r(0)),
+            b: whole,
+        },
+        Ins::ArraySlice {
+            dst: MaybeHit::new(Some(dst.0)),
+            src: whole,
+            start: n,
+            end: Src(r(4)),
+            miss: pc(3),
+        },
+        Ins::ArraySlice {
+            dst: MaybeHit::new(None),
+            src: whole,
+            start: n,
+            end: n,
+            miss: pc(3),
+        },
+        Ins::ArrayWide {
+            dst,
+            elements: args,
         },
         Ins::ArrayUncons {
             head: MaybeHit::new(Some(r(7))),
@@ -1746,8 +1777,7 @@ fn what_an_instruction_takes_leaves_its_register() {
         takers.extend(calls);
     }
     let lists = || Lists {
-        regs: vec![Box::new([r(3)])],
-        args: vec![Box::new(all_moved)],
+        args: vec![Box::new(all_moved), Box::new([value, Arg::moved(r(3))])],
         splits: vec![SplitWide {
             split: Split {
                 length: Length { len: 1, more: true },
@@ -2282,22 +2312,28 @@ fn write(index: u8, value: u8, moved: bool, value_moved: bool, miss: u32) -> Ins
     }
 }
 
+/// Element 0 of the array `v`.
+fn first_of(m: &Machine<'_, '_>, v: Value) -> Option<Value> {
+    let s = array::seq(&m.rest.heap, v)?;
+    array::elements(&m.rest.heap, s)?.first().copied()
+}
+
 /// Element 0 of the array `v`, as text when it is a string.
 fn first_text(m: &Machine<'_, '_>, v: Value) -> Option<String> {
-    let first = array::get(&m.rest.heap, v.as_cell()?, 0)?.as_cell()?;
+    let first = first_of(m, v)?.as_cell()?;
     let mut out = Vec::new();
     m.rest.heap.read_string(first, &mut out);
     String::from_utf8(out).ok()
 }
 
 /// A write that takes the register of an array nothing else holds
-/// changes it in place: the only cells made are the array's two and the
-/// string, whether the value is taken or shared.
+/// changes it in place: the only cells made are the array's and the string's,
+/// whether the value is taken or shared.
 #[test]
 fn a_write_that_takes_an_array_with_one_holder_makes_no_cell() {
     for value_moved in [true, false] {
         after(5, a_write(0, true, value_moved, 0), |m, got| {
-            assert_eq!(m.rest.heap.made(), 3);
+            assert_eq!(m.rest.heap.made(), 2);
             let v = *got.as_ref().expect("the function returns");
             assert_eq!(first_text(m, v).as_deref(), Some("new"));
             the_only_cell_left(m, got);
@@ -2306,11 +2342,11 @@ fn a_write_that_takes_an_array_with_one_holder_makes_no_cell() {
 }
 
 /// A write that shares its array's register finds two holders and
-/// copies the root and the leaf. The register's array is as it was.
+/// copies the cell. The register's array is as it was.
 #[test]
 fn a_write_that_shares_its_array_copies_and_leaves_the_old_one_alone() {
     after(5, a_write(0, false, true, 0), |m, got| {
-        assert_eq!(m.rest.heap.made(), 5);
+        assert_eq!(m.rest.heap.made(), 3);
         let v = *got.as_ref().expect("the function returns");
         assert_eq!(first_text(m, v).as_deref(), Some("new"));
         the_only_cell_left(m, got);
@@ -2320,7 +2356,7 @@ fn a_write_that_shares_its_array_copies_and_leaves_the_old_one_alone() {
     kept[6] = ret(1);
     after(5, kept, |m, got| {
         let v = *got.as_ref().expect("the function returns");
-        let first = v.as_cell().and_then(|a| array::get(&m.rest.heap, a, 0));
+        let first = first_of(m, v);
         assert_eq!(first.map(|x| x.bits()), Some(Value::NIL.bits()));
         the_only_cell_left(m, got);
     });
@@ -2336,9 +2372,9 @@ fn a_write_that_misses_takes_nothing_and_writes_nothing() {
     for index in [1, -1, 1 << 40] {
         for moved in [true, false] {
             after(5, a_write(index, moved, moved, 1), |m, got| {
-                assert_eq!(m.rest.heap.made(), 3, "index {index}");
+                assert_eq!(m.rest.heap.made(), 2, "index {index}");
                 let v = *got.as_ref().expect("the function returns");
-                let first = v.as_cell().and_then(|a| array::get(&m.rest.heap, a, 0));
+                let first = first_of(m, v);
                 assert_eq!(first.map(|x| x.bits()), Some(Value::NIL.bits()));
                 the_only_cell_left(m, got);
             });
@@ -2372,11 +2408,11 @@ fn a_write_of_the_array_into_itself_holds_the_old_array() {
     after(5, ins, |m, got| {
         let v = *got.as_ref().expect("the function returns");
         let outer = v.as_cell().expect("an array");
-        let inner = array::get(&m.rest.heap, outer, 0).and_then(|x| x.as_cell());
-        let inner = inner.expect("the old array, as the element");
+        let inner = first_of(m, v).expect("the old array, as the element");
+        let inner = inner.as_cell().expect("an array");
         assert_ne!(inner, outer);
         assert_eq!(m.rest.heap.unique(inner), Ok(true));
-        let first = array::get(&m.rest.heap, inner, 0).map(|x| x.bits());
+        let first = first_of(m, Value::cell(inner)).map(|x| x.bits());
         assert_eq!(first, Some(Value::NIL.bits()));
         the_only_cell_left(m, got);
     });
@@ -2402,41 +2438,37 @@ fn a_write_to_a_range(index: i64, moved: bool, from: u8) -> Vec<Ins<Reg>> {
     ]
 }
 
-/// The Ints in the array `v`, or none when it is not a tree.
-fn tree_ints(m: &Machine<'_, '_>, v: Value) -> Option<Vec<i64>> {
-    let Ok(Seq::Tree(a)) = m.rest.seq(v) else {
-        return None;
-    };
+/// The Ints in the array `v`, or none when it is a range.
+fn stored_ints(m: &Machine<'_, '_>, v: Value) -> Option<Vec<i64>> {
+    let s = m.rest.seq(v).ok()?;
     let int = |x: Value| match x.view() {
         View::Int(n) => Some(n),
         _ => None,
     };
-    array::elements(&m.rest.heap, a)
-        .into_iter()
-        .map(int)
-        .collect()
+    let elements = array::elements(&m.rest.heap, s)?;
+    elements.into_iter().map(int).collect()
 }
 
 /// The two ends of the range `v`, or none when it is not a range.
 fn range_ends(m: &Machine<'_, '_>, v: Value) -> Option<(i64, i64)> {
     match m.rest.seq(v) {
         Ok(Seq::Range { start, end }) => Some((start, end)),
-        Ok(Seq::Empty | Seq::Tree(_)) | Err(_) => None,
+        Ok(Seq::Empty | Seq::Flat(_) | Seq::Tree(_)) | Err(_) => None,
     }
 }
 
 /// A range stores no elements, so a write that does not miss builds its
-/// elements as a tree and writes into that: a root and a leaf beside the
-/// range's own cell. The range is given up when the write takes its
+/// elements into an array and writes into that, which is one cell beside the
+/// range's own. The range is given up when the write takes its
 /// register, and is still the range it was when the write shares it. A
 /// miss builds nothing.
 #[test]
-fn a_write_to_a_range_builds_a_tree_and_leaves_the_range_alone() {
+fn a_write_to_a_range_builds_an_array_and_leaves_the_range_alone() {
     for moved in [true, false] {
         after(5, a_write_to_a_range(1, moved, 2), |m, got| {
-            assert_eq!(m.rest.heap.made(), 3, "moved {moved}");
+            assert_eq!(m.rest.heap.made(), 2, "moved {moved}");
             let v = *got.as_ref().expect("the function returns");
-            assert_eq!(tree_ints(m, v), Some(vec![2, -1, 4, 5]));
+            assert_eq!(stored_ints(m, v), Some(vec![2, -1, 4, 5]));
             the_only_cell_left(m, got);
         });
         for index in [4, -1] {
@@ -2481,13 +2513,13 @@ fn a_write_to_what_is_not_an_array_or_at_what_is_not_an_int_stops() {
 fn a_write_through_a_freed_node_stops_the_run_as_a_dead_cell() {
     let ins = vec![
         mv(1, 0, true),
-        int(3, 0),
+        int(3, 33),
         write(3, 3, true, false, 4),
         ret(2),
         ret(1),
     ];
     let with_a_freed_leaf = |heap: &mut Heap| {
-        let array = array::from_values(heap, &[Value::NIL, Value::NIL]).expect("room");
+        let array = array::from_values(heap, &[Value::NIL; 34]).expect("room");
         // The tail leaf is the last of the root's words.
         let root = array.as_cell().expect("a root");
         let tail = heap.data(root).last().copied().map(Value::from_bits);
@@ -2504,11 +2536,12 @@ fn a_write_through_a_freed_node_stops_the_run_as_a_dead_cell() {
 /// The array and map code reports a freed cell as a heap fault, and
 /// the run stops with it as a wrong count, not as a full heap.
 #[test]
-fn an_owned_push_onto_a_freed_array_stops_the_run_as_a_dead_cell() {
+fn a_push_onto_a_freed_array_stops_the_run_as_a_dead_cell() {
     after_running(HOLDS_A_CELL, |m, _| {
         let cell = held_by_a_global(m);
         m.rest.heap.release(cell).expect("the global's reference");
-        let pushed = array::push_owned(&mut m.rest.heap, Some(cell), Value::NIL, End::Back);
+        let freed = Stored::Tree(cell);
+        let pushed = array::push(&mut m.rest.heap, freed, Value::NIL, End::Back);
         let pushed = pushed.map(Value::bits).map_err(fault);
         assert_eq!(pushed, Err(Stop::broken(Broken::DeadCell)));
         assert_eq!(fault(Fault::Full), Stop::HeapFull);
@@ -3517,7 +3550,8 @@ fn a_loop_of_any_kind_takes_no_more_for_more_turns() {
             m.run().expect("it runs to its end");
             (len, m.rest.heap.words_carved())
         };
-        assert_eq!(room(2_000), room(60_000), "{body}");
+        // Both are a whole number of the turns that three functions take by turns.
+        assert_eq!(room(3_000), room(60_000), "{body}");
     }
 }
 
@@ -3738,9 +3772,14 @@ impl Maker {
         function_of(reads, 0, values, body, lists, as_wide_as_you_like().0)
     }
 
-    /// How many values its cell holds.
+    /// How many words its cell has after its header: what it is given, a closure's
+    /// function, and a short array's other slots and its window.
     fn holds(&self) -> usize {
-        self.given.len() + usize::from(self.kind == Kind::Closure)
+        let n = self.given.len();
+        if self.kind == Kind::ArrayFlat {
+            return n.next_power_of_two().max(4) + 1;
+        }
+        n + usize::from(self.kind == Kind::Closure)
     }
 
     /// The registers of its operands.
@@ -3839,12 +3878,19 @@ fn makers(dst: Reg, regs: &[Reg]) -> Vec<Maker> {
         let fields = crate::code::ArgList(0);
         add(Ins::CtorWide { dst, ctor, fields }, Kind::Ctor, &given);
         let few = Args::new(regs).map(|fields| Ins::Ctor { dst, ctor, fields });
-        if let Some(mut ins) = few {
-            let mut moved = given.iter().map(|a| a.moved);
-            ins.decide(&mut Lists::default(), &mut |_| {
-                moved.next().expect("as many as fields")
-            });
-            add(ins, Kind::Ctor, &given);
+        let elements = crate::code::ArgList(0);
+        let array = Args::new(regs).map(|elements| Ins::Array { dst, elements });
+        if n <= flat::MOST {
+            add(Ins::ArrayWide { dst, elements }, Kind::ArrayFlat, &given);
+        }
+        for (ins, kind) in [(few, Kind::Ctor), (array, Kind::ArrayFlat)] {
+            if let Some(mut ins) = ins {
+                let mut moved = given.iter().map(|a| a.moved);
+                ins.decide(&mut Lists::default(), &mut |_| {
+                    moved.next().expect("as many as there are")
+                });
+                add(ins, kind, &given);
+            }
         }
         // The form that takes each, where each may be taken.
         macro_rules! form {
@@ -3967,6 +4013,10 @@ fn is_made(m: &Machine<'_, '_>, maker: &Maker, dst: Reg, registers: &[Value], wh
     let held: Vec<u64> = if maker.kind == Kind::Closure {
         assert_eq!(heap.closure_func(cell), Some(FuncIdx(0)), "{what}");
         heap.captures(cell).map(Value::bits).collect()
+    } else if maker.kind == Kind::ArrayFlat {
+        let s = array::seq(heap, Value::cell(cell)).expect("an array");
+        let elements = array::elements(heap, s).expect("no range");
+        elements.into_iter().map(Value::bits).collect()
     } else {
         heap.values(cell).map(Value::bits).collect()
     };
@@ -4020,10 +4070,12 @@ fn every_instruction_that_makes_a_cell_makes_it_of_its_operands() {
         "TupleWide",
         "Closure",
         "ClosureWide",
+        "Array",
+        "ArrayWide",
     ];
     let mut ran: Vec<&str> = Vec::new();
     on_a_machine(|m| {
-        for n in (0..=9).chain([20, 252, 253, 254, 300]) {
+        for n in (0..=9).chain([16, 17, 20, 32, 33, 252, 253, 254, 300]) {
             for regs in operand_registers(n) {
                 let ends = [regs.first(), regs.last()];
                 let dsts = ends.into_iter().flatten().copied().chain([r(250)]);
@@ -4057,7 +4109,7 @@ fn every_instruction_that_makes_a_cell_makes_it_of_its_operands() {
 #[test]
 fn a_cell_with_no_room_leaves_every_operand_as_it_was() {
     on_a_machine(|m| {
-        for n in (0..=9).chain([20, 252, 253, 254, 300]) {
+        for n in (0..=9).chain([16, 17, 20, 32, 33, 252, 253, 254, 300]) {
             for regs in operand_registers(n) {
                 let ends = [regs.first(), regs.last()];
                 let dsts = ends.into_iter().flatten().copied().chain([r(250)]);
