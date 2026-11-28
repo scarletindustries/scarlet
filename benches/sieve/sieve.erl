@@ -4,9 +4,6 @@
 -module(sieve).
 -export([main/0]).
 
-make_flags(0, Flags) -> Flags;
-make_flags(N, Flags) -> make_flags(N - 1, array:set(array:size(Flags), true, Flags)).
-
 strike(Flags, K, Step, Size) when K =< Size ->
     strike(array:set(K - 1, false, Flags), K + Step, Step, Size);
 strike(Flags, _K, _Step, _Size) -> Flags.
@@ -19,6 +16,6 @@ sieve(Flags, I, Size, Count) when I =< Size ->
 sieve(_Flags, _I, _Size, Count) -> Count.
 
 repeat(0, Total) -> Total;
-repeat(N, Total) -> repeat(N - 1, Total + sieve(make_flags(5000, array:new()), 2, 5000, 0)).
+repeat(N, Total) -> repeat(N - 1, Total + sieve(array:from_list(lists:duplicate(5000, true)), 2, 5000, 0)).
 
 main() -> io:format("~p~n", [repeat(45, 0)]).

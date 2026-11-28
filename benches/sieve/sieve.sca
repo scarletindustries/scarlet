@@ -4,14 +4,6 @@
 
 import scarlet/array
 
-fn make_flags(n Int, flags Array(Bool)) Array(Bool) {
-	if n == 0 {
-		flags
-	} else {
-		make_flags(n - 1, [..flags, True])
-	}
-}
-
 fn strike(flags Array(Bool), k Int, step Int, size Int) Array(Bool) {
 	if k <= size {
 		strike(array::put(flags, k - 1, False), k + step, step, size)
@@ -36,7 +28,7 @@ fn repeat(n Int, total Int) Int {
 	if n == 0 {
 		total
 	} else {
-		repeat(n - 1, total + sieve(make_flags(5000, []), 2, 5000, 0))
+		repeat(n - 1, total + sieve(array::repeat(True, 5000), 2, 5000, 0))
 	}
 }
 

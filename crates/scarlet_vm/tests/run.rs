@@ -2415,21 +2415,22 @@ fn the_empty_array_makes_no_cell() {
         "array::put(xs, 0, 1)",
         "array::swap(xs, 0, 0)",
         "array::reverse(xs)",
+        "array::filter(xs, fn(x) x > 1)",
+        "array::map(xs, fn(x) x + 1)",
+        "array::repeat(1, n - 3)",
+        "array::repeat(1, n - 9)",
         "map::keys(m)",
         "map::values(m)",
     ];
     for what in nothing {
         assert_eq!(made(what), "0\n", "{what}");
     }
-    // The array that is taken apart has one cell, and so has a range. A `filter` and a `map`
-    // make a closure for their loop.
+    // The array that is taken apart has one cell, and so has a range.
     for (what, cells) in [
         ("rest([n])", 1),
         ("rest(n..n + 1)", 1),
         ("drop([n, n], 2)", 1),
         ("drop(build(1, []), 1)", 1),
-        ("array::filter(xs, fn(x) x > 1)", 1),
-        ("array::map(xs, fn(x) x + 1)", 1),
     ] {
         assert_eq!(made(what), format!("{cells}\n"), "{what}");
     }

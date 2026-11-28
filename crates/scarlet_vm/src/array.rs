@@ -79,7 +79,7 @@
 
 use crate::code::Length;
 use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
-use crate::value::Value;
+use crate::value::{SMALL_INT_MAX, SMALL_INT_MIN, Value};
 use crate::word::{low_byte, low_u32, to_usize};
 
 pub(crate) mod flat;
@@ -889,6 +889,20 @@ fn words_for(items: usize) -> usize {
     let leaves = (items / B).saturating_add(1);
     // A leaf is 34 words, and the branches above the new ones come to 2 for each.
     leaves.saturating_mul(B + 4).saturating_add(CHANGE)
+}
+
+/// The words of a big Int that an `i64` holds: its header, its sign and length, and a digit.
+const BIG_WORDS: usize = 3;
+
+/// [`words_for`] the Ints from `start` up to `end`, which are more than [`MOST`], and the
+/// words of the cells of those that are big.
+pub(crate) fn words_for_range(start: i64, end: i64) -> usize {
+    let after_small = SMALL_INT_MAX.saturating_add(1);
+    let small = range_len(start.max(SMALL_INT_MIN), end.min(after_small));
+    let len = range_len(start, end);
+    let words = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+    let big = words(len.saturating_sub(small)).saturating_mul(BIG_WORDS);
+    words_for(words(len)).saturating_add(big)
 }
 
 /// The parts of the tree `array`, with a reference to each, and its cell when nothing else

@@ -2301,3 +2301,39 @@ fn a_build_from_the_empty_array_does_not_grow_faster_than_it() {
         }
     }
 }
+
+/// A range takes 3 words more for each of its Ints that is no small Int, and one that no heap
+/// has the words for counts as that.
+#[test]
+fn a_range_takes_a_cell_for_each_big_int() {
+    let big = 1i64 << 50;
+    for (start, end, bigs) in [
+        (0, 100, 0),
+        (-50, 50, 0),
+        (big - 100, big, 0),
+        (big - 99, big + 1, 1),
+        (big - 40, big + 60, 60),
+        (big, big + 100, 100),
+        (-big, 100 - big, 0),
+        (-big - 1, 99 - big, 1),
+        (-big - 100, -big, 100),
+        (i64::MAX - 100, i64::MAX, 100),
+        (i64::MIN, i64::MIN + 100, 100),
+    ] {
+        for n in start..end {
+            let mut heap = Heap::default();
+            range(&mut heap, 0, 1).expect("room");
+            let before = heap.words_used();
+            let made = crate::bigint::int(&mut heap, n).expect("room");
+            let took = heap.words_used() - before;
+            assert_eq!(took, if made.as_cell().is_some() { 3 } else { 0 }, "{n}");
+        }
+        let words = words_for_range(start, end);
+        assert_eq!(words, words_for(100) + 3 * bigs, "{start}");
+    }
+    let both_sides = words_for_range(-big - 5, big + 7);
+    assert_eq!(both_sides, words_for(2 * big as usize + 12) + 3 * 12);
+    for (start, end) in [(i64::MIN, i64::MAX), (0, i64::MAX), (i64::MIN, 0)] {
+        assert!(words_for_range(start, end) >= 1 << 62, "{start} {end}");
+    }
+}

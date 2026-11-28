@@ -3,16 +3,49 @@
  * of its input still sees the input as it was.
  */
 
+// An array of `n` elements that are all `x`, and `[]` when `n` is 0 or less.
+pub fn repeat(x a, n Int) Array(a) {
+	repeat_onto([], x, n)
+}
+
+fn repeat_onto(acc Array(a), x a, n Int) Array(a) {
+	left = n - length(acc)
+	if left <= 0 {
+		acc
+	} else {
+		repeat_onto(push_copies(acc, x, left), x, n)
+	}
+}
+
+// `xs` and then `n` times `x`, but no more than 1024 times, so that no call runs
+// for long.
+@vm(array__push_copies)
+fn push_copies(xs Array(a), x a, n Int) Array(a)
+
 pub fn map(xs Array(a), f fn(a) b) Array(b) {
-	fold(xs, [], fn(acc, x) [..acc, f(x)])
+	map_onto([], xs, f)
+}
+
+fn map_onto(acc Array(b), xs Array(a), f fn(a) b) Array(b) {
+	match xs {
+		[] -> acc
+		[h, ..t] -> map_onto([..acc, f(h)], t, f)
+	}
 }
 
 pub fn filter(xs Array(a), p fn(a) Bool) Array(a) {
-	fold(xs, [], fn(acc, x) if p(x) {
-		[..acc, x]
-	} else {
-		acc
-	})
+	filter_onto([], xs, p)
+}
+
+fn filter_onto(acc Array(a), xs Array(a), p fn(a) Bool) Array(a) {
+	match xs {
+		[] -> acc
+		[h, ..t] -> if p(h) {
+			filter_onto([..acc, h], t, p)
+		} else {
+			filter_onto(acc, t, p)
+		}
+	}
 }
 
 // Folds from the first element to the last.
@@ -36,7 +69,14 @@ pub fn each(xs Array(a), f fn(a) Nil) Nil {
 }
 
 pub fn reverse(xs Array(a)) Array(a) {
-	fold(xs, [], fn(acc, x) [x, ..acc])
+	reverse_onto([], xs)
+}
+
+fn reverse_onto(acc Array(a), xs Array(a)) Array(a) {
+	match xs {
+		[] -> acc
+		[h, ..t] -> reverse_onto([h, ..acc], t)
+	}
 }
 
 // Takes O(1) time.
@@ -69,12 +109,18 @@ pub fn swap(xs Array(a), i Int, j Int) Array(a) {
 }
 
 pub fn contains(xs Array(a), target a) Bool {
-	match xs {
-		[] -> False
-		[h, ..t] -> if h == target {
+	contains_from(xs, target, 0)
+}
+
+// This runs none of the program's code, so it need not give up the elements that
+// it has passed, as the searches below do.
+fn contains_from(xs Array(a), target a, i Int) Bool {
+	match xs[i] {
+		None -> False
+		Some(x) -> if x == target {
 			True
 		} else {
-			contains(t, target)
+			contains_from(xs, target, i + 1)
 		}
 	}
 }

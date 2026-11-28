@@ -70,6 +70,10 @@ Erlang crashes in these cases, and Scarlet gives a harmless value instead.
 
 A slice is a `Result` rather than a shorter array, because a range that misses the array is a failure the caller should see, not one to hide by clamping. `binary::slice_bits` follows the same rule. The old VM crashed on an out-of-range slice instead.
 
+**Built: an index is an Int of any size.** A range may have more elements than 2^50, and one of those is found by its index as any other is. An index that is past the end of the array is a miss, however big it is. A write to a range makes an array of its elements first, and a long range that the heap has no room for as an array stops the program with "the program ran out of heap", before any of its elements is made.
+
+**Built: `array::repeat(x, n)` is an array of `n` elements that are all `x`,** and `[]` when `n` is 0 or less, so there is no `n` that it refuses. A long one is made 1,024 elements at a time, with a tail call between, so no one step of it is long, and one that the heap has no room for stops the program as any array does.
+
 **Built: a write at an index never crashes, and comes in two forms.**
 
 - `array::set(xs, i, x)` is `Result(Array(a), Nil)`: `Ok` of the array with `x` at index `i`, and `Err(Nil)` when `i` is negative or past the end. It is the form that says when the write did not happen, by the stdlib rule that an operation that can fail returns a `Result`.

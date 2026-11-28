@@ -1,0 +1,157 @@
+// What `map`, `filter`, `reverse` and the searches of scarlet/array give for an array of
+// any kind and length, in which order they call back and how often, and `array::repeat`.
+
+import scarlet/array
+import scarlet/string
+
+type Rec {
+	n Int
+	name String
+}
+
+fn pushed(i Int, n Int, acc Array(Int)) Array(Int) {
+	if i == n {
+		acc
+	} else {
+		pushed(i + 1, n, [..acc, i])
+	}
+}
+
+fn fronted(i Int, acc Array(Int)) Array(Int) {
+	if i == 0 {
+		acc
+	} else {
+		fronted(i - 1, [i - 1, ..acc])
+	}
+}
+
+fn cut(xs Array(Int)) Array(Int) {
+	match xs {
+		[_, ..t] -> t
+		[] -> []
+	}
+}
+
+fn ways(n Int) Array(Array(Int)) {
+	[pushed(0, n, []), fronted(n, []), 0..n, cut([-1, ..pushed(0, n, [])])]
+}
+
+// Plain loops to hold the others to.
+fn is_count(xs Array(Int), i Int, n Int, by Int, from Int) Bool {
+	if i == n {
+		array::length(xs) == n
+	} else if xs[i] == Some(from + i * by) {
+		is_count(xs, i + 1, n, by, from)
+	} else {
+		False
+	}
+}
+
+fn lengths(xs Array(Array(Int)), n Int) Bool {
+	array::all(xs, fn(x) array::length(x) == n)
+}
+
+fn checked(n Int) Bool {
+	array::all(ways(n), fn(xs) {
+		doubled = array::map(xs, fn(x) x * 2)
+		named = array::map(xs, fn(x) Rec(x, "r${x}"))
+		itself = array::map(xs, fn(_) xs)
+		even = array::filter(xs, fn(x) x % 2 == 0)
+		none = array::filter(xs, fn(x) array::length(xs) < x)
+		all = array::filter(xs, fn(x) array::contains(xs[x..x + 1] or [], x))
+		back = array::reverse(xs)
+		is_count(doubled, 0, n, 2, 0) &&
+			is_count(array::map(named, fn(r) r.n), 0, n, 1, 0) &&
+			array::map(array::reverse(named), fn(r) r.name) == array::map(back, fn(x) "r${x}") &&
+			array::length(itself) == n &&
+			lengths(itself, n) &&
+			is_count(even, 0, { n + 1 } / 2, 2, 0) &&
+			none == [] &&
+			all == xs &&
+			is_count(back, 0, n, -1, n - 1) &&
+			array::reverse(back) == xs &&
+			is_count(xs, 0, n, 1, 0) &&
+			array::contains(xs, n - 1) == n > 0 &&
+			!array::contains(xs, n) &&
+			array::contains(named, Rec(n - 1, "r${n - 1}")) == n > 0 &&
+			array::find(xs, fn(x) x == n - 1) == xs[n - 1] &&
+			array::any(xs, fn(x) x == n - 1) == n > 0 &&
+			array::all(xs, fn(x) x < n)
+	})
+}
+
+fn owned(n Int) Bool {
+	is_count(array::map(pushed(0, n, []), fn(x) x + 1), 0, n, 1, 1) &&
+		is_count(array::reverse(fronted(n, [])), 0, n, -1, n - 1) &&
+		is_count(array::filter(pushed(0, n, []), fn(x) x >= 0), 0, n, 1, 0) &&
+		array::contains(pushed(0, n, []), n - 1) == n > 0 &&
+		!array::contains(pushed(0, n, []), n)
+}
+
+fn said(x Int, b Bool) Bool {
+	println("  at ${x}")
+	b
+}
+
+fn copies(x a, n Int, acc Array(a)) Array(a) {
+	if n <= 0 {
+		acc
+	} else {
+		copies(x, n - 1, [..acc, x])
+	}
+}
+
+fn repeated(n Int) Bool {
+	xs = array::repeat(n, n)
+	r = Rec(n, "same")
+	written = array::put(array::repeat(r, n), n / 2, Rec(0, "other"))
+	array::length(xs) == n &&
+		xs == copies(n, n, []) &&
+		array::repeat([1, 2], n) == copies([1, 2], n, []) &&
+		array::length(array::filter(written, fn(x) x == r)) == n - 1 &&
+		array::repeat(xs, 3) == [xs, xs, xs] &&
+		[..xs, 1][n] == Some(1) &&
+		array::length(array::map(xs, fn(x) x + 1)) == n
+}
+
+pub fn main() {
+	sizes = [0, 1, 2, 33]
+	array::each(sizes, fn(n) println("${n} ${checked(n)} ${owned(n)}"))
+	println("map")
+	println(array::map([3, 1, 2], fn(x) said(x, x > 1)))
+	println("filter")
+	println(array::filter([3, 1, 2], fn(x) said(x, x > 1)))
+	println("find")
+	println(array::find([3, 1, 2], fn(x) said(x, x < 2)))
+	println("find nothing")
+	println(array::find([3, 1, 2], fn(x) said(x, x > 5)))
+	println("any")
+	println(array::any([3, 1, 2], fn(x) said(x, x < 2)))
+	println("all")
+	println(array::all([3, 1, 2], fn(x) said(x, x > 1)))
+	println("a long one")
+	println(array::find(0..1_000_000_000, fn(x) x * x > 1000))
+	println(array::contains(0..1_000_000_000, 70))
+	println("repeat")
+	copied = [1, 2, 31, 33]
+	array::each(copied, fn(n) println("${n} ${repeated(n)}"))
+	far = 4_611_686_018_427_387_904 * 4_611_686_018_427_387_904
+	println(array::repeat("x", 3))
+	println(array::repeat("x", 0))
+	println(array::repeat("x", -1))
+	println(array::repeat("x", -4_611_686_018_427_387_904))
+	println(array::repeat("x", 0 - far))
+	println(array::repeat([], 2))
+	println(string::inspect(array::repeat(Nil, 2)))
+	println("a long range")
+	r = -5..9_007_199_254_740_992
+	println(r[4_503_599_627_370_496])
+	println(r[9_007_199_254_740_996])
+	println(r[9_007_199_254_740_997])
+	println(r[far])
+	println(r[-4_503_599_627_370_496])
+	println(r[4_503_599_627_370_496..4_503_599_627_370_499])
+	println(r[4_503_599_627_370_496..far])
+	println(array::put(0..3, far, 1))
+	println(array::put(0..3, 0 - far, 1))
+}

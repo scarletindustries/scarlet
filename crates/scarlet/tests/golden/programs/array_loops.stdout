@@ -1,0 +1,61 @@
+0 True True
+1 True True
+2 True True
+33 True True
+map
+  at 3
+  at 1
+  at 2
+[True, False, True]
+filter
+  at 3
+  at 1
+  at 2
+[3, 2]
+find
+  at 3
+  at 1
+Some(1)
+find nothing
+  at 3
+  at 1
+  at 2
+None
+any
+  at 3
+  at 1
+True
+all
+  at 3
+  at 1
+False
+a long one
+Some(32)
+True
+repeat
+1 True
+2 True
+31 True
+33 True
+[x, x, x]
+[]
+[]
+[]
+[]
+[
+  [],
+  []
+]
+[Nil, Nil]
+a long range
+Some(4503599627370491)
+Some(9007199254740991)
+None
+None
+None
+Ok(
+  [4503599627370491, 4503599627370492, 4503599627370493]
+)
+Err(Nil)
+[0, 1, 2]
+[0, 1, 2]

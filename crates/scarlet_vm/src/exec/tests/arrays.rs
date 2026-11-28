@@ -347,7 +347,7 @@ fn extend_of(src: Arg<Reg>, items: &[Reg], end: End) -> (Ins<Reg>, Lists<Reg>) {
     extend_taking(src, &items, end)
 }
 
-fn extend_taking(src: Arg<Reg>, items: &[Arg<Reg>], end: End) -> (Ins<Reg>, Lists<Reg>) {
+pub(super) fn extend_taking(src: Arg<Reg>, items: &[Arg<Reg>], end: End) -> (Ins<Reg>, Lists<Reg>) {
     let ins = Ins::ArrayExtend {
         dst: Dst(TAIL),
         src,
@@ -374,7 +374,7 @@ fn literal_of(items: &[Arg<Reg>]) -> (Ins<Reg>, Lists<Reg>) {
     (ins, lists)
 }
 
-fn push_of(src: Arg<Reg>, item: Arg<Reg>, end: End) -> (Ins<Reg>, Lists<Reg>) {
+pub(super) fn push_of(src: Arg<Reg>, item: Arg<Reg>, end: End) -> (Ins<Reg>, Lists<Reg>) {
     let ins = Ins::ArrayPush {
         dst: Dst(TAIL),
         src,
@@ -395,7 +395,7 @@ fn uncons_of(head: Option<Reg>, src: Arg<Reg>) -> (Ins<Reg>, Lists<Reg>) {
 }
 
 /// A function that does `ins` and then stops, as [`asks`].
-fn asks_with(ins: Ins<Reg>, lists: Lists<Reg>) -> &'static Code {
+pub(super) fn asks_with(ins: Ins<Reg>, lists: Lists<Reg>) -> &'static Code {
     let body = vec![ins, Ins::Bad { why: WhyId(0) }, Ins::Bad { why: WhyId(9) }];
     function_of(ReadsClosure::Nothing, 0, 60, body, lists, ctors().0)
 }

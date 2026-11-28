@@ -432,7 +432,7 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         Intrinsic::CryptoP256Verify | Intrinsic::CryptoEd25519Verify => 3,
         Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapSize | Intrinsic::MapToList => 1,
         Intrinsic::MapHas | Intrinsic::MapDelete => 2,
-        Intrinsic::MapSet => 3,
+        Intrinsic::MapSet | Intrinsic::ArrayPushCopies => 3,
         Intrinsic::StringInspect
         | Intrinsic::StringLength
         | Intrinsic::ArrayLength

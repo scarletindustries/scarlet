@@ -76,6 +76,11 @@ impl Heap {
         self.arena.len() + self.boxed
     }
 
+    /// How many words the arena has asked the system for.
+    pub(crate) fn arena_room(&self) -> usize {
+        self.arena.capacity()
+    }
+
     /// Have every new cell made at the arena's end.
     pub(crate) fn forget_freed(&mut self) {
         self.free.fill(0);
@@ -961,6 +966,44 @@ fn a_cell_made_in_freed_space_holds_only_its_own_words() {
         assert_eq!(heap.kind(b), Some(Kind::ArrayBranch));
         assert_eq!(heap.data(b), second.as_slice());
         assert_eq!(heap.unique(b), Ok(true));
+    }
+}
+
+/// Many references at once are as many as one by one, and stop where a count stops.
+#[test]
+fn many_references_are_added_at_once() {
+    for n in [0, 1, 2, 1024] {
+        let mut heap = Heap::default();
+        let cell = heap.string(b"held by some").expect("room");
+        heap.own_times(Value::cell(cell), n).expect("a live cell");
+        assert_eq!(count(heap.header(cell.index())), 1 + n as i32);
+        for _ in 0..n {
+            assert_eq!(heap.unique(cell), Ok(false));
+            heap.release(cell).expect("a live cell");
+        }
+        assert_eq!(heap.unique(cell), Ok(true));
+        assert_eq!(text(&heap, cell), "held by some");
+        heap.release(cell).expect("a live cell");
+        assert_eq!(heap.live(), 0);
+        assert_eq!(heap.own_times(Value::cell(cell), n), Err(DeadCell));
+        assert_eq!(heap.own_times(Value::EMPTY_ARRAY, n), Ok(()));
+    }
+    for (held, n, want) in [
+        (i32::MAX - 5, 5, i32::MAX),
+        (i32::MAX - 5, 6, UNCOUNTED),
+        (i32::MAX, 0, i32::MAX),
+        (1, i32::MAX as usize, UNCOUNTED),
+        (1, usize::MAX, UNCOUNTED),
+        (UNCOUNTED, 1024, UNCOUNTED),
+    ] {
+        let mut heap = Heap::default();
+        let cell = heap.string(b"held by very many").expect("room");
+        let rest = heap.header(cell.index()) >> 32;
+        heap.recount(cell, held);
+        assert_eq!(heap.own_times(Value::cell(cell), n), Ok(()));
+        let h = heap.header(cell.index());
+        assert_eq!((count(h), h >> 32), (want, rest));
+        assert_eq!(text(&heap, cell), "held by very many");
     }
 }
 

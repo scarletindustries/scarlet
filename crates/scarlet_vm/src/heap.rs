@@ -745,6 +745,22 @@ impl Heap {
         Ok(v)
     }
 
+    /// Add `n` references to `v`. A count that would overflow is never counted again, as with
+    /// one that a single reference takes there.
+    pub(crate) fn own_times(&mut self, v: Value, n: usize) -> Result<(), DeadCell> {
+        let Some(cell) = v.as_cell() else {
+            return Ok(());
+        };
+        let held = count(self.header(cell.index()));
+        if held <= 0 {
+            return self.uncounted(cell.index());
+        }
+        let n = i32::try_from(n).ok();
+        let more = n.and_then(|n| held.checked_add(n));
+        self.recount(cell, more.unwrap_or(UNCOUNTED));
+        Ok(())
+    }
+
     /// Drop one reference to `cell`, freeing it when that was the last.
     ///
     /// A freed cell, whether it is `cell` or something a dying cell held, is

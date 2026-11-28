@@ -318,6 +318,9 @@ suite! {
         // The empty array from everything that can make one, and everything that
         // reads one.
         empty_arrays,
+        // The loops of scarlet/array over arrays of every kind and length, with
+        // callbacks that hold the array, and arrays of one value repeated.
+        array_loops,
         // Branches whose values are used further on, one in another and one in what
         // another is on, with what each holds read in it, in its other branch or
         // after it, and module constants that read each other.

@@ -23,24 +23,23 @@ fn iota(i Int, n Int, acc Array(Int)) Array(Int) {
 	}
 }
 
-// Pushes q[i], q[i + 1], ... q[q1 - 1] onto the front of acc, which leaves
-// them in reverse order.
-fn reversed(q Array(Int), i Int, q1 Int, acc Array(Int)) Array(Int) {
-	if i == q1 {
-		acc
+// Swaps q[i] and q[j] and walks inwards until the two meet.
+fn reverse(q Array(Int), i Int, j Int) Array(Int) {
+	if i < j {
+		reverse(array::swap(q, i, j), i + 1, j - 1)
 	} else {
-		reversed(q, i + 1, q1, [q[i] or 0, ..acc])
+		q
 	}
 }
 
-// The first element lives in q1, not in q, so slot 0 of q is never read.
-fn flip(q Array(Int), q1 Int, flips Int, n Int) Int {
+// The first element lives in q1, not in q, so slot 0 of q is never read. The
+// first write copies q, which the caller keeps, and the rest are in place.
+fn flip(q Array(Int), q1 Int, flips Int) Int {
 	qq = q[q1] or 0
 	if qq == 0 {
 		flips
 	} else {
-		back = q[q1 + 1..n] or []
-		flip([0, ..reversed(q, 1, q1, [q1, ..back])], qq, flips + 1, n)
+		flip(q |> array::put(q1, q1) |> reverse(1, q1 - 1), qq, flips + 1)
 	}
 }
 
@@ -54,18 +53,6 @@ fn rotate(p Array(Int), m Int, n Int) Array(Int) {
 			[..moved, h, ..rest]
 		}
 	}
-}
-
-fn swap01(p Array(Int)) Array(Int) {
-	a = p[0] or 0
-	b = p[1] or 0
-	p |> array::put(0, b) |> array::put(1, a)
-}
-
-fn swap12(p Array(Int)) Array(Int) {
-	b = p[1] or 0
-	c = p[2] or 0
-	p |> array::put(1, c) |> array::put(2, b)
 }
 
 fn advance(p Array(Int), s Array(Int), i Int, n Int) Step {
@@ -84,14 +71,14 @@ fn run(p Array(Int), s Array(Int), sign Int, sum Int, maxflips Int, n Int) Outco
 	flips = if q1 == 0 {
 		0
 	} else {
-		flip(p, q1, 1, n)
+		flip(p, q1, 1)
 	}
 	sum2 = sum + sign * flips
 	max2 = if flips > maxflips { flips } else { maxflips }
 	if sign == 1 {
-		run(swap01(p), s, -1, sum2, max2, n)
+		run(array::swap(p, 0, 1), s, -1, sum2, max2, n)
 	} else {
-		match advance(swap12(p), s, 2, n) {
+		match advance(array::swap(p, 1, 2), s, 2, n) {
 			Done -> Outcome(sum2, max2)
 			Next(p2, s2) -> run(p2, s2, 1, sum2, max2, n)
 		}

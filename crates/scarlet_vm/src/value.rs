@@ -63,8 +63,8 @@ const INT_SHIFT: u32 = 13;
 
 /// The range a small Int covers. An Int outside it is a big int, kept in a
 /// heap cell (`bigint.rs`).
-const SMALL_INT_MIN: i64 = -(1 << 50);
-const SMALL_INT_MAX: i64 = (1 << 50) - 1;
+pub(crate) const SMALL_INT_MIN: i64 = -(1 << 50);
+pub(crate) const SMALL_INT_MAX: i64 = (1 << 50) - 1;
 
 /// One value.
 ///

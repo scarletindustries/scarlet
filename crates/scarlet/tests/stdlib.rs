@@ -3,7 +3,7 @@
 //! `al run` and pins the output.
 
 mod common;
-use common::{check_ok, check_rejects, run_outputs};
+use common::{check_ok, check_rejects, run_outputs, run_source};
 
 /// Checks that every stdlib module compiles. A module is only checked when a
 /// program imports it, so without this, one that no running test imports could
@@ -1025,4 +1025,31 @@ fn stdlib_string() {
          }\n",
         "Ok(\u{E9})\nOk(\u{1F469})\nOk(hi)\nOk()\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
     );
+}
+
+/// The golden program `array_loops`, with arrays too long for it to be audited before each
+/// instruction it runs.
+#[test]
+fn array_loops_do_the_same_on_long_arrays() {
+    let mut src = include_str!("programs/array_loops.sca").to_owned();
+    for (short, long) in [
+        (
+            "sizes = [0, 1, 2, 33]",
+            "sizes = [0, 31, 32, 33, 64, 65, 1023, 1024, 1025, 1056, 1057]",
+        ),
+        (
+            "copied = [1, 2, 31, 33]",
+            "copied = [1, 32, 33, 1023, 1024, 1025, 1056, 1057, 2049, 40_000]",
+        ),
+    ] {
+        assert!(src.contains(short), "{short}");
+        src = src.replace(short, long);
+    }
+    let out = run_source("run", &src);
+    assert!(out.success, "{}\n{}", out.stdout, out.stderr);
+    let checked = out.stdout.lines().filter(|l| l.ends_with(" True True"));
+    assert_eq!(checked.count(), 11, "{}", out.stdout);
+    let copied = out.stdout.lines().skip_while(|l| *l != "repeat");
+    let copied = copied.skip(1).take(10).filter(|l| l.ends_with(" True"));
+    assert_eq!(copied.count(), 10, "{}", out.stdout);
 }

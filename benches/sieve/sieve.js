@@ -19,10 +19,6 @@ function sieve(flags, size) {
 
 let total = 0;
 for (let n = 0; n < 45; n += 1) {
-  const flags = [];
-  for (let i = 0; i < 5000; i += 1) {
-    flags.push(true);
-  }
-  total += sieve(flags, 5000);
+  total += sieve(new Array(5000).fill(true), 5000);
 }
 console.log(total);

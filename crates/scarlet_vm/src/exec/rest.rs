@@ -10,7 +10,7 @@ use scarlet_ir::core_ir::{ConstId, FuncIdx, HttpTypes, IoErrors, JsonTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
-use crate::array::{self, Root, Seq, Stored};
+use crate::array::{self, End, Root, Seq, Stored, flat};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
 use crate::code::{
@@ -49,6 +49,10 @@ pub(super) struct Rest<'c, 'h> {
     pub(super) ran: Vec<u64>,
     pub(super) heap: Heap,
 }
+
+/// The most elements that one call of `array__push_copies` adds. `array.sca` calls it
+/// again for the rest.
+const COPIES: usize = 1024;
 
 /// The values in the registers an instruction names, which it only looks at.
 #[derive(Clone, Copy)]
@@ -326,6 +330,7 @@ impl<'c> Rest<'c, '_> {
                 let n = self.seq(v)?.len(&self.heap);
                 bigint::int(&mut self.heap, n).map_err(fault)
             }
+            Intrinsic::ArrayPushCopies => self.push_copies(frame, regs),
             // A wait too long for a `u64` of milliseconds is still one nobody
             // outlives, so it waits that long instead.
             Intrinsic::ProcessSleep => {
@@ -1398,10 +1403,19 @@ impl<'c> Rest<'c, '_> {
         Ok(Some(bigint::int(&mut self.heap, n).map_err(fault)?))
     }
 
-    /// The array of the Ints from `start` up to `end`.
+    /// The array of the Ints from `start` up to `end`. One that is more than a cell, and that
+    /// the heap has no room for, is refused before any of it is made.
     #[inline(never)]
     pub(super) fn built(&mut self, start: i64, end: i64) -> Result<Stored, Stop> {
+        let len = usize::try_from(array::range_len(start, end)).unwrap_or(usize::MAX);
+        if len > flat::MOST {
+            let words = array::words_for_range(start, end);
+            self.heap.reserve(words).map_err(fault)?;
+        }
         let mut items = Vec::new();
+        if items.try_reserve_exact(len).is_err() {
+            return Err(Stop::HeapFull);
+        }
         for n in start..end {
             match bigint::int(&mut self.heap, n) {
                 Ok(n) => items.push(n),
@@ -1409,6 +1423,38 @@ impl<'c> Rest<'c, '_> {
             }
         }
         array::stored(&mut self.heap, &items).map_err(fault)
+    }
+
+    /// The array in the first register and then the value in the second one, as many times
+    /// as the third says but no more than [`COPIES`]. A count below 0 is none.
+    // Handed the registers, as `builtin` is. Handed the three values, it would have
+    // `builtin` keep more at hand, which costs every call of any other built-in 2 to 4
+    // machine instructions.
+    #[inline(never)]
+    fn push_copies(&mut self, frame: &[Value; WINDOW], regs: &[Reg]) -> Result<Value, Stop> {
+        let args = Operands { frame, regs };
+        let [xs, x, n] = [0, 1, 2].map(|k| args.get(k));
+        let n = match self.int_of(n)? {
+            Int::Small(n) => usize::try_from(n).unwrap_or(0).min(COPIES),
+            Int::Big(n) if n.sign() == Sign::Minus => 0,
+            Int::Big(_) => COPIES,
+        };
+        let a = match self.seq(xs)? {
+            Seq::Empty => Stored::Empty,
+            Seq::Flat(flat) => {
+                self.heap.share(flat.cell())?;
+                Stored::Flat(flat)
+            }
+            Seq::Tree(cell) => {
+                self.heap.share(cell)?;
+                Stored::Tree(cell)
+            }
+            Seq::Range { start, end } => self.built(start, end)?,
+        };
+        if let Err(dead) = self.heap.own_times(x, n) {
+            return Err(self.give_back([a.value()], dead.into()));
+        }
+        array::extend(&mut self.heap, a, &vec![x; n], End::Back).map_err(fault)
     }
 
     /// Element `index` of the array `a`, holding its own reference, or `None`
@@ -1419,9 +1465,11 @@ impl<'c> Rest<'c, '_> {
         if let Some((start, end)) = a.as_cell().and_then(|c| array::range_at(&self.heap, c))
             && let Some(i) = index.small_int()
         {
-            return match usize::try_from(i) {
-                Ok(i) => self.of_range(start, end, i),
-                Err(_) => Ok(None),
+            let at = start.checked_add(i).filter(|at| i >= 0 && *at < end);
+            return match (at.and_then(Value::int), usize::try_from(i)) {
+                (Some(v), _) => Ok(Some(v)),
+                (None, Ok(i)) => self.of_range(start, end, i),
+                (None, Err(_)) => Ok(None),
             };
         }
         let s = self.seq(a)?;
@@ -1477,14 +1525,15 @@ impl<'c> Rest<'c, '_> {
         }
     }
 
-    /// The Int `v` as a position in an array, or `None` when it names none.
-    /// That is when it is negative, or a big int, which is past the end of
-    /// any array.
+    /// The Int `v` as a position in an array, or `None` when it is one that no array
+    /// has. A range may be longer than any small Int.
     #[inline(never)]
     fn position(&self, v: Value) -> Result<Option<usize>, Stop> {
         match v.view() {
             View::Int(i) => Ok(usize::try_from(i).ok()),
-            View::Cell(cell) if self.heap.is(cell, Kind::BigInt) => Ok(None),
+            View::Cell(cell) if self.heap.is(cell, Kind::BigInt) => {
+                Ok(self.heap.read_big_int(cell).to_usize())
+            }
             v @ (View::Float(_)
             | View::Nil
             | View::Bool(_)

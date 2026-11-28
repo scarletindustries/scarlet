@@ -82,6 +82,7 @@ intrinsics! {
     ArrayLength = "array__length",
     ArraySet = "array__set",
     ArrayPut = "array__put",
+    ArrayPushCopies = "array__push_copies",
     BinaryFromString = "binary__from_string",
     BinaryToString = "binary__to_string",
     BinaryBitSize = "binary__bit_size",

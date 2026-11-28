@@ -18,10 +18,7 @@ def sieve(flags, size):
 def main():
     total = 0
     for _ in range(45):
-        flags = []
-        for _ in range(5000):
-            flags.append(True)
-        total += sieve(flags, 5000)
+        total += sieve([True] * 5000, 5000)
     print(total)
 
 

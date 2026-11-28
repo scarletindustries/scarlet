@@ -233,7 +233,7 @@ fn indices(n: usize) -> Vec<BigInt> {
     all
 }
 
-fn number(heap: &mut Heap, n: &BigInt) -> Value {
+pub(super) fn number(heap: &mut Heap, n: &BigInt) -> Value {
     match n.to_i64().and_then(Value::int) {
         Some(v) => v,
         None => big(heap, n),

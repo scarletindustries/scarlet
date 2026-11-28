@@ -15,6 +15,7 @@ use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::TiVec;
 
 mod arrays;
+mod copies;
 mod probes;
 mod update;
 
