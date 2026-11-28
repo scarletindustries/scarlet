@@ -1,8 +1,8 @@
 use super::super::tests::{
-    check, cut, elements, extend, int, is_flat, push, root, set, skip, slice, small, stored,
-    string, text, texts, uncons, word,
+    check, concat, cut, elements, extend, int, is_flat, push, root, set, skip, slice, small,
+    stored, string, text, texts, uncons, word,
 };
-use super::super::{Stored, concat, from_values, release, seq};
+use super::super::{Stored, from_values, release, seq};
 use super::*;
 use crate::heap::Kind;
 use std::collections::VecDeque;
@@ -218,7 +218,6 @@ fn each_of(slots: usize, start: usize, len: usize, held: bool) {
                     let b = turned(heap, wide, turn, other);
                     let more: Vec<i64> = (0..other as i64).collect();
                     let (l, r) = if first { (b, a) } else { (a, b) };
-                    let (l, r) = (stored(heap, l), stored(heap, r));
                     let joined = concat(heap, l, r).expect("room");
                     let at = if first { 0 } else { len };
                     (joined, with(at, &more))
@@ -241,8 +240,7 @@ fn an_array_is_joined_to_itself() {
             for _ in 0..1 + held {
                 heap.own(a).expect("live");
             }
-            let of = stored(&heap, a);
-            let twice = concat(&mut heap, of, of).expect("room");
+            let twice = concat(&mut heap, a, a).expect("room");
             check(&heap, twice);
             assert_eq!(texts(&heap, twice), [names.clone(), names.clone()].concat());
             let mut all = vec![twice];
@@ -340,7 +338,6 @@ fn a_short_array_does_what_a_list_does() {
                     let (names, items) = new(&mut heap, n);
                     let b = from_values(&mut heap, &items).expect("room");
                     let (l, r) = if end == End::Front { (b, a) } else { (a, b) };
-                    let (l, r) = (stored(&heap, l), stored(&heap, r));
                     a = concat(&mut heap, l, r).expect("room");
                     let i = at(want.len());
                     for (k, name) in names.into_iter().enumerate() {
@@ -453,38 +450,39 @@ fn a_queue_and_a_stack_make_no_cell_for_each_turn() {
     }
 }
 
-/// A cell that is full of 32 in the order of its slots is the leaf of the tree that the
-/// array outgrows it as, so a push past it copies no element, held or not. One that is
-/// turned is copied once.
+/// A cell that has 32 elements, whichever slot the first is in, is the head of the tree that
+/// the array outgrows it as, or a leaf of it, so a push past it copies no element, held or not.
 #[test]
-fn an_array_that_outgrows_its_cell_keeps_it_as_a_leaf() {
+fn an_array_that_outgrows_its_cell_keeps_it() {
     for held in [false, true] {
-        for (start, in_order) in [(0, true), (32, true), (1, false), (31, false)] {
+        for start in [0, 1, 16, 31] {
             for end in [End::Front, End::Back] {
                 for more in [1usize, 2, 40] {
                     let mut heap = Heap::default();
-                    let a = turned(&mut heap, 32, start % 32, 32);
+                    let a = turned(&mut heap, 32, start, 32);
                     if held {
                         heap.own(a).expect("live");
                     }
                     let items: Vec<Value> = (0..more).map(|i| small(100 + i as i64)).collect();
+                    let made = heap.made();
                     let b = extend(&mut heap, a, &items, end).expect("room");
                     check(&heap, b);
+                    // A root, what the items are in, and a branch over two leaves.
+                    let leaves = usize::from(end == End::Front && more > 32);
+                    let want = 1 + more.div_ceil(32) + leaves;
+                    assert_eq!(heap.made() - made, want, "{start} {end:?} {more}");
                     let r = root(&heap, b);
-                    let leaf = [r.head, r.tree, r.tail]
-                        .into_iter()
-                        .any(|part| part.bits() == a.bits());
-                    let under = heap
-                        .data(r.tree.as_cell().unwrap_or(b.as_cell().expect("a tree")))
-                        .contains(&a.bits());
-                    assert_eq!(leaf || under, in_order, "{start} {end:?} {more}");
+                    let parts = r.parts().into_iter();
+                    let leaves = r.tree.as_cell().into_iter().flat_map(|c| heap.values(c));
+                    let there = parts.chain(leaves).any(|v| v.bits() == a.bits());
+                    assert!(there, "{start} {end:?} {more}");
                     let mut want: Vec<i64> = (0..32).collect();
                     let at = if end == End::Front { 0 } else { 32 };
                     want.splice(at..at, 100..100 + more as i64);
                     assert_eq!(numbers(&heap, b), want);
                     if !held {
                         counted(&heap, &[b], "outgrown");
-                        // The leaf is the tree's alone, and is written in place.
+                        // It is the tree's alone, and is written in place.
                         let made = heap.made();
                         let c = set(&mut heap, b, at.abs_diff(more) % want.len(), small(-1));
                         assert_eq!(word(c), Ok(b.bits()));
@@ -666,7 +664,7 @@ fn what_has_no_room_gives_up_what_it_was_handed() {
     for len in [1usize, 4, 5, 8, 16, 31, 32, 33, 40] {
         for held in [false, true] {
             for way in 0..9 {
-                for more in (0..48).chain([100, 400, 1200]) {
+                for more in (0..48).chain([100, 400, 1200, 5000, 20_000]) {
                     let mut heap = Heap::default();
                     let strings = |heap: &mut Heap, n: usize| -> Vec<Value> {
                         (0..n).map(|i| string(heap, &format!("s{i}"))).collect()
@@ -679,7 +677,6 @@ fn what_has_no_room_gives_up_what_it_was_handed() {
                     let given = strings(&mut heap, 35);
                     let live = heap.live();
                     heap.limit_to(heap.words_used() + more);
-                    let of = stored(&heap, a);
                     let (made, used) = match way {
                         0 => (push(&mut heap, a, given[0], End::Back), 1),
                         1 => (push(&mut heap, a, given[0], End::Front), 1),
@@ -701,12 +698,11 @@ fn what_has_no_room_gives_up_what_it_was_handed() {
                                     continue;
                                 }
                             };
-                            let b = stored(&heap, b);
-                            (concat(&mut heap, of, b), 2)
+                            (concat(&mut heap, a, b), 2)
                         }
                         _ => {
                             heap.own(a).expect("live");
-                            (concat(&mut heap, of, of), 0)
+                            (concat(&mut heap, a, a), 0)
                         }
                     };
                     let what = format!("{len} {held} {way} {more}");
@@ -719,10 +715,6 @@ fn what_has_no_room_gives_up_what_it_was_handed() {
                             if held && way != 8 {
                                 assert_eq!(elements(&heap, a).len(), len, "{what}");
                                 assert_eq!(heap.live(), live - used, "{what}");
-                            }
-                            // What two trees are joined to has no bound to ask for.
-                            if way == 8 && len > 32 {
-                                continue;
                             }
                         }
                     }
@@ -753,7 +745,9 @@ fn an_array_with_no_room_gives_up_its_elements() {
         let strings = room.words_used();
         from_values(&mut room, &items).expect("room");
         let needs = room.words_used() - strings;
-        for more in (0..40.min(needs)).chain([needs / 2, needs - 1, needs]) {
+        // A tree asks for more than it comes to take.
+        let all = if len > 32 { needs + 20_000 } else { needs };
+        for more in (0..40.min(needs)).chain([needs / 2, needs - 1, all]) {
             let mut heap = Heap::default();
             let items: Vec<Value> = (0..len)
                 .map(|i| string(&mut heap, &format!("{i}")))
@@ -761,13 +755,13 @@ fn an_array_with_no_room_gives_up_its_elements() {
             heap.limit_to(strings + more);
             match from_values(&mut heap, &items) {
                 Ok(made) => {
-                    assert_eq!(more, needs, "{len}");
+                    assert!(more >= needs, "{len}");
                     check(&heap, made);
                     counted(&heap, &[made], "made");
                 }
                 Err(why) => {
                     assert_eq!(why, Fault::Full);
-                    assert!(more < needs, "{len} {more}");
+                    assert!(more < all, "{len} {more}");
                     assert_eq!(heap.live(), 0, "{len} {more}");
                     counted(&heap, &[], "refused");
                 }
@@ -790,90 +784,66 @@ fn a_push_on_nothing_with_no_room_gives_up_the_item() {
     }
 }
 
-/// Two arrays that do not fit in one cell share the one that is a leaf as it is, whichever
-/// that is.
+/// Two short arrays that do not fit in one cell are the head and the tail of a tree, whole,
+/// or a leaf and one of those, the same one twice as well, so only the root is made. With no
+/// room for that both are given up.
 #[test]
-fn a_join_that_outgrows_a_cell_shares_a_leaf() {
-    for (a, b) in [(32usize, 2usize), (2, 32), (32, 32)] {
-        for held in [false, true] {
-            let mut heap = Heap::default();
-            let items: Vec<Value> = (0..a + b)
-                .map(|i| string(&mut heap, &format!("{i}")))
-                .collect();
-            let (x, y) = items.split_at(a);
-            let x = from_values(&mut heap, x).expect("room");
-            let y = from_values(&mut heap, y).expect("room");
-            if held {
-                heap.own(x).expect("live");
-                heap.own(y).expect("live");
-            }
-            let made = heap.made();
-            let (of, with) = (stored(&heap, x), stored(&heap, y));
-            let joined = concat(&mut heap, of, with).expect("room");
-            // A leaf of those that are not shared, when there are any, and a root.
-            let leaves = usize::from(a < 32 || b < 32);
-            assert_eq!(heap.made() - made, leaves + 1, "{a} {b} {held}");
-            assert_eq!(elements(&heap, joined).len(), items.len());
-            for (i, v) in elements(&heap, joined).into_iter().enumerate() {
-                assert_eq!(text(&heap, v), i.to_string(), "{a} {b} {held}");
-            }
-            check(&heap, joined);
-            let mut all = vec![joined];
-            if held {
-                all.extend([x, y]);
-            }
-            counted(&heap, &all, "joined");
-        }
-    }
-}
-
-/// Two that are leaves are shared whole, the same one twice as well, and only the root is
-/// made. With no room for that both are given up. One that is turned is copied.
-#[test]
-fn a_join_of_two_leaves_shares_both() {
-    for (turn_a, turn_b) in [(0, 0), (0, 3), (5, 0), (5, 3)] {
-        for itself in [false, true] {
-            for held in [false, true] {
-                for more in 0..60 {
-                    let mut heap = Heap::default();
-                    let a = turned(&mut heap, 32, turn_a, 32);
-                    let b = match itself {
-                        true => heap.own(a).expect("live"),
-                        false => turned(&mut heap, 32, turn_b, 32),
-                    };
-                    let mut kept = Vec::new();
-                    if held {
-                        kept.extend([a, b].map(|v| heap.own(v).expect("live")));
-                    }
-                    let want = [numbers(&heap, a), numbers(&heap, b)].concat();
-                    heap.limit_to(heap.words_used() + more);
-                    let made = heap.made();
-                    let (of, with) = (stored(&heap, a), stored(&heap, b));
-                    let what = format!("{turn_a} {turn_b} {itself} {held} {more}");
-                    match concat(&mut heap, of, with) {
-                        Ok(joined) => {
-                            check(&heap, joined);
-                            assert_eq!(numbers(&heap, joined), want, "{what}");
-                            let turn_b = if itself { turn_a } else { turn_b };
-                            let shares = turn_a == 0 && turn_b == 0;
-                            assert_eq!(heap.made() - made == 1, shares, "{what}");
-                            assert!(!shares || more >= 7, "{what}");
-                            kept.push(joined);
+fn a_join_that_outgrows_a_cell_makes_a_root() {
+    let mut full = 0;
+    for (a, b) in [
+        (32, 2),
+        (2, 32),
+        (32, 32),
+        (17, 16),
+        (16, 17),
+        (31, 2),
+        (20, 30),
+    ] {
+        for (turn_a, turn_b) in [(0, 0), (0, 3), (5, 0), (5, 3)] {
+            for itself in [false, true] {
+                for held in [false, true] {
+                    for more in [0, 8, 9, 10, 100, 10_000] {
+                        if itself && 2 * a <= 32 {
+                            continue;
                         }
-                        Err(why) => {
-                            assert_eq!(why, Fault::Full);
-                            assert!(more < 7 || turn_a + turn_b > 0, "{what}");
+                        let mut heap = Heap::default();
+                        let x = turned(&mut heap, 32, turn_a, a);
+                        let y = match itself {
+                            true => heap.own(x).expect("live"),
+                            false => turned(&mut heap, 32, turn_b, b),
+                        };
+                        let mut kept = Vec::new();
+                        if held {
+                            kept.extend([x, y].map(|v| heap.own(v).expect("live")));
                         }
+                        let want = [numbers(&heap, x), numbers(&heap, y)].concat();
+                        heap.limit_to(heap.words_used() + more);
+                        let made = heap.made();
+                        let what = format!("{a} {b} {turn_a} {turn_b} {itself} {held} {more}");
+                        match concat(&mut heap, x, y) {
+                            Ok(joined) => {
+                                assert_eq!(heap.made() - made, 1, "{what}");
+                                check(&heap, joined);
+                                assert_eq!(numbers(&heap, joined), want, "{what}");
+                                kept.push(joined);
+                            }
+                            Err(why) => {
+                                assert_eq!(why, Fault::Full);
+                                assert!(more < 10_000, "{what}");
+                                full += 1;
+                            }
+                        }
+                        counted(&heap, &kept, &what);
+                        for v in kept {
+                            release(&mut heap, v).expect("live");
+                        }
+                        assert_eq!(heap.live(), 0, "{what}");
                     }
-                    counted(&heap, &kept, &what);
-                    for v in kept {
-                        release(&mut heap, v).expect("live");
-                    }
-                    assert_eq!(heap.live(), 0, "{what}");
                 }
             }
         }
     }
+    assert!(full > 100, "{full}");
 }
 
 /// A slice that leaves a quarter of the slots or less, in a cell that nothing else holds,
@@ -908,6 +878,22 @@ fn a_slice_does_not_keep_a_cell_much_too_long() {
             }
         }
     }
+}
+
+#[test]
+fn a_short_array_that_loses_nothing_is_the_one_it_was() {
+    let mut heap = Heap::default();
+    let items: Vec<Value> = (0..9).map(small).collect();
+    let a = from_values(&mut heap, &items).expect("room");
+    let made = heap.made();
+    for held in [false, true] {
+        if held {
+            heap.own(a).expect("live");
+        }
+        assert_eq!(word(skip(&mut heap, a, 0)), Ok(a.bits()), "{held}");
+        assert_eq!(word(slice(&mut heap, a, 0, 9)), Ok(a.bits()), "{held}");
+    }
+    assert_eq!(heap.made(), made);
 }
 
 /// What is taken out by a pattern leaves `Nil` where it was, and the rest is given up with

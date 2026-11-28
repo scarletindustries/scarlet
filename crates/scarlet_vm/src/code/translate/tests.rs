@@ -125,6 +125,38 @@ fn the_loader_marks_the_moves_of_a_compiled_program() {
     assert_eq!(moves(".kept"), [false]);
 }
 
+/// A join takes both its arrays, each in a register of its own. One that is read again, or
+/// that is both of them, is copied there. No other takes an instruction.
+#[test]
+fn the_loader_hands_a_join_both_its_arrays() {
+    let code = code(
+        "fn last_use(xs Array(Int), ys Array(Int)) Array(Int) { [..xs, ..ys] }\n\
+         fn twice(xs Array(Int)) Array(Int) { [..xs, ..xs] }\n\
+         fn first_again(xs Array(Int), ys Array(Int)) Array(Int) {\n\
+         \tzs = [..xs, ..ys]\n\
+         \t[..zs, ..xs]\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(last_use([1], [2]))\n\
+         \tprintln(twice([1]))\n\
+         \tprintln(first_again([1], [2]))\n\
+         }\n",
+    );
+    assert_eq!(ops(&code, ".last_use"), [Op::ArrayJoin, Op::Ret]);
+    assert_eq!(ops(&code, ".twice"), [Op::Move, Op::ArrayJoin, Op::Ret]);
+    let again = [Op::Move, Op::ArrayJoin, Op::ArrayJoin, Op::Ret];
+    assert_eq!(ops(&code, ".first_again"), again);
+    for name in [".twice", ".first_again"] {
+        let ins = body(&code, named(&code, name));
+        assert_eq!(moves(ins), [false], "{name}");
+        for i in ins {
+            if let Ins::ArrayJoin { a, b, .. } = i {
+                assert_ne!(a.0, b.0, "{name}");
+            }
+        }
+    }
+}
+
 /// A map that is given up behind a set or a delete gives its reference to it,
 /// wherever its drop is among those there: the key's and the value's may come
 /// first, and do in generic code and for a map that is no parameter.
@@ -756,6 +788,8 @@ fn translator<'c>(
         source,
         this: None,
         tables,
+        values: 0,
+        kinds: Vec::new(),
         steps: Vec::new(),
         lists: Lists::default(),
         labels: Vec::new(),

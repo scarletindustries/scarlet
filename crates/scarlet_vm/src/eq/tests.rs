@@ -134,4 +134,18 @@ fn arrays_compare_in_every_form() {
             assert!(!equal(&heap, a, b) && !equal(&heap, b, a), "{a:?} {b:?}");
         }
     }
+    // Nor one that differs in one element alone, in whichever form that is.
+    for i in 0..3 {
+        let mut differs = ints.clone();
+        differs[i] = Value::int(9).expect("small");
+        let [differ @ .., _] = heap.three_in_every_form(&differs);
+        for a in equals {
+            for b in differ {
+                assert!(
+                    !equal(&heap, a, b) && !equal(&heap, b, a),
+                    "{i} {a:?} {b:?}"
+                );
+            }
+        }
+    }
 }

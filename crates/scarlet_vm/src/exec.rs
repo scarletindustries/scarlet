@@ -19,7 +19,7 @@
 
 use scarlet_ir::core_ir::{GlobalSlot, MAX_PARAMS};
 
-use crate::array::{self, End, Flat, Found, Seq, Stored, Wrote, flat};
+use crate::array::{self, End, Flat, Joined, Seq, Stored, Wrote, flat};
 use crate::bigint;
 use crate::code::{
     Arg, AssignList, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Hit, Hits, Ins, Makes,
@@ -1148,8 +1148,8 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                     pc = miss.index();
                 }
             }
-            Ins::ArrayConcat { dst, a, b } => {
-                array_concat(win.lend(), rest, dst, a, b)?;
+            Ins::ArrayJoin { dst, a, b } => {
+                pc = array_join(win.lend(), rest, dst, [a, b], pc)?;
             }
             Ins::ArraySlice {
                 dst,
@@ -2126,25 +2126,38 @@ fn array_extend(
     Ok(win.put(&mut rest.heap, dst, longer)?)
 }
 
-/// The array in `a` and then the one in `b`.
+/// The arrays in `a` and `b`, one after the other, into `dst`. Gives where the run goes on,
+/// which is at `next` once that is done. Until then it is at this instruction again, and what
+/// is left to join is in `a` and `b`.
+// The loop would keep the place it came from in a register of its own if it could see that
+// this one goes back to it, and every instruction would pay for that.
 #[inline(never)]
-fn array_concat(
+fn array_join(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
-    a: Arg<Reg>,
-    b: Arg<Reg>,
-) -> Result<(), Stop> {
-    let (l, r) = (rest.seq(win.get(a.reg))?, rest.seq(win.get(b.reg))?);
-    let l = to_change(&mut win, rest, a, l)?;
-    let r = match to_change(&mut win, rest, b, r) {
+    [a, b]: [Taken<Reg>; 2],
+    next: usize,
+) -> Result<usize, Stop> {
+    let (l, r) = (rest.seq(win.get(a.0))?, rest.seq(win.get(b.0))?);
+    let l = to_change(&mut win, rest, Arg::moved(a.0), l)?;
+    let r = match to_change(&mut win, rest, Arg::moved(b.0), r) {
         Ok(r) => r,
         Err(stop) => return Err(rest.give_back([l.value()], stop)),
     };
     // A range that is all of the join is an array of its elements by now. Kept as a range it
     // would be built again by each push on it and each write to it.
-    let joined = array::concat(&mut rest.heap, l, r).map_err(fault)?;
-    Ok(win.put(&mut rest.heap, dst, joined)?)
+    match array::join(&mut rest.heap, l, r).map_err(fault)? {
+        Joined::All(joined) => {
+            win.put(&mut rest.heap, dst, joined)?;
+            Ok(next)
+        }
+        Joined::Some(l, r) => {
+            win.set(&mut rest.heap, a.0, l)?;
+            win.set(&mut rest.heap, b.0, r)?;
+            Ok(next.wrapping_sub(1))
+        }
+    }
 }
 
 /// The first element of the array in `src`, which this takes, into `head` and the array of
@@ -2159,7 +2172,7 @@ fn array_uncons(
 ) -> Result<bool, Stop> {
     let v = win.get(src.reg);
     // An array that is one cell, which this takes and nothing else holds, is asked first,
-    // then a tree that only leaves one more of its head behind, and then a range.
+    // then a tree whose first element is in its head or its root, and then a range.
     let (first, left) = match v.as_cell() {
         Some(cell) => match flat::take_first(&mut rest.heap, cell) {
             Some(first) if first.only => {
@@ -2167,7 +2180,7 @@ fn array_uncons(
                 (first.value, Value::EMPTY_ARRAY)
             }
             Some(first) => (first.value, v),
-            None => match array::leave_first(&mut rest.heap, cell)? {
+            None => match array::take_first(&mut rest.heap, cell) {
                 Some(first) => (first, v),
                 None => match array::next_of_range(&mut rest.heap, cell)? {
                     Some(first) => (first, v),
@@ -2203,15 +2216,7 @@ fn uncons_apart(
         Seq::Empty => return Ok(false),
         Seq::Range { start, end } => rest.uncons_range(start, end, wants)?,
         Seq::Flat(flat) => flat::uncons(&mut rest.heap, flat, wants).map_err(fault)?,
-        Seq::Tree(cell) if src.moved => {
-            let found = array::uncons_owned(&mut rest.heap, cell, wants);
-            // It has taken what the register held.
-            if !matches!(found, Ok(None)) {
-                win.empty(src.reg);
-            }
-            found.map_err(fault)?
-        }
-        Seq::Tree(cell) => array::uncons(&mut rest.heap, cell, wants).map_err(fault)?,
+        Seq::Tree(cell) => return uncons_tree(win, rest, head, tail, src, cell),
     };
     let (first, left) = found.ok_or_else(empty_cell)?;
     let_go(&mut win, rest, src)?;
@@ -2220,6 +2225,43 @@ fn uncons_apart(
     }
     win.hit(&mut rest.heap, tail, left)?;
     Ok(true)
+}
+
+/// [`uncons_apart`] of the tree `cell`. One that something holds afterwards has the rest of its
+/// head shared with what is left, and one that nothing does gives up its parts.
+fn uncons_tree(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    head: Option<Hit<Reg>>,
+    tail: Hit<Reg>,
+    src: Arg<Reg>,
+    cell: Cell,
+) -> Result<bool, Stop> {
+    if !src.moved || !rest.heap.unique(cell)? {
+        let found = array::uncons(&mut rest.heap, cell, head.is_some());
+        let (first, left) = found.map_err(fault)?.ok_or_else(empty_cell)?;
+        let_go(&mut win, rest, src)?;
+        if let Some(head) = head {
+            win.hit(&mut rest.heap, head, first)?;
+        }
+        win.hit(&mut rest.heap, tail, left)?;
+        return Ok(true);
+    }
+    let first = array::get(&rest.heap, cell, 0).ok_or_else(empty_cell)?;
+    if head.is_some() {
+        rest.heap.own(first)?;
+    }
+    win.empty(src.reg);
+    match array::skip(&mut rest.heap, Stored::Tree(cell), 1) {
+        Ok(left) => {
+            if let Some(head) = head {
+                win.hit(&mut rest.heap, head, first)?;
+            }
+            win.hit(&mut rest.heap, tail, left)?;
+            Ok(true)
+        }
+        Err(why) => Err(rest.give_back(head.map(|_| first), fault(why))),
+    }
 }
 
 /// Some elements of the array in `src` into `elements`, and what it has behind those
@@ -2275,18 +2317,35 @@ fn split_in<const N: usize>(
             more.as_mut_slice()
         }
     };
-    match array::split(&rest.heap, cell, split, found) {
-        Found::Miss => return Ok(false),
-        Found::All => {}
-        Found::Apart(r) => rest.run(&r, split.from as usize, found)?,
-        Found::Other => return split_range(win, rest, (elements, tail), src, split, found),
+    let Some(r) = array::tree(&rest.heap, cell) else {
+        return split_range(win, rest, (elements, tail), src, split, found);
+    };
+    if !array::fits(r.len() as u64, split.length) {
+        return Ok(false);
     }
-    let found = &*found;
-    for (hit, v) in elements.iter().zip(found) {
-        if hit.hit().is_some() {
-            rest.heap.own(*v)?;
+    let from = split.from as usize;
+    let wanted = || elements.iter().map(|hit| hit.hit().is_some());
+    let mut taken = false;
+    match array::head_with(&rest.heap, &r, from, elements.len()) {
+        // One that this takes, and nothing else holds, hands its elements over.
+        Some((head, at)) => {
+            taken = src.moved
+                && rest.heap.unique(cell)?
+                && flat::take_run(&mut rest.heap, head.cell(), at, wanted(), found);
+            if !taken {
+                head.read_run(&rest.heap, at, found);
+            }
+        }
+        None => rest.run(&r, from, found)?,
+    }
+    if !taken {
+        for (v, wanted) in found.iter().zip(wanted()) {
+            if wanted {
+                rest.heap.own(*v)?;
+            }
         }
     }
+    let found = &*found;
     let array = Stored::Tree(cell);
     put_found(
         win,

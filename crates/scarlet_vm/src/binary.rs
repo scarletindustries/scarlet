@@ -62,7 +62,6 @@ pub(crate) fn bits(heap: &Heap, cell: Cell) -> Option<Bits> {
         | Kind::Tuple
         | Kind::ArrayFlat
         | Kind::ArrayRoot
-        | Kind::ArrayLeaf
         | Kind::ArrayBranch
         | Kind::Range
         | Kind::Map

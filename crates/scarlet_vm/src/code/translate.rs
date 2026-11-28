@@ -141,6 +141,8 @@ pub(super) fn translate<'c>(
         source,
         this,
         tables,
+        values,
+        kinds,
         steps: Vec::new(),
         lists: Lists::default(),
         labels: Vec::new(),
@@ -164,10 +166,10 @@ pub(super) fn translate<'c>(
         steps: t.steps,
         lists: t.lists,
         labels: labels.ok_or(Unfit::Broken(Broken::NoPlace))?,
-        values,
+        values: t.values,
         params: core.params.iter().map(|p| of(p.id)).collect(),
         words: t.words,
-        kinds,
+        kinds: t.kinds,
         closure: t.closure,
         misses: t.misses,
     })
@@ -200,6 +202,10 @@ struct Translator<'c> {
     source: &'c Source<'c>,
     this: Option<FuncIdx>,
     tables: &'c mut Tables,
+    /// [`Draft::values`].
+    values: u32,
+    /// [`Draft::kinds`].
+    kinds: Vec<Option<Makes>>,
     steps: Vec<Step>,
     lists: Lists<VReg>,
     /// Where each label is, once it is placed.
@@ -684,6 +690,18 @@ impl<'c> Translator<'c> {
         }
         self.push(Ins::Jump { to });
         Ok(())
+    }
+
+    /// The value of `local` in a register of its own, for an instruction that takes it.
+    fn handed(&mut self, local: LocalId) -> Result<Taken<VReg>, Unfit> {
+        let own = VReg(self.values);
+        self.values = own.0.checked_add(1).ok_or(Unfit::TooMany(Limit::Values))?;
+        self.kinds.push(Some(Makes::Any));
+        self.push(Ins::Move {
+            dst: Dst(own),
+            src: Arg::shared(of(local)),
+        });
+        Ok(Taken(own))
     }
 
     fn give_up_all(&mut self, locals: &[LocalId]) {
@@ -1475,11 +1493,11 @@ impl<'c> Translator<'c> {
                 let (xs, items) = args.split_first().ok_or(arity(Arity::AtLeastOne))?;
                 self.pushes(dst, *xs, items, End::Back)
             }
-            PrimOp::ArrayConcat => two().map(|(a, b)| Ins::ArrayConcat {
-                dst,
-                a: Arg::shared(of(a)),
-                b: Arg::shared(of(b)),
-            }),
+            PrimOp::ArrayConcat => {
+                let (a, b) = two()?;
+                let [a, b] = [self.handed(a)?, self.handed(b)?];
+                Ok(Ins::ArrayJoin { dst, a, b })
+            }
             PrimOp::MakeTuple => Ok(match *args {
                 [a, b] => Ins::Tuple2 {
                     dst,

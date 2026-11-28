@@ -587,20 +587,23 @@ fn a_range_joined_to_the_empty_array_is_built_once() {
          \tcost(array::concat(0..10000, none(1)))\n\
          \tcost(0..1000)\n\
          }\n",
-        // A write copies the root and a node a level, and 10,000 has one level more.
-        "400 300 20200 700\n\
-         400 300 200200 700\n\
-         400 300 200200 700\n\
-         400 300 200200 700\n\
-         400 400 2000200 700\n\
+        // A push makes a root and an end, and one at the front puts the full one that was there
+        // in the tree, with a copy of a branch a level, of which 10,000 has one more. The write
+        // is to the first 32, so it copies the root and those.
+        "500 200 20200 700\n\
+         500 200 200200 700\n\
+         500 200 200200 700\n\
+         500 200 200200 700\n\
+         600 200 2000200 700\n\
          7000 3400 200200 700\n",
     );
 }
 
 /// An array that is pushed to and then loses as many again, a window, a queue or a stack of
 /// 30, 31, 32, 33 or 64, makes about one cell for each turn at most, and so does the join of
-/// two arrays of 32. What is printed is the cells of 1,000 turns in units of 120, so that 8
-/// is about one a turn.
+/// two arrays of 32. Only a stack that goes to 33 and back to 30 or 31 makes two, a root and
+/// the cell that its three are in. What is printed is the cells of 1,000 turns in units of
+/// 120, so that 8 is about one a turn.
 #[test]
 fn an_array_that_hovers_about_one_cell_makes_one_a_turn_at_most() {
     prints(
@@ -664,14 +667,56 @@ fn an_array_that_hovers_about_one_cell_makes_one_a_turn_at_most() {
          \t})\n\
          \tprintln(cost(32, fn(xs) joins(1000, xs, 0)))\n\
          }\n",
-        "30: 0 0 0 8\n31: 0 9 0 8\n32: 8 9 8 8\n33: 8 8 8 8\n64: 8 8 8 8\n8\n",
+        "30: 0 0 0 16\n31: 0 1 0 16\n32: 0 1 8 8\n33: 0 0 8 8\n64: 0 1 8 8\n8\n",
+    );
+}
+
+/// Two long arrays are joined in their order, whichever is longer and whatever else holds
+/// them, and what is kept is as it was. The join of an array with itself is one too.
+#[test]
+fn long_arrays_are_joined_in_steps() {
+    prints(
+        "import scarlet/array\n\
+         type Two {\n\
+         \tleft Array(Int)\n\
+         \tright Array(Int)\n\
+         }\n\
+         fn same(xs Array(Int), i Int, n Int) Bool {\n\
+         \tif i == n { array::length(xs) == n } else { if xs[i] == Some(i) { same(xs, i + 1, n) } else { False } }\n\
+         }\n\
+         fn kept(a Int, b Int) String {\n\
+         \txs = [..[], ..0..a]\n\
+         \tys = [..[], ..a..a + b]\n\
+         \tall = [..xs, ..ys]\n\
+         \tback = [..xs, ..ys]\n\
+         \tok = same(all, 0, a + b) && same(xs, 0, a) && back == all && array::length(ys) == b\n\
+         \t\"${ok}\"\n\
+         }\n\
+         fn taken(two Two) Array(Int) {\n\
+         \tmatch two {\n\
+         \t\tTwo(left, right) -> [..left, ..right]\n\
+         \t}\n\
+         }\n\
+         fn twice(n Int) String {\n\
+         \txs = [..[], ..0..n]\n\
+         \tall = [..xs, ..xs]\n\
+         \tok = same(all[0..n] or [], 0, n) && all[n..2 * n] == Ok(xs) && same(xs, 0, n)\n\
+         \t\"${ok}\"\n\
+         }\n\
+         pub fn main() {\n\
+         \tarray::each([(5000, 5000), (9001, 7003), (4100, 12345), (2048, 2048), (2049, 2081)], fn(p) {\n\
+         \t\tall = taken(Two([..[], ..0..p.0], [..[], ..p.0..p.0 + p.1]))\n\
+         \t\tprintln(\"${kept(p.0, p.1)} ${same(all, 0, p.0 + p.1)} ${twice(p.1)}\")\n\
+         \t})\n\
+         }\n",
+        "True True True\nTrue True True\nTrue True True\nTrue True True\nTrue True True\n",
     );
 }
 
 /// An index below 0 is in no array, however long that is. Neither write makes the elements
 /// of the range.
 #[test]
-fn an_index_below_0_misses_in_the_longest_arrays() {
+fn an_index_below_0_misses_in_a_long_array() {
     prints(
         "import scarlet/array\n\
          fn all(xs Array(Int), acc Array(Int), n Int) Array(Int) {\n\
@@ -687,10 +732,10 @@ fn an_index_below_0_misses_in_the_longest_arrays() {
          \tarray::each([-1, -2, -3, -5, -1000], fn(i) read(xs, i))\n\
          }\n\
          pub fn main() {\n\
-         \treads(all([7], [], 63))\n\
+         \treads(all([7], [], 11))\n\
          \treads(-9223372036854775807..9223372036854775807)\n\
          }\n",
-        "18446744073709551615\n\
+        "4095\n\
          0 missed 0\n0 missed 0\n0 missed 0\n0 missed 0\n0 missed 0\n\
          18446744073709551614\n\
          0 missed 0\n0 missed 0\n0 missed 0\n0 missed 0\n0 missed 0\n",
@@ -1355,9 +1400,9 @@ fn a_write_to_an_array_with_one_holder_changes_it_in_place() {
          \tprintln(internal::cells_made() - made)\n\
          }\n",
         // `checked` makes no `Ok`, because its `match` is on the write. `held`
-        // copies the root and the nodes down to the slot: a branch and a leaf
-        // for the 96 elements in the tree, and the tail leaf for the last 4.
-        "0\n24995000\n0\n37492500\n100\n296\n",
+        // copies the root and the cells down to the slot: the head for the first
+        // 32, a branch and a leaf for the next 64, and the tail for the last 4.
+        "0\n24995000\n0\n37492500\n100\n264\n",
     );
 }
 
@@ -1523,7 +1568,7 @@ fn a_write_keeps_every_element_counted() {
 /// `match`. Neither does an update inside an `if` whose value is used.
 ///
 /// One spelling copies the root and the nodes down to the slot at every write,
-/// 24,984 cells with the 5,000 records. That is a rule: an argument written after
+/// 24,920 cells with the 5,000 records. That is a rule: an argument written after
 /// the write reads `s`, so `s` has to live past the write.
 ///
 /// A record `main` built itself and has no more use for is the callee's once it
@@ -1609,7 +1654,7 @@ fn a_record_update_gives_up_the_record_before_it_runs_the_new_fields() {
          \tprintln(State(..done, check: 1).check)\n\
          }\n",
         "37492500\n5000\n37492500\n5000\n37492500\n5000\n37497500\n5000\n37492500\n5000\n\
-         37497500\n24984\n37492500\n5000\n5000\n37492500\n1\n",
+         37497500\n24920\n37492500\n5000\n5000\n37492500\n1\n",
     );
 }
 
@@ -4073,8 +4118,7 @@ fn a_literal_with_a_spread_may_be_longer_than_a_frame() {
 }
 
 /// A long literal is made in pieces of one leaf each, so it costs a cell for
-/// each leaf and at most one more for where it hangs, and not one for each
-/// element.
+/// each leaf and few more, and not one for each element.
 #[test]
 fn a_long_literal_makes_a_few_cells_for_each_leaf() {
     let src = format!(
@@ -4090,9 +4134,8 @@ fn a_long_literal_makes_a_few_cells_for_each_leaf() {
          }}\n",
         each_of(999, |i| i.to_string()).join(", ")
     );
-    // 32 leaves, the root, and the branch made anew for each leaf hung but the
-    // first.
-    prints(&src, "1000\n63\n");
+    // 32 leaves, the root, and the branch that the leaves hang from.
+    prints(&src, "1000\n34\n");
 }
 
 /// The forms that take their operands from a list do what those that hold them

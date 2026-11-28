@@ -113,7 +113,7 @@ fn a_full_stack_has_a_message() {
     assert_eq!(says.as_deref(), Some("the program ran out of stack"));
 }
 
-/// A cell's header can tell 65,520 constructors apart. A program with more that
+/// A cell's header can tell 65,521 constructors apart. A program with more that
 /// have fields, the stdlib's among them, is told so before it runs, and one
 /// with nearly as many runs.
 #[test]

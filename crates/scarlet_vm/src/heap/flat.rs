@@ -40,15 +40,6 @@ impl Heap {
         Some((slots, *rest.first()?))
     }
 
-    /// The items of `cell`, when it is the leaf of an array's tree. A short array's cell may
-    /// be one, and its slots are then all items.
-    #[inline(always)]
-    pub(crate) fn leaf(&self, cell: Cell) -> Option<&[u64]> {
-        let (h, words) = self.arena.get(cell.index().at()..)?.split_first()?;
-        let is_leaf = class(*h).is(Kind::ArrayLeaf) || class(*h).is(Kind::ArrayFlat);
-        words.get(..scan(*h)).filter(|_| is_leaf)
-    }
-
     /// [`Self::flat`], when `cell` has one holder too.
     #[inline(always)]
     pub(crate) fn flat_alone(&mut self, cell: Cell) -> Option<Alone<'_>> {

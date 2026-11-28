@@ -156,14 +156,14 @@ fn an_array_hashes_the_same_in_every_form() {
     let ints: Vec<Value> = (3..6).map(|n| Value::int(n).expect("small")).collect();
     let forms = heap.three_in_every_form(&ints);
     let hashes = forms.map(|v| hash(&heap, v));
-    assert_eq!(hashes, [hashes[4]; 5]);
+    assert_eq!(hashes, [hashes[6]; 7]);
     // The same of elements that are no Ints.
     let names: Vec<Value> = ["a", "b", "c"]
         .map(|s| Value::cell(heap.string(s.as_bytes()).expect("room")))
         .to_vec();
-    let [flat, same, turned, left, _] = heap.three_in_every_form(&names);
-    let hashes = [flat, same, turned, left].map(|v| hash(&heap, v));
-    assert_eq!(hashes, [hashes[0]; 4]);
+    let [forms @ .., _] = heap.three_in_every_form(&names);
+    let hashes = forms.map(|v: Value| hash(&heap, v));
+    assert_eq!(hashes, [hashes[0]; 6]);
     let other = [names[0], names[2], names[1]];
     let other = array::from_values(&mut heap, &other).expect("room");
     assert_ne!(hash(&heap, other), hashes[0]);
@@ -175,7 +175,7 @@ fn an_array_hashes_the_same_in_every_form() {
 fn the_empty_array_hashes_as_an_array_of_length_0() {
     let mut heap = Heap::default();
     let nil = Value::NIL.bits();
-    let words = [0, 0, 0, nil, nil, nil];
+    let words = [nil, nil, nil, nil, 0, 0, 0];
     let tree = Value::cell(heap.make(Kind::ArrayRoot, &words).expect("room"));
     let range = Value::cell(heap.make(Kind::Range, &[5, 5]).expect("room"));
     let words = [nil, nil, nil, nil, 0];

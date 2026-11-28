@@ -1055,11 +1055,10 @@ fn a_cell_of_each_kind(heap: &mut Heap) -> Vec<(Cell, usize)> {
         (Kind::Tuple, 5, 5),
         (Kind::Tuple, 253, 253),
         (Kind::Tuple, 300, 300),
-        (Kind::ArrayLeaf, 5, 5),
         (Kind::ArrayFlat, 5, 4),
         (Kind::ArrayFlat, 33, 32),
-        (Kind::ArrayRoot, 5, 0),
-        (Kind::ArrayBranch, 5, 0),
+        (Kind::ArrayRoot, 7, 4),
+        (Kind::ArrayBranch, 32, 32),
         (Kind::Map, 5, 0),
         (Kind::MapNode, 5, 0),
         (Kind::MapCollision, 5, 0),
@@ -1645,11 +1644,6 @@ fn what_an_instruction_takes_leaves_its_register() {
             src: Arg::shared(r(0)),
             items: some,
             end: End::Back,
-        },
-        Ins::ArrayConcat {
-            dst,
-            a: Arg::shared(r(0)),
-            b: whole,
         },
         Ins::ArraySlice {
             dst: MaybeHit::new(Some(dst.0)),
@@ -2520,9 +2514,9 @@ fn a_write_through_a_freed_node_stops_the_run_as_a_dead_cell() {
     ];
     let with_a_freed_leaf = |heap: &mut Heap| {
         let array = array::from_values(heap, &[Value::NIL; 34]).expect("room");
-        // The tail leaf is the last of the root's words.
+        // The tail is the fourth of the root's words.
         let root = array.as_cell().expect("a root");
-        let tail = heap.data(root).last().copied().map(Value::from_bits);
+        let tail = heap.data(root).get(3).copied().map(Value::from_bits);
         let leaf = tail.and_then(Value::as_cell).expect("a tail leaf");
         heap.release(leaf).expect("a live cell");
         Some(array)

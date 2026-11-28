@@ -114,8 +114,8 @@ pub fn all(xs Array(a), p fn(a) Bool) Bool {
 	}
 }
 
-// Joins two arrays. The result shares structure with both inputs instead of
-// copying them.
+// Joins two arrays. The shorter one is added to the longer, so a join costs as
+// much as the shorter one is long.
 pub fn concat(xs Array(a), ys Array(a)) Array(a) {
 	[..xs, ..ys]
 }

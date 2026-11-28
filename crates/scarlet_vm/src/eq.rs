@@ -104,7 +104,6 @@ fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool 
         // never values.
         Kind::ArrayFlat
         | Kind::ArrayRoot
-        | Kind::ArrayLeaf
         | Kind::ArrayBranch
         | Kind::Range
         | Kind::Binary

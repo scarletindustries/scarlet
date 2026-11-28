@@ -203,14 +203,13 @@ pub(crate) enum Kind {
     /// capture's value word, in order. Each capture holds one reference. A
     /// function with none is a value word of its own, and needs no cell.
     Closure = 8,
-    /// A long array's leaf or its root. [`crate::array`] has their layout; the heap only knows which of their
-    /// words hold references.
-    ArrayLeaf = 9,
-    ArrayRoot = 10,
+    /// A long array's root, whose first four words are values, or a branch of
+    /// its tree. [`crate::array`] has their layout.
+    ArrayRoot = 9,
+    ArrayBranch = 10,
     /// A short array: its slots, each a value word, and behind them a word that
     /// says which of them are its elements ([`crate::array`]). Each slot holds one
     /// reference.
-    // One bit from a leaf's, so that one test asks whether a cell is either.
     ArrayFlat = 11,
     /// A map's root, one of its nodes, or a list of keys whose whole hashes
     /// are equal. [`crate::map`] has their layout. Each holds references in
@@ -218,11 +217,9 @@ pub(crate) enum Kind {
     Map = 12,
     MapNode = 13,
     MapCollision = 14,
-    /// A branch of a long array's tree.
-    ArrayBranch = 15,
     /// A constructor with fields: each field's value word, in order. Each field
     /// holds one reference. Which constructor it is, is the header's class.
-    Ctor = 16,
+    Ctor = 15,
 }
 
 impl Kind {
@@ -233,16 +230,15 @@ impl Kind {
     /// What a cell of this kind says of its values in its header.
     const fn scan(self) -> Scan {
         match self {
-            Kind::Ctor | Kind::Tuple | Kind::Closure | Kind::ArrayLeaf => Scan::All,
+            Kind::Ctor | Kind::Tuple | Kind::Closure | Kind::ArrayBranch => Scan::All,
             Kind::ArrayFlat => Scan::AllButLast,
             Kind::BinarySlice => Scan::First,
+            Kind::ArrayRoot => Scan::FirstFour,
             Kind::String
             | Kind::BigInt
             | Kind::Range
             | Kind::Binary
             | Kind::Handle
-            | Kind::ArrayRoot
-            | Kind::ArrayBranch
             | Kind::Map
             | Kind::MapNode
             | Kind::MapCollision => Scan::Ask,
@@ -256,6 +252,7 @@ enum Scan {
     All,
     AllButLast,
     First,
+    FirstFour,
     /// None, so the kind is asked.
     Ask,
 }
@@ -268,6 +265,7 @@ impl Scan {
             Scan::All => n,
             Scan::AllButLast => n.saturating_sub(1),
             Scan::First => n.min(1),
+            Scan::FirstFour => n.min(4),
             Scan::Ask => 0,
         }
     }
@@ -1319,6 +1317,24 @@ impl Heap {
         class(self.header(cell.index())).is(kind)
     }
 
+    /// Whether `cell` is in the arena and holds nothing, as a string, a binary and a big Int do.
+    #[inline(always)]
+    pub(crate) fn holds_nothing(&self, cell: Cell) -> bool {
+        raw(self.header(cell.index()))
+    }
+
+    /// Whether `cell` is in the arena and its header says which words of it are values. Those are
+    /// no cells then, or cells that hold nothing.
+    pub(crate) fn holds_no_holder(&self, cell: Cell) -> bool {
+        let n = scan(self.header(cell.index()));
+        let words = self.words(cell.index(), 1).get(..n).unwrap_or_default();
+        n > 0
+            && words.iter().all(|w| {
+                let held = Value::from_bits(*w).as_cell();
+                held.is_none_or(|cell| self.holds_nothing(cell))
+            })
+    }
+
     /// [`Self::is`], and the words after `cell`'s header, for a walk that
     /// wants both at every step.
     #[inline(always)]
@@ -1461,7 +1477,7 @@ impl Heap {
         let field = self.boxed(index, h).get(i)?;
         match class(h).scan() {
             Scan::All => Some(Value::from_bits(*field)),
-            Scan::AllButLast | Scan::First | Scan::Ask => None,
+            Scan::AllButLast | Scan::First | Scan::FirstFour | Scan::Ask => None,
         }
     }
 
@@ -1471,7 +1487,7 @@ impl Heap {
         let index = cell.index();
         let words: &[u64] = match class(self.header(index)).scan() {
             Scan::All => self.words(index, 1),
-            Scan::AllButLast | Scan::First | Scan::Ask => &[],
+            Scan::AllButLast | Scan::First | Scan::FirstFour | Scan::Ask => &[],
         };
         words.iter().map(|w| Value::from_bits(*w))
     }
@@ -1569,6 +1585,28 @@ impl Heap {
         let (h, words) = onward.split_first()?;
         let fits = class(*h).is(kind) && size(*h) > N;
         fits.then(|| words.first_chunk()).flatten()
+    }
+
+    /// [`Self::chunk`], when `cell` has one holder too.
+    #[inline(always)]
+    pub(crate) fn chunk_alone<const N: usize>(&self, cell: Cell, kind: Kind) -> Option<&[u64; N]> {
+        let (h, words) = self.arena.get(cell.index().at()..)?.split_first()?;
+        let alone = *h & CLASS_AND_COUNT == with_class(1, Class::of(kind));
+        (alone && size(*h) > N)
+            .then(|| words.first_chunk())
+            .flatten()
+    }
+
+    /// [`Self::chunk`], for its one holder to change.
+    #[inline(always)]
+    pub(crate) fn chunk_mut<const N: usize>(
+        &mut self,
+        cell: Cell,
+        kind: Kind,
+    ) -> Option<&mut [u64; N]> {
+        let (h, words) = self.arena.get_mut(cell.index().at()..)?.split_first_mut()?;
+        let fits = class(*h).is(kind) && size(*h) > N;
+        fits.then(|| words.first_chunk_mut()).flatten()
     }
 
     /// Whether `cell` has one holder, who may then change it in place.
@@ -1688,35 +1726,6 @@ impl Heap {
                 *place = Some(source);
             }
         }
-    }
-
-    /// A new cell with the kind and words of `cell` and one reference, which
-    /// is the caller's. Everything `cell` holds gets one more reference, for
-    /// the copy. A freed cell has nothing to copy and is [`Fault::DeadCell`].
-    /// This is for an array's nodes, which a write copies when something
-    /// else holds them. It is not for a handle, whose number the host would
-    /// then be asked to let go of twice.
-    pub(crate) fn copy(&mut self, cell: Cell) -> Result<Cell, Fault> {
-        let index = cell.index();
-        let h = self.header(index);
-        let kind = class(h).kind().ok_or(Fault::DeadCell)?;
-        let words = self.data_len(index, h);
-        let make = Make {
-            class: class(h),
-            scan: kind.scan(),
-            variant: cell.variant(),
-        };
-        let new = self.blank(make, words)?;
-        self.copy_words(cell, 0..words, new, 0);
-        for i in held(class(h), words) {
-            let Some(w) = self.data(new).get(i) else {
-                break;
-            };
-            if let Some(held) = Value::from_bits(*w).as_cell() {
-                self.share(held)?;
-            }
-        }
-        Ok(new)
     }
 
     /// Free `cell`, whose one holder has moved what it held somewhere else,
@@ -1939,22 +1948,17 @@ fn freed(h: u64) -> bool {
 
 /// Which of the `len` words after the header of a cell of this class hold a
 /// value, and so a reference. The header of a cell in the arena says it of most
-/// kinds, as its scan. This says it of the rest, which are an array root's
-/// three parts (after its length, height and offset), an array branch's
-/// children (after its height and size table) and every word of a map cell
+/// kinds, as its scan. This says it of the rest, which is every word of a map cell
 /// after its first. It says it of a long cell of any class too.
 fn held(class: Class, len: usize) -> std::ops::Range<usize> {
     match class.kind() {
         Some(Kind::Map | Kind::MapNode | Kind::MapCollision) => 1..len,
-        Some(Kind::ArrayRoot) => 3..len,
-        // A branch is its height, then a size table and the children, the
-        // same number of each.
-        Some(Kind::ArrayBranch) => len.saturating_sub(len.saturating_sub(1) / 2)..len,
         Some(
             kind @ (Kind::Ctor
             | Kind::Closure
             | Kind::Tuple
-            | Kind::ArrayLeaf
+            | Kind::ArrayRoot
+            | Kind::ArrayBranch
             | Kind::ArrayFlat
             | Kind::BinarySlice
             | Kind::String

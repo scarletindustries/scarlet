@@ -143,13 +143,13 @@ fn a_forms_tag_is_its_values() {
     }
 }
 
-/// There are 65,520 classes for constructors. One with no fields takes none.
+/// There are 65,521 classes for constructors. One with no fields takes none.
 #[test]
 fn a_program_with_too_many_constructors_does_not_load() {
-    let most = 65_520;
+    let most = 65_521;
     let with = |fields: &[usize]| {
         let types = Types::from([
-            (TypeId(1), a_type(&vec![1; most / 2])),
+            (TypeId(1), a_type(&vec![1; most - most / 2])),
             (TypeId(2), a_type(&vec![0; 60_000])),
             (TypeId(3), a_type(&vec![3; most / 2])),
             (TypeId(4), a_type(fields)),

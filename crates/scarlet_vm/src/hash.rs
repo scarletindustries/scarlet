@@ -189,8 +189,7 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
             }
         }
         // Handled above, or never a value of its own.
-        Kind::ArrayLeaf
-        | Kind::ArrayBranch
+        Kind::ArrayBranch
         | Kind::Binary
         | Kind::BinarySlice
         | Kind::MapNode

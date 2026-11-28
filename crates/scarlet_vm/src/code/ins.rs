@@ -427,8 +427,9 @@ instructions! {
         miss: R::To,
     },
     ArraySplitWide { elements: HitList, tail: MaybeHit<R>, src: Arg<R>, miss: R::To },
-    /// `[..a, ..b]`. One that it takes may change in place.
-    ArrayConcat { dst: Dst<R>, a: Arg<R>, b: Arg<R> },
+    /// `[..a, ..b]`. It runs again for as long as there is more to join than one step does,
+    /// with what is left in `a` and `b`. Either may change in place.
+    ArrayJoin { dst: Dst<R>, a: Taken<R>, b: Taken<R> },
     /// Element `index` of the array in `src`. When the array has no such index the run
     /// continues at `miss`.
     ArrayGet { dst: MaybeHit<R>, src: Src<R>, index: Src<R>, miss: R::To },

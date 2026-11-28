@@ -29,7 +29,7 @@ fn heap() -> (Heap, [Ctor; 2]) {
 
 /// A cell's words for each kind there is but a constructor's, with `n` in each
 /// that is a plain number and `h` in each that holds a value.
-fn each_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 15] {
+fn each_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 14] {
     [
         (Kind::String, vec![n, n]),
         (Kind::BigInt, vec![n, n]),
@@ -40,16 +40,14 @@ fn each_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 15] {
         (Kind::BinarySlice, vec![h, n, n]),
         (Kind::Tuple, vec![h, h]),
         (Kind::Closure, vec![Value::func(FuncIdx(1)).bits(), h]),
-        (Kind::ArrayLeaf, vec![h, h, h]),
-        // Its length, height and offset, then the head, tree and tail.
-        (Kind::ArrayRoot, vec![n, n, n, h, h, h]),
+        // Its front, head, tree and tail, then how many each has and where the leaves are.
+        (Kind::ArrayRoot, vec![h, h, h, h, n, n, n]),
+        (Kind::ArrayBranch, vec![h; 32]),
         // Its slots, then that all of them are its elements'.
         (Kind::ArrayFlat, vec![h, h, h, h, 4]),
         (Kind::Map, vec![n, h]),
         (Kind::MapNode, vec![n, h, h, h]),
         (Kind::MapCollision, vec![n, h, h]),
-        // Its height, two sizes, then two children.
-        (Kind::ArrayBranch, vec![n, n, n, h, h]),
     ]
 }
 
@@ -57,10 +55,10 @@ fn each_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 15] {
 #[test]
 fn each_kind_is_every_kind() {
     let kinds = each_kind(0, 0).map(|(kind, _)| Some(kind));
-    let all: Vec<Option<Kind>> = (1..16).map(|c| Class(c).kind()).collect();
+    let all: Vec<Option<Kind>> = (1..15).map(|c| Class(c).kind()).collect();
     assert_eq!(kinds.as_slice(), all.as_slice());
     assert_eq!(Class(0).kind(), None);
-    for c in [16, 17, 255, 256, u16::MAX] {
+    for c in [15, 16, 17, 255, 256, u16::MAX] {
         assert_eq!(Class(c).kind(), Some(Kind::Ctor));
     }
     for c in 0..40 {
@@ -85,18 +83,39 @@ fn each_long_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 6] {
     ]
 }
 
+/// A tree of a front, four in its head and as many in its tail, with a leaf between them. Each
+/// element is `h`.
+fn a_tree(heap: &mut Heap, h: u64) -> Vec<u64> {
+    let head = flat_of(heap, &[h; 4], 4);
+    let leaf = flat_of(heap, &[h; 32], 32);
+    let tail = flat_of(heap, &[h; 4], 4);
+    vec![h, head, leaf, tail, lens(0xFF, 4, 4, 0), 32, 0]
+}
+
+/// What a root says of where it starts, how many are in its head and its tail, and how tall its
+/// tree is.
+fn lens(start: u64, head: u64, tail: u64, shift: u64) -> u64 {
+    start | head << 8 | tail << 16 | shift << 24
+}
+
 /// A cell of each kind, a long one of each that can be, and a constructor's
 /// narrow and wide, with every word that holds a value holding `held`, whose
-/// count goes up with each.
+/// count goes up with each, but for an array's root, which holds arrays that do.
 fn one_of_each(heap: &mut Heap, ctors: [Ctor; 2], held: Cell, n: u64) -> Vec<Cell> {
     let h = Value::cell(held).bits();
     let mut cells = Vec::new();
     for (kind, data) in each_kind(n, h).into_iter().chain(each_long_kind(n, h)) {
-        for w in &data {
-            if *w == h {
-                heap.share(held).expect("a live cell");
-            }
+        let shares = match kind {
+            Kind::ArrayRoot => 41,
+            _ => data.iter().filter(|w| **w == h).count(),
+        };
+        for _ in 0..shares {
+            heap.share(held).expect("a live cell");
         }
+        let data = match kind {
+            Kind::ArrayRoot => a_tree(heap, h),
+            _ => data,
+        };
         cells.push(heap.make(kind, &data).expect("room"));
     }
     for (ctor, fields) in ctors.into_iter().zip([2, 300]) {
@@ -152,7 +171,7 @@ fn a_heap_whose_counts_are_right_passes() {
     assert_eq!(heap.live(), 0);
 }
 
-/// A branch's size table, a slice's offset and the like are plain numbers, so
+/// A root's lengths, a slice's offset and the like are plain numbers, so
 /// nothing there counts as a holder, even when it has the bits of a cell.
 /// Every other word does.
 #[test]
@@ -198,7 +217,7 @@ fn a_header_its_class_does_not_have_is_found() {
         }
         // A class no cell has, a freed cell's and that of a constructor the program does
         // not have, and a short array's on a cell that is none.
-        for wrong in [0, 11, 18, u64::from(u16::MAX)] {
+        for wrong in [0, 11, 17, u64::from(u16::MAX)] {
             if wrong == right >> 48 {
                 continue;
             }
@@ -206,9 +225,9 @@ fn a_header_its_class_does_not_have_is_found() {
             assert_eq!(found(h), misshapen, "{right:x}");
         }
         // A constructor's class on a cell with another number of words.
-        for wrong in [16, 17] {
+        for wrong in [15, 16] {
             let h = right & !(0xFFFF << 48) | wrong << 48;
-            let fields = if wrong == 16 { 2 } else { 300 };
+            let fields = if wrong == 15 { 2 } else { 300 };
             if heap.data(*cell).len() != fields {
                 heap.arena[at.at()] = h;
                 assert_eq!(audit(&heap, &roots), misshapen, "{right:x}");
@@ -359,13 +378,12 @@ fn a_closure_with_no_function_is_found() {
 fn an_array_with_no_elements_in_a_cell_is_found() {
     let (nil, h) = (Value::NIL.bits(), Value::bool(true).bits());
     let (low, high) = (i64::MIN.cast_unsigned(), i64::MAX.cast_unsigned());
-    let cases: [(Kind, &[u64], bool); 11] = [
-        (Kind::ArrayRoot, &[1, 0, 0, nil, nil, nil], false),
-        (Kind::ArrayRoot, &[0, 0, 0, nil, nil, nil], true),
-        (Kind::ArrayLeaf, &[h], false),
-        (Kind::ArrayLeaf, &[], true),
-        (Kind::ArrayBranch, &[5, 1, nil], false),
-        (Kind::ArrayBranch, &[5], true),
+    let mut one = [nil; 32];
+    one[31] = h;
+    let cases: [(Kind, &[u64], bool); 8] = [
+        (Kind::ArrayRoot, &[nil, nil, nil, nil, 0, 0, 0], true),
+        (Kind::ArrayBranch, &one, false),
+        (Kind::ArrayBranch, &[nil; 32], true),
         (Kind::Range, &[3, 4], false),
         (Kind::Range, &[low, high], false),
         (Kind::Range, &[3, 3], true),
@@ -433,46 +451,229 @@ fn a_short_array_laid_out_wrong_is_found() {
     }
 }
 
-/// A short array's cell is a leaf of a tree only when it is full and its elements start in
-/// its first slot.
+/// A short array's cell is a leaf of a tree only when it is full, whichever slot its elements
+/// start in, and nothing else is one.
 #[test]
-fn a_leaf_that_is_not_full_and_in_order_is_found() {
+fn a_leaf_that_is_not_full_is_found() {
     let nil = Value::NIL.bits();
     let one = Value::int(1).expect("small").bits();
     for slots in [4u64, 8, 16, 32] {
         for len in [1, slots - 1, slots] {
             for start in [0, 1, slots - 1, slots] {
-                let place = |i: u64| (start + i) % slots;
-                let mut words = vec![nil; slots as usize];
-                for i in 0..len {
-                    words[place(i) as usize] = one;
-                }
-                words.push(start << 32 | len);
-                for under in [Kind::ArrayRoot, Kind::ArrayBranch, Kind::ArrayLeaf] {
+                for (shift, tuple) in [(0, false), (5, false), (5, true)] {
+                    let mut words = vec![nil; slots as usize];
+                    for i in 0..len {
+                        words[((start + i) % slots) as usize] = one;
+                    }
+                    words.push(start << 32 | len);
                     let mut heap = Heap::default();
-                    let leaf = heap.make(Kind::ArrayFlat, &words).expect("room");
+                    let full = flat_of(&mut heap, &[one; 32], 32);
+                    let leaf = match tuple {
+                        true => heap.make(Kind::Tuple, &words).expect("room"),
+                        false => heap.make(Kind::ArrayFlat, &words).expect("room"),
+                    };
                     let held = Value::cell(leaf).bits();
-                    let holder: &[u64] = match under {
-                        Kind::ArrayRoot => &[len, 0, 0, nil, held, nil],
-                        Kind::ArrayBranch => &[5, len, held],
-                        _ => &[held],
+                    let tail = flat_of(&mut heap, &[one, nil, nil, nil], 1);
+                    let mut branch = [nil; 32];
+                    (branch[0], branch[1]) = (full, held);
+                    let tree = match shift {
+                        0 => {
+                            heap.release(Value::from_bits(full).as_cell().expect("a cell"))
+                                .expect("live");
+                            held
+                        }
+                        _ => {
+                            let branch = heap.make(Kind::ArrayBranch, &branch).expect("room");
+                            Value::cell(branch).bits()
+                        }
                     };
-                    let holder = heap.make(under, holder).expect("room");
-                    let fault = AuditFault::PartLeaf {
-                        holder: holder.index(),
-                        cell: leaf.index(),
-                    };
-                    let whole = len == 32 && start % slots == 0;
-                    let want = match whole || under == Kind::ArrayLeaf {
+                    let in_tree = if shift == 0 { 32 } else { 64 };
+                    let root = [nil, nil, tree, tail, lens(0, 0, 1, shift), in_tree, 0];
+                    let root = heap.make(Kind::ArrayRoot, &root).expect("room");
+                    let fault = AuditFault::PartLeaf { root: root.index() };
+                    let want = match len == 32 && !tuple {
                         true => Ok(()),
                         false => Err(fault),
                     };
-                    let what = format!("{under:?} {slots} {start} {len}");
-                    assert_eq!(audit(&heap, &[holder]), want, "{what}");
-                    assert!(fault.to_string().contains("not full or not in order"));
+                    let what = format!("{shift} {tuple} {slots} {start} {len}");
+                    assert_eq!(audit(&heap, &[root]), want, "{what}");
+                    assert!(fault.to_string().contains("no array of 32"));
                 }
             }
         }
+    }
+}
+
+/// A short array's cell with these slots, of which as many as `len` are elements.
+fn flat_of(heap: &mut Heap, slots: &[u64], len: u64) -> u64 {
+    let words: Vec<u64> = slots.iter().copied().chain([len]).collect();
+    Value::cell(heap.make(Kind::ArrayFlat, &words).expect("room")).bits()
+}
+
+/// A root that says something else of what is under it is found, and so is one that a
+/// short array would do for.
+#[test]
+fn a_root_that_does_not_say_what_is_under_it_is_found() {
+    let nil = Value::NIL.bits();
+    let one = Value::int(1).expect("small").bits();
+    // What is said of a tree of 4 in the head, two leaves, and 2 in the tail: where it starts,
+    // how many are in its head, its tail and its leaves, where those are, and its height. And
+    // what is in front.
+    let cases = [
+        ([0u64, 4, 2, 64, 0, 5], nil, true),
+        ([0, 4, 2, 64, 0, 5], one, false),
+        ([0xFF, 4, 2, 64, 0, 5], one, true),
+        ([1, 4, 2, 64, 0, 5], nil, true),
+        ([1, 4, 2, 64, 0, 5], one, false),
+        ([3, 4, 2, 64, 0, 5], nil, true),
+        ([4, 4, 2, 64, 0, 5], nil, false),
+        ([5, 4, 2, 64, 0, 5], nil, false),
+        ([0x80, 4, 2, 64, 0, 5], nil, false),
+        ([0xFE, 4, 2, 64, 0, 5], one, false),
+        ([0, 3, 2, 64, 0, 5], nil, false),
+        ([0, 5, 2, 64, 0, 5], nil, false),
+        ([0, 0, 2, 64, 0, 5], nil, false),
+        ([0, 4, 1, 64, 0, 5], nil, false),
+        ([0, 4, 3, 64, 0, 5], nil, false),
+        ([0, 4, 0, 64, 0, 5], nil, false),
+        ([0, 4, 2, 32, 0, 5], nil, false),
+        ([0, 4, 2, 96, 0, 5], nil, false),
+        ([0, 4, 2, 0, 0, 0], nil, false),
+        ([0, 4, 2, 64, 32, 5], nil, false),
+        ([0, 4, 2, 64, 1, 5], nil, false),
+        ([0, 4, 2, 64, 1024, 5], nil, false),
+        ([0, 4, 2, 64, 0, 0], nil, false),
+        ([0, 4, 2, 64, 0, 10], nil, false),
+        ([0, 4, 2, 1024, 0, 5], nil, false),
+        ([0, 4, 2, 64, 0, 5 + (1 << 35)], nil, false),
+    ];
+    for (says, front, right) in cases {
+        let mut heap = Heap::default();
+        let head = flat_of(&mut heap, &[one; 4], 4);
+        let tail = flat_of(&mut heap, &[one, one, nil, nil], 2);
+        let mut branch = [nil; 32];
+        for leaf in &mut branch[..2] {
+            *leaf = flat_of(&mut heap, &[one; 32], 32);
+        }
+        let tree = Value::cell(heap.make(Kind::ArrayBranch, &branch).expect("room")).bits();
+        let [start, in_head, in_tail, in_tree, first, shift] = says;
+        let lens = lens(start, in_head, in_tail, shift);
+        let root = [front, head, tree, tail, lens, in_tree, first];
+        let root = heap.make(Kind::ArrayRoot, &root).expect("room");
+        let fault = AuditFault::Misshapen { cell: root.index() };
+        let want = if right { Ok(()) } else { Err(fault) };
+        assert_eq!(audit(&heap, &[root]), want, "{says:?} {front}");
+    }
+    // One that has lost some of its head, which hold something or do not.
+    for (at, start, plain_passes, deep_passes) in [
+        (0, 0, true, true),
+        (0, 0xFF, true, true),
+        (0, 1, true, false),
+        (1, 1, true, true),
+        (1, 2, true, false),
+        (3, 3, true, true),
+    ] {
+        for (tuples, right) in [(0, plain_passes), (1, plain_passes), (2, deep_passes)] {
+            let mut heap = Heap::default();
+            let mut head = [one; 4];
+            let mut cell = Value::cell(heap.string(b"a cell").expect("room"));
+            for _ in 0..tuples {
+                cell = Value::cell(heap.tuple(&[cell]).expect("room"));
+            }
+            head[at] = cell.bits();
+            let head = flat_of(&mut heap, &head, 4);
+            let tail = flat_of(&mut heap, &[one; 4], 4);
+            let front = if start == 0xFF { one } else { nil };
+            let root = [front, head, nil, tail, lens(start, 4, 4, 0), 0, 0];
+            let root = heap.make(Kind::ArrayRoot, &root).expect("room");
+            let fault = AuditFault::Misshapen { cell: root.index() };
+            let want = if right { Ok(()) } else { Err(fault) };
+            assert_eq!(audit(&heap, &[root]), want, "{at} {start} {tuples}");
+        }
+    }
+    // A front that there is no head for, and a place for a head, a tail or a tree that there is
+    // none of, with something in it.
+    for (words, start, right) in [
+        ([nil; 3], 0, true),
+        ([nil; 3], 0xFF, false),
+        ([nil; 3], 1, false),
+        ([one, nil, nil], 0, false),
+        ([nil, one, nil], 0, false),
+        ([nil, nil, one], 0, false),
+    ] {
+        let mut heap = Heap::default();
+        let leaf = flat_of(&mut heap, &[one; 32], 32);
+        let [head, tail, in_branch] = words;
+        let mut branch = [nil; 32];
+        branch[0] = leaf;
+        branch[1] = flat_of(&mut heap, &[one; 32], 32);
+        branch[7] = in_branch;
+        let tree = Value::cell(heap.make(Kind::ArrayBranch, &branch).expect("room")).bits();
+        let root = [nil, head, tree, tail, lens(start, 0, 0, 5), 64, 0];
+        let root = heap.make(Kind::ArrayRoot, &root).expect("room");
+        let fault = AuditFault::Misshapen { cell: root.index() };
+        let want = if right { Ok(()) } else { Err(fault) };
+        assert_eq!(audit(&heap, &[root]), want, "{words:?} {start}");
+    }
+    for (tree, right) in [(nil, true), (one, false)] {
+        let mut heap = Heap::default();
+        let [head, tail] = [0; 2].map(|_| flat_of(&mut heap, &[one; 4], 4));
+        let root = [nil, head, tree, tail, lens(0, 4, 4, 0), 0, 0];
+        let root = heap.make(Kind::ArrayRoot, &root).expect("room");
+        let fault = AuditFault::Misshapen { cell: root.index() };
+        let want = if right { Ok(()) } else { Err(fault) };
+        assert_eq!(audit(&heap, &[root]), want, "{tree}");
+    }
+    // A tree that is a level taller than it has to be.
+    for leaves in [1usize, 2, 32, 33] {
+        let mut heap = Heap::default();
+        let (mut top, mut left) = ([nil; 32], leaves);
+        for place in &mut top {
+            let mut branch = [nil; 32];
+            for leaf in branch.iter_mut().take(left) {
+                *leaf = flat_of(&mut heap, &[one; 32], 32);
+            }
+            if left > 0 {
+                let branch = heap.make(Kind::ArrayBranch, &branch).expect("room");
+                *place = Value::cell(branch).bits();
+            }
+            left = left.saturating_sub(32);
+        }
+        let tree = Value::cell(heap.make(Kind::ArrayBranch, &top).expect("room")).bits();
+        let root = [
+            nil,
+            nil,
+            tree,
+            nil,
+            lens(0, 0, 0, 10),
+            32 * leaves as u64,
+            0,
+        ];
+        let root = heap.make(Kind::ArrayRoot, &root).expect("room");
+        let fault = AuditFault::Misshapen { cell: root.index() };
+        let want = if leaves > 32 { Ok(()) } else { Err(fault) };
+        assert_eq!(audit(&heap, &[root]), want, "{leaves}");
+    }
+    // A tree of a head alone, of a tail alone, and of both.
+    for (head, tail) in [(4, 0), (0, 4), (4, 4)] {
+        let mut heap = Heap::default();
+        let mut edge = |n| match n {
+            0 => nil,
+            _ => flat_of(&mut heap, &[one; 4], 4),
+        };
+        let root = [
+            nil,
+            edge(head),
+            nil,
+            edge(tail),
+            lens(0, head, tail, 0),
+            0,
+            0,
+        ];
+        let root = heap.make(Kind::ArrayRoot, &root).expect("room");
+        let fault = AuditFault::Misshapen { cell: root.index() };
+        let want = if head == tail { Ok(()) } else { Err(fault) };
+        assert_eq!(audit(&heap, &[root]), want, "{head} {tail}");
     }
 }
 
@@ -480,12 +681,12 @@ fn a_leaf_that_is_not_full_and_in_order_is_found() {
 fn an_array_cell_with_the_wrong_number_of_words_is_found() {
     let nil = Value::NIL.bits();
     let cases: [(Kind, &[u64]); 8] = [
-        (Kind::ArrayRoot, &[]),
-        (Kind::ArrayRoot, &[0, 0, 0, nil, nil]),
-        (Kind::ArrayRoot, &[1, 0, 0, nil, nil, nil, nil]),
-        (Kind::ArrayBranch, &[]),
-        (Kind::ArrayBranch, &[5, 1]),
-        (Kind::ArrayBranch, &[5, 1, 2, nil]),
+        (Kind::ArrayRoot, &[nil]),
+        (Kind::ArrayRoot, &[nil, nil, nil, nil, 1, 0]),
+        (Kind::ArrayRoot, &[nil, nil, nil, nil, 1, 0, 0, 0]),
+        (Kind::ArrayBranch, &[nil]),
+        (Kind::ArrayBranch, &[nil; 31]),
+        (Kind::ArrayBranch, &[nil; 33]),
         (Kind::Range, &[3]),
         (Kind::Range, &[3, 4, 5]),
     ];
@@ -494,6 +695,16 @@ fn an_array_cell_with_the_wrong_number_of_words_is_found() {
         let cell = heap.make(kind, words).expect("room");
         let fault = AuditFault::Misshapen { cell: cell.index() };
         assert_eq!(audit(&heap, &[cell]), Err(fault), "{kind:?} {words:?}");
+    }
+    // A root that has all it needs and a word more.
+    for more in [false, true] {
+        let mut heap = Heap::default();
+        let mut words = a_tree(&mut heap, nil);
+        words.extend(more.then_some(0));
+        let root = heap.make(Kind::ArrayRoot, &words).expect("room");
+        let fault = AuditFault::Misshapen { cell: root.index() };
+        let want = if more { Err(fault) } else { Ok(()) };
+        assert_eq!(audit(&heap, &[root]), want, "{more}");
     }
 }
 
@@ -834,7 +1045,11 @@ fn a_heap_stays_whole_through_a_long_run_of_everything() {
             }
             5 if !held.is_empty() => {
                 let cell = held[below(held.len())];
-                held.push(heap.copy(cell).expect("room"));
+                let values: Vec<Value> = heap.values(cell).collect();
+                for v in &values {
+                    heap.own(*v).expect("a live cell");
+                }
+                held.push(tuple(&mut heap, &values));
             }
             // A constructor, narrow or wide, that takes over some.
             8 => {

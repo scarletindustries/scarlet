@@ -94,12 +94,16 @@ pub(super) fn all_given_up(m: &mut Machine<'_, '_>, what: &str) {
 /// What an array is made of.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Of {
-    /// Numbers and cells by turns.
+    /// Cells and numbers by turns.
     Both(usize),
+    /// The same, with the first one in its root.
+    Front(usize),
+    /// The same, behind a number that is in its head and that it has lost.
+    Behind(usize),
     Range(i64, i64),
 }
 
-pub(super) const ARRAYS: [Of; 13] = [
+pub(super) const ARRAYS: [Of; 19] = [
     Of::Both(0),
     Of::Both(1),
     Of::Both(2),
@@ -108,6 +112,12 @@ pub(super) const ARRAYS: [Of; 13] = [
     Of::Both(33),
     Of::Both(65),
     Of::Both(1100),
+    Of::Front(33),
+    Of::Front(65),
+    Of::Front(1100),
+    Of::Behind(33),
+    Of::Behind(65),
+    Of::Behind(1100),
     Of::Range(-3, 5),
     Of::Range(4, 4),
     Of::Range(9, 2),
@@ -115,16 +125,57 @@ pub(super) const ARRAYS: [Of; 13] = [
     Of::Range(i64::MAX - 3, i64::MAX),
 ];
 
+/// Cells and numbers by turns. Every other cell holds one that holds one.
+fn some_of_both(heap: &mut Heap, n: usize) -> Vec<Value> {
+    (0..n as u64)
+        .map(|i| match i % 4 {
+            0 => {
+                let mut v = a_cell(heap, i);
+                for _ in 0..2 {
+                    v = Value::cell(heap.tuple(&[v]).expect("room"));
+                }
+                v
+            }
+            2 => a_cell(heap, i),
+            _ => small(i as i64),
+        })
+        .collect()
+}
+
+pub(super) fn len_of_kind(of: Of) -> usize {
+    match of {
+        Of::Both(n) | Of::Front(n) | Of::Behind(n) => n,
+        Of::Range(start, end) => usize::try_from(end.saturating_sub(start)).unwrap_or(0),
+    }
+}
+
+/// The tree `whole` without its first element, whose reference goes on.
+pub(super) fn behind_one(heap: &mut Heap, whole: Value) -> Value {
+    let cell = whole.as_cell().expect("a tree");
+    let found = array::uncons(heap, cell, false).expect("room");
+    found.expect("an element").1
+}
+
 /// The array, and each of its elements, as a word it holds or the number it is.
 pub(super) fn array_of_kind(heap: &mut Heap, of: Of) -> (Value, Vec<Result<Value, i64>>) {
     match of {
+        Of::Front(n) => {
+            let (whole, items) = array_of_kind(heap, Of::Both(n));
+            let left = behind_one(heap, whole);
+            heap.release(left.as_cell().expect("a tree")).expect("live");
+            (whole, items)
+        }
+        Of::Behind(n) => {
+            let items = some_of_both(heap, n);
+            let all = [&[small(-5)], items.as_slice()].concat();
+            let whole = array::from_values(heap, &all).expect("room");
+            let left = behind_one(heap, whole);
+            heap.release(whole.as_cell().expect("a tree"))
+                .expect("live");
+            (left, items.into_iter().map(Ok).collect())
+        }
         Of::Both(n) => {
-            let items: Vec<Value> = (0..n as u64)
-                .map(|i| match i % 2 {
-                    0 => a_cell(heap, i),
-                    _ => small(i as i64),
-                })
-                .collect();
+            let items = some_of_both(heap, n);
             let whole = array::from_values(heap, &items).expect("room");
             (whole, items.into_iter().map(Ok).collect())
         }
@@ -200,10 +251,7 @@ fn index(n: &BigInt, len: usize) -> Option<usize> {
 #[test]
 fn a_read_finds_the_element_or_goes_on_at_its_miss() {
     for of in ARRAYS {
-        let len = match of {
-            Of::Both(n) => n,
-            Of::Range(a, b) => usize::try_from(b.saturating_sub(a).max(0)).expect("few"),
-        };
+        let len = len_of_kind(of);
         for at in indices(len) {
             for dst in [None, Some(AWAY), Some(FROM), Some(AT)] {
                 for held in [false, true] {
@@ -254,10 +302,7 @@ fn a_read_finds_the_element_or_goes_on_at_its_miss() {
 fn a_slice_finds_the_elements_or_goes_on_at_its_miss() {
     let mut in_place = 0;
     for of in ARRAYS {
-        let len = match of {
-            Of::Both(n) => n,
-            Of::Range(a, b) => usize::try_from(b.saturating_sub(a).max(0)).expect("few"),
-        };
+        let len = len_of_kind(of);
         let indices = indices(len);
         for (n, from) in indices.iter().enumerate() {
             for (k, to) in indices.iter().enumerate() {
@@ -349,10 +394,7 @@ fn a_slice_of(
 #[test]
 fn a_write_finds_the_array_or_goes_on_at_its_miss() {
     for of in ARRAYS {
-        let len = match of {
-            Of::Both(n) => n,
-            Of::Range(a, b) => usize::try_from(b.saturating_sub(a).max(0)).expect("few"),
-        };
+        let len = len_of_kind(of);
         for at in indices(len) {
             for bits in 0..8u8 {
                 let [src, value, held] = [0, 1, 2].map(|i| bits >> i & 1 == 1);
@@ -420,7 +462,7 @@ fn a_write_of(
         gone.extend(value.then_some(with));
         rest_is(m, &regs, Some(dst), &gone, what);
         counted(m, what);
-        let tree = matches!(of, Of::Both(_));
+        let tree = !matches!(of, Of::Range(..));
         let alone = src && !held && !itself && tree;
         assert_eq!(alone, m.rest.heap.made() == made, "{what}");
         let before = items.clone();
@@ -671,13 +713,13 @@ fn a_probe_that_finds_a_freed_cell_stops() {
     }
 }
 
-/// An index below 0 is in no array, and neither is one that is past the end, of arrays so
-/// long that the first, taken for a number that is never below 0, would be in them: a range
-/// of nearly all the `i64`s, and a tree that is made of joins with itself.
+/// An index below 0 is in no array: not in a range of nearly all the `i64`s, which is so long
+/// that the index would be in it if it were taken for a number that is never below 0, and
+/// not in a tree or in a short array, which no more than 2^36 elements fit in.
 #[test]
 fn an_index_below_0_is_in_no_array_however_long() {
     let below = [-1i64, -2, -3, -1000, -(1 << 49), -(1 << 50)];
-    for tree in [false, true] {
+    for len in [None, Some(3), Some(40), Some(1200)] {
         for at in below {
             for moved in [false, true] {
                 let src = Arg { reg: FROM, moved };
@@ -716,11 +758,14 @@ fn an_index_below_0_is_in_no_array_however_long() {
                     on_a_machine(|m| {
                         let heap = &mut m.rest.heap;
                         let seven = a_cell(heap, 7);
-                        let whole = match tree {
-                            true => longest(heap, seven),
-                            false => {
-                                heap.release(seven.as_cell().expect("a cell"))
-                                    .expect("live");
+                        let cell = seven.as_cell().expect("a cell");
+                        let whole = match len {
+                            Some(len) => {
+                                (1..len).for_each(|_| heap.share(cell).expect("live"));
+                                array::from_values(heap, &vec![seven; len]).expect("room")
+                            }
+                            None => {
+                                heap.release(cell).expect("live");
                                 array::range(heap, i64::MIN + 1, i64::MAX).expect("room")
                             }
                         };
@@ -733,7 +778,7 @@ fn an_index_below_0_is_in_no_array_however_long() {
                         let regs = registers(&given);
                         let made = m.rest.heap.made();
                         let stop = run_with(m, code, &regs);
-                        let what = format!("{ins:?} {tree} {at}");
+                        let what = format!("{ins:?} {len:?} {at}");
                         assert!(!found(&stop), "{what}");
                         rest_is(m, &regs, None, &[], &what);
                         assert_eq!(m.rest.heap.made(), made, "{what}");
@@ -744,31 +789,4 @@ fn an_index_below_0_is_in_no_array_however_long() {
             }
         }
     }
-}
-
-/// An array of `item` 2^64 - 1 times, whose reference passes to it.
-fn longest(heap: &mut Heap, item: Value) -> Value {
-    let stored = |heap: &Heap, v| match array::seq(heap, v).expect("an array") {
-        Seq::Empty | Seq::Range { .. } => Stored::Empty,
-        Seq::Flat(flat) => Stored::Flat(flat),
-        Seq::Tree(cell) => Stored::Tree(cell),
-    };
-    // All the powers of two below 2^64 together.
-    let mut power = array::from_values(heap, &[item]).expect("room");
-    let mut all = Value::EMPTY_ARRAY;
-    for i in 0..64 {
-        heap.own(power).expect("live");
-        let (a, b) = (stored(heap, all), stored(heap, power));
-        all = array::concat(heap, a, b).expect("room");
-        if i == 63 {
-            break;
-        }
-        heap.own(power).expect("live");
-        let half = stored(heap, power);
-        power = array::concat(heap, half, half).expect("room");
-    }
-    heap.release(power.as_cell().expect("a cell"))
-        .expect("live");
-    assert_eq!(array::seq(heap, all).map(|s| s.len(heap)), Some(u64::MAX));
-    all
 }

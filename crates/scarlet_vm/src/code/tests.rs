@@ -563,7 +563,7 @@ fn a_program_whose_constructors_are_not_as_the_vm_needs_does_not_load() {
     let too_many = stop(|p| {
         let many = p.types.get_mut(&p.abi.err.type_id).expect("Result");
         let one = many.variants[usize::from(p.abi.err.variant_idx)].clone();
-        many.variants.resize(65_520, one);
+        many.variants.resize(65_521, one);
     });
     assert_eq!(too_many, Some(Stop::TooManyConstructors));
 }

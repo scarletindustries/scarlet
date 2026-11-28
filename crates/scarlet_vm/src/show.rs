@@ -132,7 +132,7 @@ fn value<'t>(
                 out.extend_from_slice(n.to_string().as_bytes());
                 out.push(b'>');
             }
-            Some(Kind::ArrayLeaf | Kind::ArrayBranch | Kind::MapNode | Kind::MapCollision) => {
+            Some(Kind::ArrayBranch | Kind::MapNode | Kind::MapCollision) => {
                 return Err(Stop::broken(Broken::TreePiece));
             }
             None => return Err(Stop::missing(Missing::Printing)),
@@ -434,7 +434,6 @@ fn small(heap: &Heap, v: Value) -> bool {
                 | Kind::Tuple
                 | Kind::ArrayFlat
                 | Kind::ArrayRoot
-                | Kind::ArrayLeaf
                 | Kind::ArrayBranch
                 | Kind::Range
                 | Kind::Map

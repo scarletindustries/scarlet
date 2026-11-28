@@ -150,6 +150,18 @@ impl Flat {
         }
     }
 
+    /// The `n` elements from `from` on, as the run of slots up to the last one and that from
+    /// the first one on.
+    #[inline(always)]
+    pub(super) fn slices(self, heap: &Heap, from: usize, n: usize) -> [&[u64]; 2] {
+        let slots = heap.flat(self.cell).map_or(&[][..], |(slots, _)| slots);
+        let at = self.window.place(from, slots.len());
+        let (before, behind) = slots.split_at_checked(at).unwrap_or_default();
+        let near = behind.get(..n).unwrap_or(behind);
+        let far = before.get(..n.saturating_sub(near.len()));
+        [near, far.unwrap_or_default()]
+    }
+
     /// Every element, front to back, with no reference added.
     pub(crate) fn items(
         self,
@@ -167,21 +179,35 @@ impl Flat {
 /// reference added.
 #[inline(always)]
 pub(crate) fn near(heap: &Heap, of: Value, index: Value) -> Near {
-    let (Some(cell), Some(i)) = (of.as_cell(), index.small_int()) else {
-        return Near::Other;
-    };
-    let Some((slots, last)) = heap.flat(cell) else {
+    match index.small_int() {
+        // One below 0 is past the end this way.
+        Some(i) => look(heap, of, to_usize(i.cast_unsigned())),
+        None => Near::Other,
+    }
+}
+
+/// Element `i` of `of`, when it is a short array, with no reference added.
+#[inline(always)]
+fn look(heap: &Heap, of: Value, i: usize) -> Near {
+    let Some((slots, last)) = of.as_cell().and_then(|cell| heap.flat(cell)) else {
         return Near::Other;
     };
     let window = Window(last);
-    // One below 0 is past the end this way.
-    let i = to_usize(i.cast_unsigned());
     if i >= window.len() {
         return Near::Past;
     }
     match slots.get(window.place(i, slots.len())) {
         Some(word) => Near::Found(Value::from_bits(*word)),
         None => Near::Other,
+    }
+}
+
+/// [`look`], or `None` where there is none.
+#[inline(always)]
+pub(super) fn at(heap: &Heap, of: Value, i: usize) -> Option<Value> {
+    match look(heap, of, i) {
+        Near::Found(v) => Some(v),
+        Near::Past | Near::Other => None,
     }
 }
 
@@ -243,20 +269,15 @@ impl Few {
         }
     }
 
-    /// Add the elements of `flat` from `from` up to `to`.
+    /// Add the elements of `flat`.
     #[inline(always)]
-    fn read(&mut self, heap: &Heap, flat: Flat, from: usize, to: usize) {
-        let Some((slots, _)) = heap.flat(flat.cell) else {
-            return;
-        };
-        let n = to.saturating_sub(from).min(slots.len());
-        let at = flat.window.place(from, slots.len());
-        // Up to the last slot, and the rest from the first one on.
-        let (before, behind) = slots.split_at_checked(at).unwrap_or_default();
-        let near = behind.get(..n).unwrap_or(behind);
-        let far = before.get(..n.saturating_sub(near.len()));
-        for run in [near, far.unwrap_or_default()] {
-            self.add(run.iter().copied().map(Value::from_bits));
+    fn read(&mut self, heap: &Heap, flat: Flat) {
+        for run in flat.slices(heap, 0, flat.len()) {
+            let room = self.items.get_mut(self.len..).unwrap_or_default();
+            for (v, word) in room.iter_mut().zip(run) {
+                *v = Value::from_bits(*word);
+            }
+            self.len = self.len.saturating_add(run.len()).min(MOST);
         }
     }
 }
@@ -271,6 +292,13 @@ pub(super) fn new_flat(heap: &mut Heap, items: &[Value]) -> Result<Stored, Fault
     let window = Window::of(items.len());
     let cell = heap.flat_of(slots_for(items.len()), items, window.0)?;
     Ok(Stored::Flat(Flat { cell, window }))
+}
+
+/// A new short array of `items`, which are 1 to [`MOST`], whose references pass to it. It has
+/// slots for as many as there may be.
+pub(super) fn with_room(heap: &mut Heap, items: &[Value]) -> Result<Value, Fault> {
+    let cell = heap.flat_of(MOST, items, Window::of(items.len()).0)?;
+    Ok(Value::cell(cell))
 }
 
 /// A new short array of `values`, whose references pass to it, in the space of a freed
@@ -359,6 +387,31 @@ pub(crate) fn take_first(heap: &mut Heap, cell: Cell) -> Option<First> {
     })
 }
 
+/// Give up the first `n` elements, where there are more. Whether it did.
+#[inline(always)]
+pub(super) fn drop_first(heap: &mut Heap, cell: Cell, n: usize) -> Result<bool, DeadCell> {
+    let Some(Alone { slots, last }) = heap.flat_alone(cell) else {
+        return Ok(false);
+    };
+    // Those up to the first that is a cell in one go.
+    let window = Window(*last);
+    let mut plain = 0usize;
+    while plain < n
+        && let Some(word) = slots.get_mut(window.place(plain, slots.len()))
+        && Value::from_bits(*word).as_cell().is_none()
+    {
+        *word = Value::NIL.bits();
+        plain = plain.wrapping_add(1);
+    }
+    *last = window.cut(plain, window.len().wrapping_sub(plain)).0;
+    for _ in plain..n {
+        if let Some(first) = take_first(heap, cell) {
+            super::release(heap, first.value)?;
+        }
+    }
+    Ok(true)
+}
+
 /// Take the elements from `from` on out, as many as `out` has room for and those that
 /// `wanted` says. Their slots are `Nil`, and the array still counts them. Whether it did.
 #[inline(always)]
@@ -386,7 +439,7 @@ pub(crate) fn take_run(
 /// Put `items`, in their order and with their references, at `end`. Whether there were
 /// slots for them all.
 #[inline(always)]
-fn extend_alone(heap: &mut Heap, cell: Cell, items: &[Value], end: End) -> bool {
+pub(super) fn extend_alone(heap: &mut Heap, cell: Cell, items: &[Value], end: End) -> bool {
     let Some(Alone { slots, last }) = heap.flat_alone(cell) else {
         return false;
     };
@@ -395,14 +448,18 @@ fn extend_alone(heap: &mut Heap, cell: Cell, items: &[Value], end: End) -> bool 
     if len.saturating_add(items.len()) > slots.len() {
         return false;
     }
-    let mut longer = window;
-    for _ in items {
-        longer = longer.and_one(end);
-    }
-    let first = end.put_at(len);
-    for (i, x) in items.iter().enumerate() {
-        let at = longer.place(first.wrapping_add(i), slots.len());
-        if let Some(word) = slots.get_mut(at) {
+    let n = items.len() as u64;
+    let start = match end {
+        End::Front => window.0.wrapping_sub(n << 32),
+        End::Back => window.0,
+    };
+    let longer = Window(start.wrapping_add(n));
+    let at = longer.place(end.put_at(len), slots.len());
+    // Up to the last slot, and the rest from the first one on.
+    let (before, behind) = slots.split_at_mut_checked(at).unwrap_or_default();
+    let (near, far) = items.split_at_checked(behind.len()).unwrap_or((items, &[]));
+    for (items, slots) in [(near, behind), (far, before)] {
+        for (x, word) in items.iter().zip(slots) {
             *word = x.bits();
         }
     }
@@ -564,9 +621,22 @@ fn grown(heap: &mut Heap, flat: Flat, items: &[Value], end: End) -> Result<Value
     remade(heap, flat, (0, len), beside)
 }
 
-/// `a` and then `b`, which are short enough for one cell together, in a new one.
+/// `a` and then `b`, which are short enough for one cell together. It is one of theirs, where
+/// nothing else holds that and it has slots for the other.
 #[inline(never)]
-pub(super) fn joined(heap: &mut Heap, a: Flat, b: Flat) -> Result<Value, Fault> {
+pub(super) fn join(heap: &mut Heap, a: Flat, b: Flat) -> Result<Value, Fault> {
+    for (onto, flat, end) in [(a, b, End::Back), (b, a, End::Front)] {
+        if has_room(heap, onto, flat.len()) {
+            let items = taken_apart(heap, flat)?;
+            return extend(heap, onto, items.items(), end);
+        }
+    }
+    joined(heap, a, b)
+}
+
+/// [`join`] in a new cell.
+#[inline(always)]
+fn joined(heap: &mut Heap, a: Flat, b: Flat) -> Result<Value, Fault> {
     heap.unique(a.cell)?;
     heap.unique(b.cell)?;
     let len = a.len().wrapping_add(b.len());
@@ -610,55 +680,57 @@ pub(crate) fn uncons(
         heap.own(first)?;
         return Ok(Some((first, Value::EMPTY_ARRAY)));
     }
-    let left = len.wrapping_sub(1);
-    let (new, _) = copied(heap, flat, (1, left), (&[], &[]))?;
+    let left = after(heap, flat, 1)?;
     heap.own(first)?;
+    Ok(Some((first, left)))
+}
+
+/// The elements of `flat` but the first `n`, of which there are more, in a new cell. The caller
+/// keeps its reference to `flat`.
+#[inline(always)]
+pub(super) fn after(heap: &mut Heap, flat: Flat, n: usize) -> Result<Value, Fault> {
+    let left = flat.len().wrapping_sub(n);
+    let (new, _) = copied(heap, flat, (n, left), (&[], &[]))?;
     heap.share_slots(new, 0..left)?;
-    Ok(Some((first, Value::cell(new))))
+    Ok(Value::cell(new))
 }
 
 /// The elements of `flat` from `from` up to `to`, or up to its last one. When nothing else
 /// holds its cell and they fill a quarter of the slots or less, they go to one of fewer.
 #[inline(never)]
 pub(super) fn slice(heap: &mut Heap, flat: Flat, from: usize, to: usize) -> Result<Value, Fault> {
-    match cut(heap, flat, from, to)? {
-        Cut::Made(array) => Ok(array),
-        Cut::InPlace(cell) => fitted(heap, cell),
+    let to = to.min(flat.len());
+    if from >= to {
+        heap.release(flat.cell)?;
+        return Ok(Value::EMPTY_ARRAY);
     }
+    if from == 0 && to == flat.len() {
+        // It is asked so that a freed cell is not given back.
+        heap.unique(flat.cell)?;
+        return Ok(Value::cell(flat.cell));
+    }
+    if cut_alone(heap, flat.cell, from, to)? {
+        return fitted(heap, flat.cell);
+    }
+    remade(heap, flat, (from, to), (&[], &[]))
 }
 
 /// The elements of `flat` but the first `n`, in its own cell when nothing else holds that.
 /// A walk does not keep what it leaves, as what a slice gives may be kept.
 #[inline(never)]
 pub(super) fn skip(heap: &mut Heap, flat: Flat, n: usize) -> Result<Value, Fault> {
-    match cut(heap, flat, n, flat.len())? {
-        Cut::Made(array) => Ok(array),
-        Cut::InPlace(cell) => Ok(Value::cell(cell)),
-    }
-}
-
-/// What a cut gave: another array or all of the same one, or what it left in this cell.
-enum Cut {
-    Made(Value),
-    InPlace(Cell),
-}
-
-#[inline(always)]
-fn cut(heap: &mut Heap, flat: Flat, from: usize, to: usize) -> Result<Cut, Fault> {
-    let to = to.min(flat.len());
-    if from >= to {
+    if n >= flat.len() {
         heap.release(flat.cell)?;
-        return Ok(Cut::Made(Value::EMPTY_ARRAY));
+        return Ok(Value::EMPTY_ARRAY);
     }
-    if from == 0 && to == flat.len() {
-        // It is asked so that a freed cell is not given back.
-        heap.unique(flat.cell)?;
-        return Ok(Cut::Made(Value::cell(flat.cell)));
+    match n == 0 || drop_first(heap, flat.cell, n)? {
+        true => {
+            // It is asked so that a freed cell is not given back.
+            heap.unique(flat.cell)?;
+            Ok(Value::cell(flat.cell))
+        }
+        false => remade(heap, flat, (n, flat.len()), (&[], &[])),
     }
-    if cut_alone(heap, flat.cell, from, to)? {
-        return Ok(Cut::InPlace(flat.cell));
-    }
-    remade(heap, flat, (from, to), (&[], &[])).map(Cut::Made)
 }
 
 /// The short array `cell`, which nothing else holds, in a cell of fewer slots when it fills a
@@ -681,45 +753,21 @@ fn refitted(heap: &mut Heap, flat: Flat) -> Result<Value, Fault> {
     remade(heap, flat, (0, flat.len()), (&[], &[]))
 }
 
-/// The elements of `flat`, with a reference to each, and `items`, whose references pass to
-/// it, at `end` of them. There are no more than [`MOST`] together.
-pub(super) fn taken_apart(
-    heap: &mut Heap,
-    flat: Flat,
-    items: &[Value],
-    end: End,
-) -> Result<Few, DeadCell> {
+/// The elements of `flat`, with a reference to each.
+pub(super) fn taken_apart(heap: &mut Heap, flat: Flat) -> Result<Few, DeadCell> {
     let mut all = Few::new();
-    if end == End::Front {
-        all.add(items.iter().copied());
-    }
-    all.read(heap, flat, 0, flat.len());
-    if end == End::Back {
-        all.add(items.iter().copied());
-    }
+    all.read(heap, flat);
     if heap.unique(flat.cell)? {
         heap.discard(flat.cell)?;
         return Ok(all);
     }
-    // The items are given, and the elements are something else's too.
-    let (before, behind) = match end {
-        End::Front => (items.len(), all.len),
-        End::Back => (0, flat.len()),
-    };
-    heap.share_each(all.items().get(before..behind).unwrap_or_default())?;
+    heap.share_each(all.items())?;
     heap.release(flat.cell)?;
     Ok(all)
 }
 
-/// Whether `flat` is as many elements as there may be, in the order of its slots. Its cell
-/// may then be a leaf of a tree.
-pub(crate) fn is_leaf(heap: &Heap, flat: Flat) -> bool {
-    let in_order = |slots: &[u64]| flat.window.place(0, slots.len()) == 0;
-    flat.len() == MOST && heap.flat(flat.cell).is_some_and(|(s, _)| in_order(s))
-}
-
 /// Whether `flat` has slots for `more` elements in a cell that nothing else holds.
-pub(super) fn has_room(heap: &mut Heap, flat: Flat, more: usize) -> bool {
+fn has_room(heap: &mut Heap, flat: Flat, more: usize) -> bool {
     let alone = heap.flat_alone(flat.cell);
     alone.is_some_and(|a| flat.len().saturating_add(more) <= a.slots.len())
 }

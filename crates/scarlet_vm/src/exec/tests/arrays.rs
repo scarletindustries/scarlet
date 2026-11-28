@@ -1,8 +1,8 @@
 //! The instructions that take an array apart and that push onto one.
 
 use super::probes::{
-    ARRAYS, Of, a_cell, all_given_up, array_of_kind, asks, counted, elements, found, in_register,
-    is_array, is_element, miss, registers, rest_is, small,
+    ARRAYS, Of, a_cell, all_given_up, array_of_kind, asks, behind_one, counted, elements, found,
+    in_register, is_array, is_element, len_of_kind, miss, registers, rest_is, small,
 };
 use super::*;
 use crate::code::{Hits, MaybeHit, Near};
@@ -22,15 +22,7 @@ const TO: [Reg; 7] = [
 ];
 const TAIL: Reg = Reg(FIRST.0 + 10);
 
-fn len_of_kind(of: Of) -> usize {
-    match of {
-        Of::Both(n) => n,
-        Of::Range(start, end) => usize::try_from(end - start).unwrap_or(0),
-    }
-}
-
-/// An array as it may have come to be: one cell or a tree, with elements left behind in
-/// front, or in both of its buffers.
+/// An array as it may have come to be.
 #[derive(Debug, Clone, Copy)]
 enum Grown {
     AsItIs,
@@ -38,33 +30,87 @@ enum Grown {
     Cut,
     /// Its first three were pushed there one by one.
     Pushed,
+    /// Another array that is all but its first has its head too. The first is then in its root.
+    Twin,
+    /// It is all but the first of another array that has its head too, and has lost a number
+    /// that is in that.
+    Behind,
 }
 
-fn grown(heap: &mut Heap, of: Of, how: Grown) -> (Value, Vec<Result<Value, i64>>) {
-    let (whole, mut items) = array_of_kind(heap, of);
-    let (Of::Both(n), Some(_)) = (of, whole.as_cell()) else {
-        return (whole, items);
+const GROWN: [Grown; 5] = [
+    Grown::AsItIs,
+    Grown::Cut,
+    Grown::Pushed,
+    Grown::Twin,
+    Grown::Behind,
+];
+
+/// An array, what is in it, and the other array there is when it is one of two with one head.
+struct Built {
+    array: Value,
+    items: Vec<Result<Value, i64>>,
+    other: Option<Value>,
+}
+
+fn grown(heap: &mut Heap, of: Of, how: Grown) -> Built {
+    let (array, items) = array_of_kind(heap, of);
+    let mut built = Built {
+        array,
+        items,
+        other: None,
+    };
+    if matches!(of, Of::Range(..)) || array.as_cell().is_none() {
+        return built;
+    }
+    let cut = |heap: &mut Heap, built: &mut Built, n| {
+        let whole = stored(heap, built.array);
+        built.array = array::skip(heap, whole, n).expect("room");
+        built.items.drain(..n);
+    };
+    let tree = |heap: &Heap, built: &Built| {
+        let cell = built.array.as_cell();
+        cell.is_some_and(|cell| array::tree(heap, cell).is_some())
     };
     match how {
-        Grown::AsItIs => (whole, items),
-        Grown::Cut if n > 2 => {
-            let whole = stored(heap, whole);
-            let left = array::skip(heap, whole, 2).expect("room");
-            items.drain(..2);
-            (left, items)
+        Grown::AsItIs => {}
+        Grown::Cut => {
+            if built.items.len() > 2 {
+                cut(heap, &mut built, 2);
+            }
         }
-        Grown::Pushed if n > 0 => {
-            let mut a = whole;
+        Grown::Pushed => {
             for i in 0..3 {
                 let x = a_cell(heap, 900 + i);
-                let array = stored(heap, a);
-                a = array::push(heap, array, x, End::Front).expect("room");
-                items.insert(0, Ok(x));
+                let array = stored(heap, built.array);
+                built.array = array::push(heap, array, x, End::Front).expect("room");
+                built.items.insert(0, Ok(x));
             }
-            (a, items)
         }
-        Grown::Cut | Grown::Pushed => (whole, items),
+        Grown::Twin => {
+            if tree(heap, &built) {
+                built.other = Some(behind_one(heap, built.array));
+            }
+        }
+        Grown::Behind => {
+            if tree(heap, &built) {
+                cut(heap, &mut built, 1);
+            }
+            if tree(heap, &built) {
+                let left = behind_one(heap, built.array);
+                built.other = Some(std::mem::replace(&mut built.array, left));
+                built.items.drain(..1);
+            }
+        }
     }
+    built
+}
+
+/// Whether `array` is a tree whose first element is in its root.
+fn has_front(heap: &Heap, array: Value) -> bool {
+    let root = array
+        .as_cell()
+        .filter(|cell| heap.is(*cell, Kind::ArrayRoot));
+    root.is_some_and(|cell| heap.data(cell)[4] & 0xFF == 0xFF)
 }
 
 /// `array` as what stores its elements.
@@ -91,7 +137,7 @@ struct Case {
 fn cases() -> Vec<Case> {
     let mut all = Vec::new();
     for of in ARRAYS {
-        for how in [Grown::AsItIs, Grown::Cut, Grown::Pushed] {
+        for how in GROWN {
             for bits in 0..4 {
                 all.push(Case {
                     of,
@@ -120,11 +166,16 @@ fn set_up(
 /// The same, on the heap that the machine has.
 fn set_up_in(m: &mut Machine<'_, '_>, case: Case) -> (Vec<Value>, Vec<Result<Value, i64>>) {
     let heap = &mut m.rest.heap;
-    let (whole, items) = grown(heap, case.of, case.how);
+    let Built {
+        array: whole,
+        items,
+        other,
+    } = grown(heap, case.of, case.how);
     if case.held {
         heap.own(whole).expect("live");
         m.rest.globals.push(whole);
     }
+    m.rest.globals.extend(other);
     let heap = &mut m.rest.heap;
     let mut given = vec![(FROM, whole), (AWAY, a_cell(heap, 77))];
     for to in TO.iter().chain([&TAIL]) {
@@ -169,6 +220,7 @@ fn checked(
 /// with no element is as it was.
 #[test]
 fn an_array_is_taken_apart_into_its_first_element_and_the_others() {
+    let mut fronts = 0;
     for case in cases() {
         for head in [None, Some(TO[0]), Some(FROM)] {
             for tail in [TAIL, FROM] {
@@ -190,6 +242,7 @@ fn an_array_is_taken_apart_into_its_first_element_and_the_others() {
                     let what = format!("{case:?} {head:?} {tail:?}");
                     let (before, items) = set_up(m, code, case);
                     let made = m.rest.heap.made();
+                    let in_root = has_front(&m.rest.heap, before[usize::from(FROM.0)]);
                     let stop = run_with(m, code, &before);
                     if !found(&stop) {
                         assert!(items.is_empty(), "{what}");
@@ -203,7 +256,15 @@ fn an_array_is_taken_apart_into_its_first_element_and_the_others() {
                     let alone = case.moved && !case.held && !big;
                     let in_front = matches!(case.how, Grown::Pushed) && items.len() > 33;
                     let short = matches!(case.of, Of::Both(n) if n <= 32);
-                    if alone && (in_front || (short && items.len() <= 32)) {
+                    // One that is in the root is taken out of it, whoever has the head.
+                    if alone && in_root {
+                        fronts += 1;
+                        assert_eq!(
+                            in_register(m, tail).bits(),
+                            before[usize::from(FROM.0)].bits()
+                        );
+                    }
+                    if alone && (in_front || in_root || (short && items.len() <= 32)) {
                         assert_eq!(m.rest.heap.made(), made, "{what}");
                     }
                     let mut written: Vec<Reg> = head.into_iter().collect();
@@ -220,6 +281,7 @@ fn an_array_is_taken_apart_into_its_first_element_and_the_others() {
             }
         }
     }
+    assert!(fronts > 20, "{fronts}");
 }
 
 /// A run over `len` elements, or that and more, that asks for those from `from` on.
@@ -680,10 +742,9 @@ fn an_item_is_pushed_at_either_end() {
     }
 }
 
-/// Two arrays of any kind are joined in their order, whoever holds them and whichever of
-/// them the instruction takes, and what goes on holding one holds it as it was. Two short
-/// ones that fit in one cell are one, which is either's when that is taken, has slots for
-/// the other and nothing else holds it.
+/// Two arrays of any kind are joined in their order, whoever holds them, and what goes on
+/// holding one holds it as it was. Two short ones that fit in one cell are one, which is
+/// either's when that has slots for the other and nothing else holds it.
 #[test]
 fn arrays_are_joined_in_their_order() {
     let mut in_place = 0;
@@ -697,23 +758,14 @@ fn arrays_are_joined_in_their_order() {
             if len_of_kind(left) + len_of_kind(right) > 1200 {
                 continue;
             }
-            for bits in 0..16u8 {
-                let holds = |bit: u8| bits >> bit & 1 == 1;
-                let (takes, held) = ([holds(0), holds(1)], [holds(2), holds(3)]);
-                let arg = |reg, moved| Arg { reg, moved };
-                let join = Ins::ArrayConcat {
-                    dst: Dst([TAIL, FROM, WITH][usize::from(bits) % 3]),
-                    a: arg(FROM, takes[0]),
-                    b: arg(WITH, takes[1]),
+            for (i, dst) in (0..12).zip([TAIL, FROM, WITH].into_iter().cycle()) {
+                let held = [i & 1 == 1, i & 2 == 2];
+                let dst = Dst(dst);
+                let join = Ins::ArrayJoin {
+                    dst,
+                    a: Taken(FROM),
+                    b: Taken(WITH),
                 };
-                let Ins::ArrayConcat { dst, .. } = join else {
-                    panic!("a join")
-                };
-                // A register that is read after it is not the result's.
-                let keeps = [(FROM, takes[0]), (WITH, takes[1])];
-                if keeps.contains(&(dst.0, false)) {
-                    continue;
-                }
                 let code = asks(join);
                 on_a_machine(|m| {
                     let what = format!("{left:?} {right:?} {join:?} {held:?}");
@@ -746,16 +798,19 @@ fn arrays_are_joined_in_their_order() {
                         }
                         let room = |n: usize| n.next_power_of_two().max(4) - n;
                         let (n, k) = (a_items.len(), b_items.len());
-                        let has = |i: usize| takes[i] && !held[i];
-                        let fits = (has(0) && room(n) >= k) || (has(1) && room(k) >= n);
+                        let fits = (!held[0] && room(n) >= k) || (!held[1] && room(k) >= n);
                         if flat {
                             assert_eq!(made == 0, fits, "{what}");
                         }
                     }
-                    for (v, items, i) in [(a, &a_items, 0), (b, &b_items, 1)] {
-                        if held[i] || !takes[i] {
+                    for (v, items, held) in [(a, &a_items, held[0]), (b, &b_items, held[1])] {
+                        if held {
                             is_array(m, v, items, &what);
                         }
+                    }
+                    for reg in [FROM, WITH] {
+                        let left = in_register(m, reg);
+                        assert!(reg == dst.0 || left.as_cell().is_none(), "{what}");
                     }
                     counted(m, &what);
                     all_given_up(m, &what);
@@ -766,18 +821,22 @@ fn arrays_are_joined_in_their_order() {
     assert!(in_place > 50, "{in_place}");
     // One that is joined to itself, which is kept or not.
     for of in ARRAYS {
-        for moved in [false, true] {
-            let code = asks(Ins::ArrayConcat {
+        for held in [false, true] {
+            let code = asks(Ins::ArrayJoin {
                 dst: Dst(TAIL),
-                a: Arg::shared(FROM),
-                b: Arg { reg: FROM, moved },
+                a: Taken(FROM),
+                b: Taken(WITH),
             });
             on_a_machine(|m| {
-                let what = format!("{of:?} {moved}");
+                let what = format!("{of:?} {held}");
                 m.rest.heap = Heap::new(code.ctors.clone());
                 m.rest.globals = Vec::new();
                 let (a, items) = array_of_kind(&mut m.rest.heap, of);
-                run_with(m, code, &registers(&[(FROM, a)]));
+                m.rest.heap.own(a).expect("live");
+                if held {
+                    m.rest.globals.push(m.rest.heap.own(a).expect("live"));
+                }
+                run_with(m, code, &registers(&[(FROM, a), (WITH, a)]));
                 counted(m, &what);
                 let twice = in_register(m, TAIL);
                 is_array(m, twice, &[items.clone(), items].concat(), &what);
@@ -856,7 +915,7 @@ fn a_freed_element_stops_the_run() {
                     let before = registers(&[(FROM, whole)]);
                     let stop = run_with(m, code, &before);
                     // One that only moves out is not looked at.
-                    let moves = moved && n < 32 && matches!(ins, Ins::ArrayUncons { .. });
+                    let moves = moved && matches!(ins, Ins::ArrayUncons { .. });
                     let want = if moves {
                         Broken::NoArm
                     } else {
@@ -914,7 +973,8 @@ fn an_element_that_is_counted_and_not_there_stops_the_run() {
             let items: Vec<Value> = (0..n).map(|i| small(i as i64)).collect();
             let whole = array::from_values(&mut m.rest.heap, &items).expect("room");
             let cell = whole.as_cell().expect("a tree");
-            m.rest.heap.data_mut(cell)[0] = 50;
+            // How many are in the tail, which is the third byte.
+            m.rest.heap.data_mut(cell)[4] += 18 << 16;
             let before = registers(&[(FROM, whole)]);
             let stop = run_with(m, code, &before);
             let want = Broken::NoArrayElement { index: missing };
@@ -936,6 +996,8 @@ fn an_instruction_with_no_room_leaves_every_register_right() {
         Of::Both(32),
         Of::Both(33),
         Of::Both(70),
+        Of::Front(40),
+        Of::Behind(70),
         Of::Range(-3, 9),
         Of::Range((1 << 50) - 4, (1 << 50) + 9),
         Of::Range(i64::MAX - 9, i64::MAX),
@@ -950,7 +1012,7 @@ fn an_instruction_with_no_room_leaves_every_register_right() {
     let many: Vec<Reg> = [WITH, AWAY].into_iter().cycle().take(40).collect();
     let mut full = 0;
     for of in arrays {
-        for how in [Grown::AsItIs, Grown::Cut, Grown::Pushed] {
+        for how in GROWN {
             for bits in 0..8u8 {
                 let [moved, held, item_moved] = [0, 1, 2].map(|i| bits >> i & 1 == 1);
                 let case = Case {
@@ -1014,16 +1076,12 @@ fn an_instruction_with_no_room_leaves_every_register_right() {
                         miss: miss(),
                     };
                     all.push((slice(Some(TAIL)), Lists::default()));
-                    for (a, b) in [(FROM, SHORT), (SHORT, FROM), (FROM, FROM)] {
-                        // Of two operands in one register only the last may take it.
-                        let takes = |reg, last| Arg {
-                            reg,
-                            moved: moved && reg == FROM && (last || a != b),
-                        };
-                        let join = Ins::ArrayConcat {
+                    let joins = [(FROM, SHORT), (SHORT, FROM), (FROM, SAME)];
+                    for (a, b) in joins.into_iter().filter(|_| moved) {
+                        let join = Ins::ArrayJoin {
                             dst: Dst(TAIL),
-                            a: takes(a, false),
-                            b: takes(b, true),
+                            a: Taken(a),
+                            b: Taken(b),
                         };
                         all.push((join, Lists::default()));
                     }
@@ -1081,27 +1139,29 @@ fn a_long_literal_takes_what_its_registers_give_up() {
     }
 }
 
-/// Where an index is, the end of a slice, and a short array.
+/// Where an index is, the end of a slice, a short array, and the array in `FROM`.
 const AT: Reg = Reg(FIRST.0 + 11);
 const UNTIL: Reg = Reg(FIRST.0 + 12);
 const SHORT: Reg = Reg(FIRST.0 + 13);
+const SAME: Reg = Reg(FIRST.0 + 14);
 
 /// Run `ins` on heaps with a little more room each time, until one has enough. Gives how
 /// many had not.
 fn with_no_room(case: Case, ins: Ins<Reg>, lists: Lists<Reg>, item_moved: bool) -> usize {
     let code = asks_with(ins, lists);
-    let twice = matches!(ins, Ins::ArrayConcat { a, b, .. } if a.reg == FROM && b.reg == FROM);
+    let joins = match ins {
+        Ins::ArrayJoin { a, b, .. } => [a.0, b.0],
+        _ => [FROM; 2],
+    };
     let mut full = 0;
     // Each word for a short cell, and fewer of them further on.
-    for more in (0..).map(|i: usize| i + i / 24 * i / 2) {
+    let further = std::iter::successors(Some(80usize), |n| Some(n + n / 8));
+    for more in (0..80).chain(further) {
         let mut done = false;
         on_a_machine(|m| {
             let what = format!("{case:?} {ins:?} {more}");
             let (mut before, items) = set_up(m, code, case);
             let heap = &mut m.rest.heap;
-            // What two trees are joined to has no bound to ask for before there is some of it.
-            let of = array::seq(heap, before[usize::from(FROM.0)]);
-            let joins_trees = twice && matches!(of, Some(Seq::Tree(_)));
             let short: Vec<Value> = (0..3).map(|i| a_cell(heap, 60 + i)).collect();
             let short_items: Vec<_> = short.iter().copied().map(Ok).collect();
             let given = [
@@ -1113,6 +1173,10 @@ fn with_no_room(case: Case, ins: Ins<Reg>, lists: Lists<Reg>, item_moved: bool) 
             for (reg, v) in given {
                 before[usize::from(reg.0)] = v;
             }
+            if joins.contains(&SAME) {
+                let same = before[usize::from(FROM.0)];
+                before[usize::from(SAME.0)] = m.rest.heap.own(same).expect("live");
+            }
             let limit = m.rest.heap.words_used() + more;
             m.rest.heap.limit_to(limit);
             let stop = run_with(m, code, &before);
@@ -1123,18 +1187,17 @@ fn with_no_room(case: Case, ins: Ins<Reg>, lists: Lists<Reg>, item_moved: bool) 
                 return;
             }
             full += 1;
-            if !joins_trees {
-                counted(m, &what);
-            }
+            counted(m, &what);
             for (i, v) in before.iter().enumerate().skip(usize::from(FIRST.0)) {
                 let from = case.moved && i == usize::from(FROM.0);
                 let with = item_moved && i == usize::from(WITH.0);
+                let join = joins.iter().any(|reg| i == usize::from(reg.0));
                 let got = m.stack[i].bits();
-                let gone = (from || with) && got == Value::NIL.bits();
+                let gone = (from || with || (case.moved && join)) && got == Value::NIL.bits();
                 assert!(gone || got == v.bits(), "{what}: r{i}");
             }
             // There may be no room to look at what a range has.
-            if matches!(case.of, Of::Both(_)) {
+            if !matches!(case.of, Of::Range(..)) {
                 let left = in_register(m, FROM);
                 if left.as_cell().is_some() {
                     is_array(m, left, &items, &what);
@@ -1145,10 +1208,10 @@ fn with_no_room(case: Case, ins: Ins<Reg>, lists: Lists<Reg>, item_moved: bool) 
                 }
             }
             let left = in_register(m, SHORT);
-            is_array(m, left, &short_items, &what);
-            if !joins_trees {
-                all_given_up(m, &what);
+            if !joins.contains(&SHORT) || left.as_cell().is_some() {
+                is_array(m, left, &short_items, &what);
             }
+            all_given_up(m, &what);
         });
         if done {
             return full;
@@ -1199,7 +1262,7 @@ fn the_length_of_the_longest_range_is_a_big_int() {
 fn a_cell_with_no_elements_stops_what_takes_it_apart() {
     let nil = Value::NIL.bits();
     let cells: [(Kind, &[u64]); 3] = [
-        (Kind::ArrayRoot, &[0, 0, 0, nil, nil, nil]),
+        (Kind::ArrayRoot, &[nil, nil, nil, nil, 0, 0, 0]),
         (Kind::Range, &[4, 4]),
         (Kind::Range, &[9, 2]),
     ];
@@ -1267,10 +1330,10 @@ fn the_empty_array_is_grown_and_joined() {
             }
         }
     }
-    let join = Ins::ArrayConcat {
+    let join = Ins::ArrayJoin {
         dst: Dst(TAIL),
-        a: Arg::shared(FROM),
-        b: Arg::shared(WITH),
+        a: Taken(FROM),
+        b: Taken(WITH),
     };
     let code = asks_with(join, Lists::default());
     for of in ARRAYS {
@@ -1285,11 +1348,11 @@ fn the_empty_array_is_grown_and_joined() {
                 } else {
                     (other, empty)
                 };
+                let s = m.rest.seq(other).expect("an array");
                 run_with(m, code, &registers(&[(FROM, a), (WITH, b)]));
                 let what = format!("{of:?} {first}");
                 counted(m, &what);
                 let joined = in_register(m, TAIL);
-                let s = m.rest.seq(other).expect("an array");
                 if let Seq::Range { .. } = s {
                     let s = m.rest.seq(joined).expect("an array");
                     assert!(matches!(s, Seq::Flat(_)), "{what}");

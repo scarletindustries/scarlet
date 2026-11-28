@@ -76,6 +76,11 @@ impl Heap {
         self.arena.len() + self.boxed
     }
 
+    /// Have every new cell made at the arena's end.
+    pub(crate) fn forget_freed(&mut self) {
+        self.free.fill(0);
+    }
+
     /// How many cells are not yet freed.
     pub(crate) fn live(&self) -> usize {
         self.live_cells().expect("an arena of whole cells")
@@ -208,11 +213,11 @@ fn the_longest_arena_cell_is_254_words() {
     let mut heap = Heap::default();
     let values: Vec<u64> = (0..ARENA_CELL_WORDS).map(|i| int(i).bits()).collect();
     let short = heap
-        .make(Kind::ArrayLeaf, &values[..ARENA_CELL_WORDS - 1])
+        .make(Kind::ArrayBranch, &values[..ARENA_CELL_WORDS - 1])
         .expect("room");
     assert_eq!(heap.arena.len(), 1 + ARENA_CELL_WORDS);
     assert_eq!((heap.boxed, heap.outside.len()), (0, 0));
-    let long = heap.make(Kind::ArrayLeaf, &values).expect("room");
+    let long = heap.make(Kind::ArrayBranch, &values).expect("room");
     assert_eq!(heap.arena.len(), 1 + ARENA_CELL_WORDS + STUB_WORDS);
     assert_eq!((heap.boxed, heap.outside.len()), (ARENA_CELL_WORDS, 1));
     assert_eq!(heap.data(short), &values[..ARENA_CELL_WORDS - 1]);
@@ -224,7 +229,7 @@ fn the_longest_arena_cell_is_254_words() {
     let stub = heap.tuple(&[Value::NIL]).expect("room");
     assert_eq!(stub, long, "a tuple of one element is two words too");
     let again = heap
-        .make(Kind::ArrayLeaf, &values[..ARENA_CELL_WORDS - 1])
+        .make(Kind::ArrayBranch, &values[..ARENA_CELL_WORDS - 1])
         .expect("room");
     assert_eq!(again, short);
     assert_eq!(heap.arena.len(), 1 + ARENA_CELL_WORDS + STUB_WORDS);
@@ -407,27 +412,6 @@ fn binary_data_is_data() {
     assert_eq!(heap.binary_data(short), &[16, 7]);
     assert_eq!(heap.binary_data(long), &[3; 400]);
     assert!(heap.binary_data(gone).is_empty());
-}
-
-/// A long node is copied word for word into a box of its own, and what
-/// it holds gets one more reference each, as for a short one.
-#[test]
-fn a_copy_of_a_long_node_shares_what_it_holds() {
-    let mut heap = Heap::default();
-    let held = heap.string(b"held").expect("room");
-    let mut data: Vec<u64> = (0..500).map(|i| int(i).bits()).collect();
-    data[499] = Value::cell(held).bits();
-    let node = heap.make(Kind::ArrayLeaf, &data).expect("room");
-    let copy = heap.copy(node).expect("room");
-    assert_ne!(copy, node);
-    assert_eq!(heap.outside.len(), 2);
-    assert_eq!(heap.data(copy), data.as_slice());
-    assert_eq!(heap.unique(held), Ok(false));
-    heap.release(node).expect("a live cell");
-    assert_eq!(heap.unique(held), Ok(true));
-    assert_eq!(heap.data(copy), data.as_slice());
-    heap.release(copy).expect("a live cell");
-    assert_eq!((heap.live(), heap.boxed), (0, 0));
 }
 
 /// A splice moves words between a short cell and a long one, either
@@ -693,7 +677,6 @@ fn a_cell_the_arena_does_not_have_is_a_dead_cell() {
         assert_eq!(heap.share(cell), Err(DeadCell));
         assert_eq!(heap.release(cell), Err(DeadCell));
         assert_eq!(heap.discard(cell), Err(DeadCell));
-        assert_eq!(heap.copy(cell), Err(Fault::DeadCell));
         assert!(heap.open::<1>(cell, ctors[0]).is_none());
     }
     assert_eq!(heap.arena, arena);
@@ -829,62 +812,6 @@ fn a_tuple_holds_its_elements() {
     assert_eq!(heap.live(), 0);
 }
 
-/// A copy of an array node is a new cell with the same kind and words
-/// and one holder. It adds one reference to each cell the node holds and
-/// to nothing else: a root's length and a branch's size table are plain
-/// numbers, even when one has the bits of a cell.
-#[test]
-fn a_copy_of_a_node_shares_what_the_node_holds_and_nothing_else() {
-    let mut heap = Heap::default();
-    let held = heap.string(b"held").expect("room");
-    let number = heap.string(b"only a number's bits").expect("room");
-    let (h, n) = (Value::cell(held).bits(), Value::cell(number).bits());
-    let nil = Value::NIL.bits();
-    for (kind, data) in [
-        (Kind::ArrayLeaf, vec![nil, h, nil]),
-        // Its height, two sizes, then two children.
-        (Kind::ArrayBranch, vec![n, n, n, h, nil]),
-        // Its length, height and offset, then the head, tree and tail.
-        (Kind::ArrayRoot, vec![n, n, n, nil, h, nil]),
-    ] {
-        let node = heap.make(kind, &data).expect("room");
-        heap.share(held).expect("a live cell");
-        let made = heap.made();
-        let copy = heap.copy(node).expect("room");
-        assert_ne!(copy, node);
-        assert_eq!(heap.made() - made, 1);
-        assert_eq!(heap.kind(copy), Some(kind));
-        assert_eq!(heap.data(copy), data.as_slice());
-        assert_eq!(heap.unique(copy), Ok(true));
-        assert_eq!(heap.unique(node), Ok(true));
-        // The string has its first holder and the node's. Giving up
-        // both nodes leaves just the first, so the copy held it once.
-        heap.release(node).expect("a live cell");
-        assert_eq!(heap.unique(held), Ok(false), "{kind:?}");
-        heap.release(copy).expect("a live cell");
-        assert_eq!(heap.unique(held), Ok(true), "{kind:?}");
-        assert_eq!(heap.unique(number), Ok(true), "{kind:?}");
-        assert_eq!(heap.live(), 2);
-    }
-    heap.release(held).expect("a live cell");
-    heap.release(number).expect("a live cell");
-    assert_eq!(heap.live(), 0);
-}
-
-/// A freed cell has nothing to copy. Asking makes no cell.
-#[test]
-fn a_copy_of_a_freed_cell_is_a_dead_cell() {
-    let mut heap = Heap::default();
-    let leaf = heap
-        .make(Kind::ArrayLeaf, &[Value::NIL.bits()])
-        .expect("room");
-    heap.release(leaf).expect("a live cell");
-    let made = heap.made();
-    assert_eq!(heap.copy(leaf), Err(Fault::DeadCell));
-    assert_eq!(heap.made(), made);
-    assert_eq!(heap.live(), 0);
-}
-
 /// A cell given up once more than it was held is found at the second
 /// release, which frees nothing and changes no count.
 #[test]
@@ -926,19 +853,6 @@ fn a_share_of_a_freed_cell_is_a_dead_cell() {
     let c = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
     assert_eq!(cell, b);
     assert_ne!(b, c);
-}
-
-/// A copy shares what the node holds, and stops when one of those cells has
-/// been freed behind the node's back.
-#[test]
-fn a_copy_of_a_node_that_holds_a_freed_cell_is_a_dead_cell() {
-    let mut heap = Heap::default();
-    let held = heap.string(b"held").expect("room");
-    let leaf = heap
-        .make(Kind::ArrayLeaf, &[Value::cell(held).bits()])
-        .expect("room");
-    heap.release(held).expect("a live cell");
-    assert_eq!(heap.copy(leaf), Err(Fault::DeadCell));
 }
 
 /// A cell whose count is too low is met twice while its holder is freed. The
@@ -1042,9 +956,9 @@ fn a_cell_made_in_freed_space_holds_only_its_own_words() {
     ] {
         let a = heap.make(Kind::Binary, &first).expect("room");
         heap.release(a).expect("a live cell");
-        let b = heap.make(Kind::ArrayLeaf, &second).expect("room");
+        let b = heap.make(Kind::ArrayBranch, &second).expect("room");
         assert_eq!(a, b);
-        assert_eq!(heap.kind(b), Some(Kind::ArrayLeaf));
+        assert_eq!(heap.kind(b), Some(Kind::ArrayBranch));
         assert_eq!(heap.data(b), second.as_slice());
         assert_eq!(heap.unique(b), Ok(true));
     }
@@ -1251,8 +1165,8 @@ fn the_raw_kinds_are_the_ones_with_nothing_to_give_up() {
 }
 
 /// A long cell's box is freed when the cell is. Its stub's header is
-/// zeroed like any other cell's, so a second release, a unique test and
-/// a copy all find it.
+/// zeroed like any other cell's, so a second release and a unique test
+/// both find it.
 #[test]
 fn a_second_release_of_a_long_cell_is_a_dead_cell() {
     let mut heap = Heap::default();
@@ -1260,7 +1174,6 @@ fn a_second_release_of_a_long_cell_is_a_dead_cell() {
     assert_eq!(heap.release(cell), Ok(()));
     assert_eq!(heap.release(cell), Err(DeadCell));
     assert_eq!(heap.unique(cell), Err(DeadCell));
-    assert_eq!(heap.copy(cell), Err(Fault::DeadCell));
     assert_eq!(heap.share(cell), Err(DeadCell));
     assert_eq!((heap.live(), heap.boxed), (0, 0));
     // The stub went on its free list once, and the box number on its
@@ -1576,9 +1489,8 @@ fn a_header_says_what_its_kind_holds() {
         (heap.make(Kind::Binary, &n), 0),
         (heap.make(Kind::Handle, &n), 0),
         (heap.make(Kind::BinarySlice, &n), 1),
-        (heap.make(Kind::ArrayLeaf, &n), 3),
-        (heap.make(Kind::ArrayRoot, &n), 0),
-        (heap.make(Kind::ArrayBranch, &n), 0),
+        (heap.make(Kind::ArrayRoot, &n), 3),
+        (heap.make(Kind::ArrayBranch, &n), 3),
         (heap.make(Kind::Map, &n), 0),
         (heap.make(Kind::MapNode, &n), 0),
         (heap.make(Kind::MapCollision, &n), 0),
@@ -1590,7 +1502,8 @@ fn a_header_says_what_its_kind_holds() {
         let cell = cell.expect("room");
         let h = heap.header(cell.index());
         assert_eq!((count(h), scan(h), size(h)), (1, want, 4), "{cell:?}");
-        assert_eq!(heap.values(cell).count(), if want == 3 { 3 } else { 0 });
+        let all = want == 3 && heap.kind(cell) != Some(Kind::ArrayRoot);
+        assert_eq!(heap.values(cell).count(), if all { 3 } else { 0 });
         let read = (0..9).filter_map(|i| heap.field(cell, i)).count();
         assert_eq!(read, want, "{cell:?}");
     }
@@ -1630,8 +1543,6 @@ fn a_cell_that_is_not_all_values_has_no_fields() {
             Kind::Range,
             Kind::Binary,
             Kind::Handle,
-            Kind::ArrayRoot,
-            Kind::ArrayBranch,
             Kind::Map,
             Kind::MapNode,
             Kind::MapCollision,
@@ -1752,7 +1663,7 @@ fn nothing_else_is_taken_apart() {
         heap.tuple(&pair),
         heap.closure(FuncIdx(3), &pair[..1]),
         heap.string(b"eight by"),
-        heap.make(Kind::ArrayLeaf, &words),
+        heap.make(Kind::ArrayBranch, &words),
         heap.make(Kind::BinarySlice, &words),
         heap.make(Kind::Handle, &[7]),
         heap.ctor(ctors[0], &[int(3); 300]),
@@ -1796,10 +1707,6 @@ fn a_cell_in_freed_space_is_named_by_what_it_is_now() {
     heap.release(long).expect("a live cell");
     let stub = heap.ctor(ctors[1], &[int(4); 260]).expect("room");
     assert_eq!((stub.index(), stub.variant()), (long.index(), 8));
-    // A copy of one is named as it is.
-    let copy = heap.copy(stub).expect("room");
-    assert_eq!(copy.variant(), 8);
-    assert_eq!(heap.ctor_of(copy), heap.ctor_of(stub));
 }
 
 /// A layout says of a cell what its header does, with any count, and of no cell
